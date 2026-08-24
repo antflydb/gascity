@@ -60,6 +60,9 @@ const (
 	ResourceSyscallListen Resource = "syscall_listen"
 	// ResourceTmux counts typed tmux test helpers, production constructors, and literal tmux process calls.
 	ResourceTmux Resource = "tmux"
+	// ResourceTestTarget counts declared go test invocation lines in tracked
+	// build-orchestration files (Makefile, GitHub Actions workflow YAML).
+	ResourceTestTarget Resource = "test_target"
 )
 
 var knownResources = map[Resource]struct{}{
@@ -75,6 +78,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceNetListenPacket: {},
 	ResourceSyscallListen:   {},
 	ResourceTmux:            {},
+	ResourceTestTarget:      {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -87,6 +91,9 @@ const (
 	ScopeUntagged Scope = "untagged"
 	// ScopeCmdGCUntagged selects untagged test files beneath cmd/gc.
 	ScopeCmdGCUntagged Scope = "cmd/gc+untagged"
+	// ScopeBuildTargets selects declared go test invocation lines in tracked
+	// build-orchestration files rather than Go test source.
+	ScopeBuildTargets Scope = "build_targets"
 )
 
 type baselineKey struct {
