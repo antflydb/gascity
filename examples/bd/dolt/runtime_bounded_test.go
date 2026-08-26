@@ -116,21 +116,66 @@ with open(os.environ["READY_MARKER"], "w") as f:
 time.sleep(10)
 `)
 
+	const (
+		runBoundedBound = 1 * time.Second
+		runBoundedGrace = 2 * time.Second
+		// Floor separating "run_bounded honored its grace" from "run_bounded
+		// returned early". Measured: the regression path returns at ~1.0s plus
+		// harness overhead, the starvation path at ~3.0s plus the same overhead.
+		graceHonoredFloor = 2500 * time.Millisecond
+	)
+
 	const maxAttempts = 3
-	var exitCode int
-	var out string
-	reachedReady := false
+	var (
+		exitCode     int
+		out          string
+		elapsed      time.Duration
+		reachedReady bool
+		sawMarker    bool
+	)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		_ = os.Remove(marker)
 		_ = os.Remove(ready)
+		start := time.Now()
 		exitCode, out = runRunBoundedUnderPython3Fallback(t, child, "MARKER_FILE="+marker, "READY_MARKER="+ready)
-		if _, err := os.Stat(ready); err == nil {
-			reachedReady = true
+		elapsed = time.Since(start)
+
+		if _, err := os.Stat(ready); err != nil {
+			// Child never reached signal.signal within the bound; this
+			// attempt proved nothing about the SIGTERM contract.
+			continue
+		}
+		reachedReady = true
+
+		if _, err := os.Stat(marker); err == nil {
+			sawMarker = true
 			break
 		}
+
+		// Ready, no marker. run_bounded must SIGTERM at the bound and only
+		// SIGKILL after the grace, so a child that never responds cannot
+		// come back before bound+grace. Returning sooner IS gascity#4823.
+		//
+		// Misclassification is safe in both directions: if extreme harness
+		// overhead ever pushed a genuine regression past graceHonoredFloor,
+		// this attempt is treated as starvation and retried, but the test
+		// still FAILS below via the !sawMarker branch once attempts are
+		// exhausted -- only the diagnostic wording changes. No
+		// misclassification can turn a regression into a PASS, so do not
+		// "tighten" this floor.
+		if elapsed < graceHonoredFloor {
+			t.Fatalf("run_bounded returned after %s without honoring its SIGTERM+grace contract: the child was ready and never wrote the marker, so run_bounded should have waited the full %s bound plus %s grace before SIGKILL (gascity#4823 regression)\noutput:\n%s",
+				elapsed, runBoundedBound, runBoundedGrace, out)
+		}
+		// Grace WAS honored and the ready child still could not be scheduled
+		// to run its handler. Host starvation, not a regression: retry.
 	}
 	if !reachedReady {
 		t.Fatalf("child never reached its SIGTERM handler installation within the bound after %d attempts (readiness marker never appeared); likely host load starved python3 interpreter startup, not a SIGTERM regression\noutput:\n%s", maxAttempts, out)
+	}
+	if !sawMarker {
+		t.Fatalf("child was ready and run_bounded honored its full %s grace on every one of %d attempts (last run took %s), yet the child never got scheduled to run its SIGTERM handler; likely host load, not a SIGTERM regression\noutput:\n%s",
+			runBoundedGrace, maxAttempts, elapsed, out)
 	}
 
 	if exitCode != 124 {
@@ -138,7 +183,7 @@ time.sleep(10)
 	}
 	got, err := os.ReadFile(marker)
 	if err != nil {
-		t.Fatalf("child was ready and still never received SIGTERM (marker file missing): %v\noutput:\n%s", err, out)
+		t.Fatalf("marker vanished after being observed: %v\noutput:\n%s", err, out)
 	}
 	if string(got) != "caught\n" {
 		t.Fatalf("marker file contents = %q, want %q", got, "caught\n")
