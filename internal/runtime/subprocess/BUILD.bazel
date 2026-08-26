@@ -19,6 +19,7 @@ go_library(
 go_test(
     name = "subprocess_test",
     srcs = [
+        "hangbudget_test.go",
         "meta_privacy_test.go",
         "seam_conformance_test.go",
         "seams_test.go",
