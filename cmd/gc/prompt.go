@@ -91,6 +91,15 @@ type PromptRenderResult struct {
 	Text    string
 	Version string
 	SHA     string
+
+	// Err is non-nil when the template failed to parse or execute. Text
+	// still carries the raw (unrendered) body in that case — useful for
+	// logging/debugging — but callers must check Err before treating Text
+	// as a usable rendered prompt. renderPrompt (the string-only wrapper)
+	// discards this field, so callers that need to distinguish failure
+	// from a legitimately empty or successfully-rendered prompt must call
+	// renderPromptWithMeta directly.
+	Err error
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -103,8 +112,9 @@ type PromptRenderResult struct {
 // the output after rendering. Returns empty string if templatePath is empty.
 // A template path that cannot be read also returns empty, after a warning to
 // stderr. On parse or execute error, logs a warning to stderr and returns the
-// raw text (graceful fallback).
-func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
+// raw text; callers that need to detect this failure (rather than treat it as
+// a usable prompt) must use renderPromptWithMeta.
+func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string { //nolint:unparam // store seam kept for parity with renderPromptWithMeta; wrapper signature intentionally unchanged
 	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
 }
 
@@ -203,6 +213,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 
@@ -214,6 +225,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 
