@@ -6879,7 +6879,7 @@ func TestReconcilerSilentRebaselineOnVersionMismatch(t *testing.T) {
 // compares it as same-version drift instead (TestReconcilerStillDrainsOnSameVersionRealDrift's
 // case) and drains the session. RED until the version bump lands.
 func TestReconcilerSilentRebaselineOnFingerprintVersionBump(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	rec := events.NewFake()
