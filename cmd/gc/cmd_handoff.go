@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -131,6 +133,12 @@ func handoffJSONSubject(args []string, auto bool) string {
 		return "context cycle"
 	}
 	return "HANDOFF: context cycle"
+}
+
+// cmdHandoff sends handoff mail and restarts the current controller-managed
+// session. Convenience wrapper over cmdHandoffWithForce with force=false.
+func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
+	return cmdHandoffWithForce(args, target, auto, hookFormat, false, stdout, stderr)
 }
 
 func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat string, force bool, stdout, stderr io.Writer) int {
@@ -274,16 +282,28 @@ func doHandoff(msgStore, sessStore beads.Store, rec events.Recorder, dops drainO
 func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
-	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
-	if !ok {
-		return handoffOutcome{code: 1}
-	}
-
-	restartable, pinned, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, pinned, instanceToken, sessionID, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
+	// A restartable session with a live instance token stages its own brief
+	// durably (invisible, but committed to the store) before any restart is
+	// requested, and only a later, differing instance token — proof a genuine
+	// successor incarnation exists — may release it. Without an instance
+	// token there is nothing to compare a successor's token against, so the
+	// message is sent immediately instead, matching the pre-staging behavior.
+	staged := restartable && instanceToken != ""
+	stagedForToken := ""
+	if staged {
+		stagedForToken = instanceToken
+	}
+
+	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stagedForToken, stderr)
+	if !ok {
+		return handoffOutcome{code: 1}
+	}
+
 	if !restartable {
 		if err := clearRestartRequest(sessStore, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -293,6 +313,20 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		return handoffOutcome{code: 0}
 	}
 
+	if staged {
+		if err := sessStore.SetMetadataBatch(sessionID, map[string]string{
+			handoffStageCommittedAtKey: time.Now().UTC().Format(time.RFC3339),
+			handoffStagedMessageIDKey:  b.ID,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc handoff: recording durable handoff stage: %v\n", err) //nolint:errcheck // best-effort stderr
+			return handoffOutcome{code: 1}
+		}
+		recordHandoffEvent(rec, events.SessionHandoffStaged, sessionAddress, sessionAddress, events.SessionHandoffStagedPayload{
+			SessionKey: sessionAddress,
+			MessageID:  b.ID,
+		})
+	}
+
 	// Pinned named sessions are kill-protected by the reconciler unless an
 	// explicit controller reset (continuation_reset_pending) is persisted
 	// through the worker boundary: without it, the reconciler's collateral-skip
@@ -300,7 +334,11 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 	// indefinitely. Persisting is therefore mandatory for pinned sessions. On a
 	// worker site the guard holds no runtime flag to set, so the bead marker is
 	// the whole request and is mandatory for every session. Everywhere else the
-	// runtime flag is primary and the bead write stays best-effort backup.
+	// runtime flag is primary and the bead write stays best-effort backup. A
+	// session whose marker is mandatory but cannot be persisted must roll the
+	// restart request back rather than leave a runtime flag set with no
+	// matching durable marker; the staged brief itself is left intact either
+	// way, so a later retry can still complete the handoff.
 	markerRequired, subject := pinned, "pinned session"
 	if err := dops.setRestartRequested(sessionName); err != nil {
 		if !restartFlagNotApplicable(err) {
@@ -310,13 +348,25 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		markerRequired, subject = true, "worker-site session"
 	}
 	if markerRequired {
+		failMarker := func(reason string) handoffOutcome {
+			if err := clearRestartRequest(sessStore, dops, sessionName); err != nil {
+				fmt.Fprintf(stderr, "gc handoff: rolling back restart request: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			if staged {
+				recordHandoffEvent(rec, events.SessionHandoffFailed, sessionAddress, sessionAddress, events.SessionHandoffFailedPayload{
+					SessionKey: sessionAddress,
+					Reason:     reason,
+				})
+			}
+			return handoffOutcome{code: 1}
+		}
 		if persistRestart == nil {
 			fmt.Fprintf(stderr, "gc handoff: %s %q has no restart persistence available; not requesting restart\n", subject, sessionName) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1}
+			return failMarker(subject + " has no restart persistence available")
 		}
 		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: could not persist restart marker for %s %q; not requesting restart: %v\n", subject, sessionName, err) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1}
+			return failMarker(err.Error())
 		}
 	} else if persistRestart != nil {
 		if err := persistRestart(); err != nil {
@@ -330,8 +380,38 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		Message: "handoff",
 	})
 
+	if staged {
+		recordHandoffEvent(rec, events.SessionHandoffRestartAccepted, sessionAddress, sessionAddress, events.SessionHandoffRestartAcceptedPayload{
+			SessionKey: sessionAddress,
+			MessageID:  b.ID,
+		})
+		fmt.Fprintf(stdout, "Handoff: staged brief %s, restart accepted (release deferred until a successor session starts)...\n", b.ID) //nolint:errcheck // best-effort stdout
+		return handoffOutcome{code: 0, restartRequested: true}
+	}
+
 	fmt.Fprintf(stdout, "Handoff: sent mail %s, requesting restart...\n", b.ID) //nolint:errcheck // best-effort stdout
 	return handoffOutcome{code: 0, restartRequested: true}
+}
+
+// recordHandoffEvent marshals payload and records it on rec under eventType,
+// with actor and subject both set to the session address involved. Marshal
+// failure or a nil recorder silently drops the event: the staged self-handoff
+// lifecycle these events describe is already durable in bead state, so a lost
+// event is a missed notification, not a lost fact.
+func recordHandoffEvent(rec events.Recorder, eventType, actor, subject string, payload events.Payload) {
+	if rec == nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	rec.Record(events.Event{
+		Type:    eventType,
+		Actor:   actor,
+		Subject: subject,
+		Payload: data,
+	})
 }
 
 // doHandoffAuto sends handoff mail to self without requesting restart.
@@ -340,7 +420,7 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
 		"priority:1",
-	}, stderr)
+	}, "", stderr)
 	if !ok {
 		return 1
 	}
@@ -357,7 +437,15 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 // (Type="message", thread label, extra labels, sender-route metadata) is
 // confined inside beadmail.Provider.SendHandoff. The returned mail.Message
 // carries the assigned ID for the caller's confirmation output.
-func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (mail.Message, bool) {
+//
+// stagedForToken stages the message instead of delivering it: when non-empty,
+// it is the session's current instance_token, recorded on the message so only
+// a later, differing (successor) incarnation can release it (see
+// releaseStagedSelfHandoffs). A staged message is marked durable-but-invisible
+// (mail.StagedHandoffLabel + mail.StagedMetadataKey) and skips the MailSent
+// event, which would otherwise announce delivery before any successor exists.
+// Pass "" for ordinary, immediately visible handoff mail.
+func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stagedForToken string, stderr io.Writer) (mail.Message, bool) {
 	subject := defaultSubject
 	if len(args) > 0 {
 		subject = args[0]
@@ -365,6 +453,9 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	var message string
 	if len(args) > 1 {
 		message = args[1]
+	}
+	if stagedForToken != "" {
+		extraLabels = append(extraLabels, mail.StagedHandoffLabel)
 	}
 
 	// Handoff intentionally constructs the concrete bead-backed provider rather
@@ -393,6 +484,16 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return mail.Message{}, false
 	}
+	if stagedForToken != "" {
+		if err := msgStore.SetMetadataBatch(msg.ID, map[string]string{
+			mail.StagedMetadataKey:         "true",
+			mail.StagedForTokenMetadataKey: stagedForToken,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc handoff: staging mail: %v\n", err) //nolint:errcheck // best-effort stderr
+			return mail.Message{}, false
+		}
+		return msg, true
+	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
 		Actor:   msg.From,
@@ -408,28 +509,32 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 // kill-protected named session (pinned). pinned mirrors the reconciler's own
 // pinnedConfiguredNamedSessionKillProtected predicate (isNamedSessionInfo &&
 // pin_awake == "true") so callers can predict whether the reconciler will
-// refuse a collateral kill absent an explicit controller reset. Both facts
-// come off the single bead read so callers needing both (gc handoff) do not
-// pay for a second store round-trip.
-func sessionRestartableByController(sessStore beads.Store, sessionName string) (restartable, pinned bool, err error) {
+// refuse a collateral kill absent an explicit controller reset. instanceToken
+// and sessionID are the session bead's own instance_token metadata and
+// resolved bead ID, returned alongside so a staged self-handoff (which must
+// be released only to a later, differing instance_token) doesn't need a
+// second store round-trip to learn them. All facts come off the single bead
+// read.
+func sessionRestartableByController(sessStore beads.Store, sessionName string) (restartable, pinned bool, instanceToken, sessionID string, err error) {
 	if sessStore == nil || sessionName == "" {
-		return true, false, nil
+		return true, false, "", "", nil
 	}
 	id, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return true, false, nil
+			return true, false, "", "", nil
 		}
-		return false, false, fmt.Errorf("resolving session %q: %w", sessionName, err)
+		return false, false, "", "", fmt.Errorf("resolving session %q: %w", sessionName, err)
 	}
 	b, err := sessStore.Get(id)
 	if err != nil {
-		return false, false, fmt.Errorf("loading session %q: %w", id, err)
+		return false, false, "", "", fmt.Errorf("loading session %q: %w", id, err)
 	}
+	instanceToken = strings.TrimSpace(b.Metadata["instance_token"])
 	if !isNamedSessionBead(b) {
-		return true, false, nil
+		return true, false, instanceToken, id, nil
 	}
-	return namedSessionMode(b) == "always", strings.TrimSpace(b.Metadata["pin_awake"]) == "true", nil
+	return namedSessionMode(b) == "always", strings.TrimSpace(b.Metadata["pin_awake"]) == "true", instanceToken, id, nil
 }
 
 func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName string) error {
@@ -467,7 +572,7 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {
-	restartable, _, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, _, _, _, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -488,7 +593,7 @@ func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, 
 		}
 	}
 
-	b, ok := createHandoffMail(msgStore, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
+	b, ok := createHandoffMail(msgStore, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, "", stderr)
 	if !ok {
 		return 1
 	}
