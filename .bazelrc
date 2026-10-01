@@ -182,8 +182,9 @@ test:integration --norun_validations
 test:integration-packages --config=integration
 test:integration-packages --jobs=128
 # The gating subset of //test/integration (bazel.yml's integration-smoke
-# lane): scripts/test-integration-shard's bdstore_tests and rest_smoke_tests,
-# which scripts/bazel_integration_smoke_test.go keeps this filter equal to.
+# lane): scripts/test-integration-shard's bdstore_conformance_tests,
+# bdstore_tests and rest_smoke_tests, which
+# scripts/bazel_integration_smoke_test.go keeps this filter equal to.
 test:integration-smoke --config=integration
 test:integration-smoke --test_filter=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$
 # The review-formula tests (review-formulas.yml: pushes to main, PRs
