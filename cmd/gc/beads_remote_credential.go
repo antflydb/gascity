@@ -16,10 +16,13 @@ import (
 // bd's ambient ladder (single city per server and process).
 //
 // An env:NAME source is read from gc's own environment and then moved out of
-// it (sequesterCityCredentialEnv), so no child process inherits NAME: gc
-// processes an agent runs cannot read it either. When cities share a
-// supervisor, or agents run gc against the remote store, prefer file: or
-// command:.
+// it (sequesterCityCredentialEnv), so no child process inherits NAME. gc sets
+// it again only for the city's own exec orders and agent sessions
+// (cityCredentialEnv), so a gc they run resolves the same source; another
+// city's children never see it. An order's output is redacted by variable
+// name, so config load requires NAME to mark itself as a secret. When cities
+// share a supervisor, prefer file: or command:: a child started before gc
+// moved NAME still holds it.
 
 // cityHTTPCredentials is the credential configuration one city load yields.
 type cityHTTPCredentials struct {
@@ -135,4 +138,20 @@ func cityCredentialEnvNames(creds cityHTTPCredentials) []string {
 // it as soon as a city's config is loaded, before the city spawns anything.
 func sequesterCityCredentialEnv(cityPath string, cfg *config.City) {
 	beads.SequesterRemoteCredentialEnv(cityCredentialEnvNames(cityHTTPCredentialsFromConfig(cityPath, cfg))...)
+}
+
+// cityCredentialEnv returns every variable cfg's env: credential sources name,
+// with its value from gc's vault (beads.RemoteCredentialEnvValue), for the
+// environment gc builds for one of the city's own exec orders or agent
+// sessions: a gc that child runs may open the city's or any rig's scope, and
+// resolves the same source. A name that was never exported is left out, so
+// that gc reports it. Never merge it into another city's children.
+func cityCredentialEnv(cityPath string, cfg *config.City) map[string]string {
+	env := map[string]string{}
+	for _, name := range cityCredentialEnvNames(cityHTTPCredentialsFromConfig(cityPath, cfg)) {
+		if value := beads.RemoteCredentialEnvValue(name); value != "" {
+			env[name] = value
+		}
+	}
+	return env
 }

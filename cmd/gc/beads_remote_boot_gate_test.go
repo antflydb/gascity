@@ -196,6 +196,9 @@ func TestRemoteBeadsBootGateStartsPastAnOutage(t *testing.T) {
 	if strings.Contains(warning, "native_transport") {
 		t.Fatalf("an outage's warning suggests native_transport: %q", warning)
 	}
+	if !strings.Contains(warning, "run gc restart once the server is reachable") {
+		t.Fatalf("warning %q, want the restart remedy for a scope whose store cannot open", warning)
+	}
 
 	stubRemoteBootGateVerdicts(t, nil, map[string]bool{cityPath: true, downRig: true, upRig: true})
 	stderr.Reset()

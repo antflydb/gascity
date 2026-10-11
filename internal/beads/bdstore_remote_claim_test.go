@@ -10,11 +10,12 @@ import (
 
 // The hook claims through `bd update <id> --claim --json` on the work store
 // and, on a not-found, escalates to its graph store (DESIGN C5 G8, S24-T).
-// Over http these are the two texts that decide it, verbatim from beads
-// feat/http-s6bcd (cmd/bd/update.go reportUpdateFailures and the
-// W-ClaimRequest.Wisp ledger row): the absent id must read as ErrNotFound,
-// and a wisp the server cannot claim must be the NAMED refusal, never a
-// not-found the class route would escalate on.
+// Over http these are the two texts that decide it, verbatim from the beads
+// go.mod pins: the absent id is what that bd prints against a real bd serve
+// (TestBdStoreClaimOverHTTPAgainstRealBdServe runs it), and must read as
+// ErrNotFound; a wisp a server without issues.update.claim cannot claim is the
+// client's W-ClaimRequest.Wisp ledger refusal, and must be the NAMED refusal,
+// never a not-found the class route would escalate on.
 
 // bdExitWithStderr mimics classifyBDExecResult: a failed bd run's error
 // carries stderr after the exit status.
@@ -23,8 +24,8 @@ func bdExitWithStderr(stderr string) error {
 }
 
 func TestBdStoreClaimOfAnAbsentIDOverHTTPIsNotFound(t *testing.T) {
-	stderr := "Issue e2e-absent9 not found\n" +
-		`{"error":"1 of 1 issues failed to update","failed":[{"id":"e2e-absent9","error":"issue not found"}],"schema_version":1}`
+	stderr := `Error resolving e2e-absent9: no issue found matching "e2e-absent9" (this backend resolves exact ids only; partial-id search is not available)` + "\n" +
+		`{"error":"1 of 1 issues failed to update","failed":[{"id":"e2e-absent9","error":"resolving issue: no issue found matching \"e2e-absent9\" (this backend resolves exact ids only; partial-id search is not available)"}],"schema_version":1}`
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, bdExitWithStderr(stderr)
 	}

@@ -1,15 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // writeCredentialCity writes a city whose workspace pins a fake bd, whose
@@ -292,24 +300,24 @@ func TestScopedBdStoreForCityCarriesTheScopesCredential(t *testing.T) {
 // the scope's own bd child still gets its token through BEADS_HTTP_TOKEN.
 func TestCityConfigLoadMovesEnvCredentialOutOfTheEnvironment(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("SEQ_CITY_BEARER", "bearer-seq-city")
-	t.Setenv("SEQ_RIG_BEARER", "bearer-seq-rig")
+	t.Setenv("SEQ_CITY_TOKEN", "bearer-seq-city")
+	t.Setenv("SEQ_RIG_TOKEN", "bearer-seq-rig")
 	installCityRemoteCredentialLookup(t)
 	childEnv := captureBdChildEnv(t)
-	city := writeCredentialCity(t, "[beads]\ncredential = \"env:SEQ_CITY_BEARER\"\n",
-		"[[rigs]]\nname = \"own\"\npath = \"rigs/own\"\nbeads_credential = \"env:SEQ_RIG_BEARER\"\n")
+	city := writeCredentialCity(t, "[beads]\ncredential = \"env:SEQ_CITY_TOKEN\"\n",
+		"[[rigs]]\nname = \"own\"\npath = \"rigs/own\"\nbeads_credential = \"env:SEQ_RIG_TOKEN\"\n")
 
 	if _, err := cityCredentialProbe(city); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"SEQ_CITY_BEARER", "SEQ_RIG_BEARER"} {
+	for _, name := range []string{"SEQ_CITY_TOKEN", "SEQ_RIG_TOKEN"} {
 		if _, ok := os.LookupEnv(name); ok {
 			t.Errorf("%s still in the process environment after the city config load", name)
 		}
 	}
 	// What any child process gc spawns inherits now: the raw process env (the
-	// runtime providers) and the filtered bd env alike. The names carry no
-	// sensitive-key marker, so only the sequestration keeps them out.
+	// runtime providers), which only the sequestration keeps them out of, and
+	// the filtered bd env, which also drops them by their secret-marked names.
 	for _, entry := range append(os.Environ(), mergeRuntimeEnv(os.Environ(), nil)...) {
 		if strings.Contains(entry, "bearer-seq") {
 			t.Errorf("a child env inherits an env: credential (%s)", strings.SplitN(entry, "=", 2)[0])
@@ -320,5 +328,218 @@ func TestCityConfigLoadMovesEnvCredentialOutOfTheEnvironment(t *testing.T) {
 	}
 	if got := childEnv(city)["BEADS_HTTP_TOKEN"]; got != "127.0.0.1:9=bearer-seq-city" {
 		t.Errorf("city bd child BEADS_HTTP_TOKEN = %q, want its own token after sequestration", got)
+	}
+}
+
+// loadCredentialCityConfig loads the city.toml a credential fixture wrote, as
+// the controller holds it.
+func loadCredentialCityConfig(t *testing.T, cityPath string) *config.City {
+	t.Helper()
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading %s: %v", cityPath, err)
+	}
+	return cfg
+}
+
+// credentialFixtureOrder is a minimal city-scoped exec order.
+var credentialFixtureOrder = orders.Order{Name: "sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+func credentialFixtureOrderEnv(t *testing.T, cityPath string, cfg *config.City, order orders.Order) map[string]string {
+	t.Helper()
+	env, err := orderExecEnvWithError(cityPath, cfg, execStoreTarget{ScopeRoot: cityPath, ScopeKind: "city", Prefix: "pc"}, order, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError(%s): %v", cityPath, err)
+	}
+	return listToMap(env)
+}
+
+func credentialFixtureSessionEnv(t *testing.T, cityPath string, cfg *config.City, agent *config.Agent) TemplateParams {
+	t.Helper()
+	params := &agentBuildParams{
+		cityName:   filepath.Base(cityPath),
+		cityPath:   cityPath,
+		city:       cfg,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  map[string]string{},
+		stderr:     io.Discard,
+	}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(%s): %v", agent.Name, err)
+	}
+	return tp
+}
+
+// TestCityOwnOrdersAndSessionsGetItsSequesteredEnvCredential: once gc moves
+// an env: source's variable out of its own environment, the city's own exec
+// orders and agent sessions get every one of the city's back (a gc they run
+// may open the city's or any rig's scope), so that gc resolves the same
+// source. Another city's never reach them, the bd env base does not carry
+// them (a bd child gets the token itself), an [order.env] or [agent.env] entry
+// still overrides them, and they stay out of the operator env the session
+// fingerprint reads.
+func TestCityOwnOrdersAndSessionsGetItsSequesteredEnvCredential(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("PROJ_CITY_TOKEN", "bearer-proj-city")
+	t.Setenv("PROJ_RIG_TOKEN", "bearer-proj-rig")
+	t.Setenv("PROJ_OTHER_TOKEN", "bearer-proj-other")
+	installCityRemoteCredentialLookup(t)
+	city := writeCredentialCity(t, "[beads]\ncredential = \"env:PROJ_CITY_TOKEN\"\n",
+		"[[rigs]]\nname = \"own\"\npath = \"rigs/own\"\nbeads_credential = \"env:PROJ_RIG_TOKEN\"\n")
+	other := writeCredentialCity(t, "[beads]\ncredential = \"env:PROJ_OTHER_TOKEN\"\n", "")
+	cityCfg, otherCfg := loadCredentialCityConfig(t, city), loadCredentialCityConfig(t, other)
+	sequesterCityCredentialEnv(city, cityCfg)
+	sequesterCityCredentialEnv(other, otherCfg)
+	for _, name := range []string{"PROJ_CITY_TOKEN", "PROJ_RIG_TOKEN", "PROJ_OTHER_TOKEN"} {
+		if _, ok := os.LookupEnv(name); ok {
+			t.Fatalf("%s still in the process environment after the city config load", name)
+		}
+	}
+	own := map[string]string{"PROJ_CITY_TOKEN": "bearer-proj-city", "PROJ_RIG_TOKEN": "bearer-proj-rig"}
+	carriesOnly := func(what string, env map[string]string, want map[string]string, foreign ...string) {
+		t.Helper()
+		for name, value := range want {
+			if got := env[name]; got != value {
+				t.Errorf("%s: %s = %q, want %q", what, name, got, value)
+			}
+		}
+		for key, value := range env {
+			for _, token := range foreign {
+				if strings.Contains(value, token) {
+					t.Errorf("%s: env[%s] carries %s", what, key, token)
+				}
+			}
+		}
+	}
+
+	carriesOnly("city order", credentialFixtureOrderEnv(t, city, cityCfg, credentialFixtureOrder), own, "bearer-proj-other")
+	carriesOnly("other city's order", credentialFixtureOrderEnv(t, other, otherCfg, credentialFixtureOrder),
+		map[string]string{"PROJ_OTHER_TOKEN": "bearer-proj-other"}, "bearer-proj-city", "bearer-proj-rig")
+	scoped := credentialFixtureOrder
+	scoped.Env = map[string]string{"PROJ_CITY_TOKEN": "order-scoped"}
+	carriesOnly("order with its own [order.env] entry", credentialFixtureOrderEnv(t, city, cityCfg, scoped),
+		map[string]string{"PROJ_CITY_TOKEN": "order-scoped", "PROJ_RIG_TOKEN": "bearer-proj-rig"}, "bearer-proj-city")
+
+	base, err := bdRuntimeEnvWithError(city)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+	carriesOnly("bd env base", base, nil, "bearer-proj")
+
+	session := credentialFixtureSessionEnv(t, city, cityCfg, &config.Agent{Name: "worker"})
+	carriesOnly("city session", session.Env, own, "bearer-proj-other")
+	carriesOnly("city session operator env", session.OperatorEnv, nil, "bearer-proj")
+	carriesOnly("other city's session", credentialFixtureSessionEnv(t, other, otherCfg, &config.Agent{Name: "worker"}).Env,
+		map[string]string{"PROJ_OTHER_TOKEN": "bearer-proj-other"}, "bearer-proj-city", "bearer-proj-rig")
+	denied := credentialFixtureSessionEnv(t, city, cityCfg, &config.Agent{Name: "denied", Env: map[string]string{"PROJ_CITY_TOKEN": ""}})
+	carriesOnly("session whose [agent.env] blanks the city's name", denied.Env,
+		map[string]string{"PROJ_CITY_TOKEN": "", "PROJ_RIG_TOKEN": "bearer-proj-rig"}, "bearer-proj-city")
+}
+
+// TestOrderChildGCResolvesTheCitysSequesteredEnvCredential: an exec order
+// that runs gc against the city's remote store (the core pack's maintenance
+// scripts do) still resolves the city's env: source after gc moved the
+// variable out of its own environment: that gc hands its bd child the city's
+// token, scoped to the server.
+func TestOrderChildGCResolvesTheCitysSequesteredEnvCredential(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("CHILD_GC_TOKEN", "bearer-child-gc")
+	installCityRemoteCredentialLookup(t)
+	dump := filepath.Join(t.TempDir(), "bd-env")
+	city := writeEnvDumpingCredentialCity(t, "[beads]\ncredential = \"env:CHILD_GC_TOKEN\"\n", dump)
+	cfg := loadCredentialCityConfig(t, city)
+	sequesterCityCredentialEnv(city, cfg)
+	if _, ok := os.LookupEnv("CHILD_GC_TOKEN"); ok {
+		t.Fatal("CHILD_GC_TOKEN still in the process environment after the city config load")
+	}
+
+	orderEnv, err := orderExecEnvWithError(city, cfg, execStoreTarget{ScopeRoot: city, ScopeKind: "city", Prefix: "pc"}, credentialFixtureOrder, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError: %v", err)
+	}
+	gc := reexecGCTestBinaryForTests(t)
+	out, err := shellExecRunner(context.Background(), shellSingleQuote(gc)+" bd list --json", city, orderEnv)
+	if err != nil {
+		t.Fatalf("the order's gc bd list: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("the order's gc never ran bd: %v\n%s", err, out)
+	}
+	bdEnv := listToMap(strings.Split(strings.TrimSpace(string(data)), "\n"))
+	if got := bdEnv["BEADS_HTTP_TOKEN"]; got != "127.0.0.1:9=bearer-child-gc" {
+		t.Errorf("the order's gc gave its bd child BEADS_HTTP_TOKEN = %q, want the city's token scoped to 127.0.0.1:9", got)
+	}
+}
+
+// TestOrderRunAndDispatchRedactTheCitysProjectedEnvCredential: an exec order
+// that prints the city's projected env: credential never shows it, whether
+// `gc order run` runs it (failing or succeeding) or the controller dispatches
+// it. gc moved the value out of its own environment, so only the order's own
+// env, which carries it under its secret-marked name, can redact it.
+func TestOrderRunAndDispatchRedactTheCitysProjectedEnvCredential(t *testing.T) {
+	const secret = "bearer-redact-city"
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("REDACT_CITY_TOKEN", secret)
+	installCityRemoteCredentialLookup(t)
+	city := writeCredentialCity(t, "[beads]\ncredential = \"env:REDACT_CITY_TOKEN\"\n", "")
+	cfg := loadCredentialCityConfig(t, city)
+	sequesterCityCredentialEnv(city, cfg)
+
+	for _, tc := range []struct {
+		name, exec string
+		wantCode   int
+	}{
+		{"failing gc order run", `printf '%s\n' "$REDACT_CITY_TOKEN"; exit 1`, 1},
+		{"succeeding gc order run", `printf '%s\n' "$REDACT_CITY_TOKEN"`, 0},
+	} {
+		order := credentialFixtureOrder
+		order.Exec = tc.exec
+		var stdout, stderr bytes.Buffer
+		if got := doOrderRunExecResult(order, city, cfg, nil, &stdout, &stderr).code; got != tc.wantCode {
+			t.Fatalf("%s: exit = %d, want %d; stdout=%q stderr=%q", tc.name, got, tc.wantCode, stdout.String(), stderr.String())
+		}
+		if out := stdout.String() + stderr.String(); strings.Contains(out, secret) || !strings.Contains(out, execenv.Redacted) {
+			t.Errorf("%s: output = %q, want the printed credential redacted", tc.name, out)
+		}
+	}
+
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{Title: "order:sweep", Labels: []string{"order-run:sweep", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	printsCredential := func(_ context.Context, _, _ string, env []string) ([]byte, error) {
+		value := listToMap(env)["REDACT_CITY_TOKEN"]
+		return []byte("token " + value + "\n"), fmt.Errorf("rejected %s", value)
+	}
+	var rec memRecorder
+	var stderr bytes.Buffer
+	mad := buildOrderDispatcherFromListExec([]orders.Order{credentialFixtureOrder}, store, nil, printsCredential, &rec).(*memoryOrderDispatcher)
+	mad.cfg, mad.stderr = cfg, &stderr
+	logs := captureCmdOrderLogs(t, func() {
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}),
+			execStoreTarget{ScopeRoot: city, ScopeKind: "city", Prefix: "pc"}, credentialFixtureOrder, city, tracking.ID, nil)
+	})
+	if out := logs + stderr.String(); strings.Contains(out, secret) || !strings.Contains(out, execenv.Redacted) {
+		t.Errorf("dispatched order logs = %q, want the printed credential redacted", out)
+	}
+	sawFailed := false
+	for _, event := range rec.events {
+		sawFailed = sawFailed || event.Type == events.OrderFailed
+		if strings.Contains(event.Message, secret) {
+			t.Errorf("event %s carries the credential: %q", event.Type, event.Message)
+		}
+	}
+	if !sawFailed {
+		t.Errorf("events = %#v, want an %s", rec.events, events.OrderFailed)
 	}
 }

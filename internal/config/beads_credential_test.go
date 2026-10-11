@@ -114,3 +114,70 @@ bd_compatibility = "bd-1.0.5"
 		t.Fatalf("credential = %q allow = %v, want both preserved across the fragment", cfg.Beads.Credential, cfg.Beads.AllowInsecureCredential)
 	}
 }
+
+// TestBeadsCredentialEnvNameMustMarkASecret: gc sets an env: source's variable
+// again in the city's own exec orders and agent sessions, and their output,
+// errors and events are redacted by variable name (execenv.IsSensitiveKey), so
+// a name that does not mark itself as a secret fails config load, through
+// Parse and the composed load alike, without echoing the name (a token pasted
+// after env: would otherwise be printed). A controller-only variable is
+// refused too: gc never passes one to a child.
+func TestBeadsCredentialEnvNameMustMarkASecret(t *testing.T) {
+	const (
+		pasted         = "ghp16C7e42F292c6912E7710c838347Ae178B4a"
+		notSecret      = "must mark it as a secret"
+		controllerOnly = "controller-only"
+	)
+	city := func(name string) string {
+		return "[workspace]\nname = \"t\"\n[beads]\ncredential = \"env:" + name + "\"\n"
+	}
+	rig := func(name string) string {
+		return "[workspace]\nname = \"t\"\n[[rigs]]\nname = \"r\"\npath = \"/r\"\nbeads_credential = \"env:" + name + "\"\n"
+	}
+	for name, tc := range map[string]struct{ body, refusal, unechoed string }{
+		"city":                 {city("BEADS_BEARER"), notSecret, "BEARER"},
+		"rig":                  {rig("RIG_BEARER"), notSecret, "BEARER"},
+		"pasted city":          {city(pasted), notSecret, pasted},
+		"pasted rig":           {rig(pasted), notSecret, pasted},
+		"controller-only city": {city("GC_CONTROLLER_TOKEN"), controllerOnly, "GC_CONTROLLER_TOKEN"},
+		"controller-only rig":  {rig("GC_CONTROLLER_TOKEN"), controllerOnly, "GC_CONTROLLER_TOKEN"},
+	} {
+		_, err := loadCredentialCity(t, map[string]string{"/city/city.toml": tc.body})
+		if err == nil || !strings.Contains(err.Error(), tc.refusal) {
+			t.Fatalf("%s: load error = %v, want a refusal containing %q", name, err, tc.refusal)
+		}
+		if strings.Contains(err.Error(), tc.unechoed) {
+			t.Fatalf("%s: load error %q echoes the variable name", name, err)
+		}
+		if _, err := Parse([]byte(tc.body)); err == nil || !strings.Contains(err.Error(), tc.refusal) {
+			t.Fatalf("%s: Parse error = %v, want a refusal containing %q", name, err, tc.refusal)
+		}
+	}
+	cfg, err := loadCredentialCity(t, map[string]string{"/city/city.toml": `
+[workspace]
+name = "t"
+
+[beads]
+credential = "env:BEADS_HTTP_TOKEN"
+
+[[rigs]]
+name = "lower"
+path = "/lower"
+beads_credential = "env:rig_api_key"
+
+[[rigs]]
+name = "file"
+path = "/file"
+beads_credential = "file:/run/secrets/bearer"
+`})
+	if err != nil {
+		t.Fatalf("secret-marked names and a file source: %v", err)
+	}
+	if rig, ok, err := BeadsCredentialFor(cfg, &cfg.Rigs[0]); err != nil || !ok || rig.Source.Env != "rig_api_key" {
+		t.Fatalf("lower-case secret-marked rig = %+v ok=%v err=%v", rig, ok, err)
+	}
+	cfg.Beads.Credential = "env:BEADS_BEARER"
+	if _, _, err := BeadsCredentialFor(cfg, nil); err == nil || !strings.Contains(err.Error(), notSecret) {
+		t.Fatalf("BeadsCredentialFor on an unvalidated config = %v, want the secret-name refusal", err)
+	}
+}

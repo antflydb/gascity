@@ -1,10 +1,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/credsource"
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/processenv"
 )
 
 // validateBeadsCredential rejects a [beads] credential that is not one of the
@@ -13,7 +16,7 @@ import (
 // send some other credential to this city's server. The error never echoes
 // the configured value.
 func validateBeadsCredential(b BeadsConfig) error {
-	if _, err := credsource.Parse(b.Credential); err != nil {
+	if _, err := parseBeadsCredential(b.Credential); err != nil {
 		return fmt.Errorf("beads.credential: %w", err)
 	}
 	return nil
@@ -29,11 +32,35 @@ func validateRigBeadsCredentials(rigs []Rig) error {
 		if strings.TrimSpace(*r.BeadsCredential) == "" {
 			return fmt.Errorf("rig %q beads_credential: empty (remove the key to use the city's credential)", r.Name)
 		}
-		if _, err := credsource.Parse(*r.BeadsCredential); err != nil {
+		if _, err := parseBeadsCredential(*r.BeadsCredential); err != nil {
 			return fmt.Errorf("rig %q beads_credential: %w", r.Name, err)
 		}
 	}
 	return nil
+}
+
+// parseBeadsCredential parses a [beads] credential or a rig beads_credential.
+// gc sets an env:NAME source's variable again in the city's own exec orders
+// and agent sessions, so a gc they run resolves the same source. NAME must
+// therefore mark itself as a secret (execenv.IsSensitiveKey), because an
+// order's output, errors and events are redacted by variable name, and must
+// not be a controller-only variable, which gc never passes to a child. The
+// error never echoes NAME, which may be a token pasted after env:.
+func parseBeadsCredential(raw string) (credsource.Source, error) {
+	src, err := credsource.Parse(raw)
+	if err != nil {
+		return credsource.Source{}, err
+	}
+	if src.Kind != credsource.KindEnv {
+		return src, nil
+	}
+	if !execenv.IsSensitiveKey(src.Env) {
+		return credsource.Source{}, errors.New("env: the variable name must mark it as a secret (for example by containing TOKEN, SECRET, PASSWORD, CREDENTIAL or API_KEY), because gc passes it to the city's own orders and agents and redacts an order's output by variable name (the name is not echoed)")
+	}
+	if processenv.IsControllerOnlyEnv(src.Env) {
+		return credsource.Source{}, errors.New("env: names a controller-only variable, which gc never passes to the city's orders and agents (the name is not echoed)")
+	}
+	return src, nil
 }
 
 // BeadsCredentialSetting is the effective remote beads credential for one
@@ -57,7 +84,7 @@ type BeadsCredentialSetting struct {
 // load, so a parse error here means an unvalidated config was handed in.
 func BeadsCredentialFor(city *City, rig *Rig) (BeadsCredentialSetting, bool, error) {
 	if rig != nil && rig.BeadsCredential != nil {
-		src, err := credsource.Parse(*rig.BeadsCredential)
+		src, err := parseBeadsCredential(*rig.BeadsCredential)
 		if err != nil {
 			return BeadsCredentialSetting{}, false, fmt.Errorf("rig %q beads_credential: %w", rig.Name, err)
 		}
@@ -72,7 +99,7 @@ func BeadsCredentialFor(city *City, rig *Rig) (BeadsCredentialSetting, bool, err
 	if city == nil {
 		return BeadsCredentialSetting{}, false, nil
 	}
-	src, err := credsource.Parse(city.Beads.Credential)
+	src, err := parseBeadsCredential(city.Beads.Credential)
 	if err != nil {
 		return BeadsCredentialSetting{}, false, fmt.Errorf("beads.credential: %w", err)
 	}

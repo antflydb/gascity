@@ -66,9 +66,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "6c1848a77e52839303ab16fdb02d2ad3fc5e4f1f"
-		bdSourceSHA256 = "252531e1987b511b5606d71cf9f690e429c8abb94bfd4296047bcf208483eca1"
-		bdBuild        = "6c1848a77e5"
+		bdSourceRef    = "c4e667cb14c3c29a420005e0ec029a0882c6ebc3"
+		bdSourceSHA256 = "3c6c53b15658e6bd994cd7758349c832dc3f45136a5690c9a438be8e2ca190d9"
+		bdBuild        = "c4e667cb14c"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		thriftVersion  = "0.24.0"
@@ -86,9 +86,9 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	// (TestBDVersionPins), so that is the only string the grep can match. It
 	// is BD_CURRENT_VERSION whenever BD_CURRENT_REF is a release tag commit
 	// (TestBDVersionPins enforces that), and differs from it only while the
-	// pin is a beads main pseudo-version: main declares 1.3.0 while the
-	// archive cell is the v1.3.1 tarball, and anchoring on BD_CURRENT_VERSION
-	// there would pass this test and fail the docker build. deps.env BD_VERSION
+	// pin is a beads main pseudo-version: main declares 1.3.0 while
+	// BD_CURRENT_VERSION stays on the published v1.3.1, and anchoring on
+	// BD_CURRENT_VERSION there would pass this test and fail the docker build. deps.env BD_VERSION
 	// is a different role again -- the published tarball CI installs -- and
 	// it legitimately lags whenever the current cell is pinned to a commit
 	// upstream never cut a release for.

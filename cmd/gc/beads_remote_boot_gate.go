@@ -26,9 +26,11 @@ import (
 // credential) refuses the city's start with a *beads.RemoteCapabilityGateError
 // naming the scope, the check and its remedy, and the supervisor backs such a
 // city off as a structural init failure. A server that cannot be REACHED at
-// boot (*beads.RemoteScopeUnreachableError) is a warning naming the scope: the
-// city starts, and the store open deals with the outage. gc doctor reports the
-// same verdicts under the check name wire_compat.
+// boot (*beads.RemoteScopeUnreachableError) is a warning naming the scope and
+// the remedy: the city starts, but nothing retries the store open, so a store
+// that cannot open stays unavailable until gc restart (or a reload of a
+// changed config) opens it again. gc doctor reports the same verdicts under
+// the check name wire_compat.
 //
 // Under native_transport = "off" (or the deprecated GC_BEADS_FORCE_FALLBACK)
 // no scope opens natively, so the gate has nothing to protect and does not

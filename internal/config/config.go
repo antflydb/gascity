@@ -675,8 +675,9 @@ type Rig struct {
 	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 	// BeadsCredential overrides [beads] credential for this rig's remote beads
 	// scope: "env:NAME", "command:<argv>" or "file:<path>", never the token
-	// itself. Use it for a rig attached to a different server than the city,
-	// or with its own token.
+	// itself, with the same rules as [beads] credential (an env: NAME must
+	// mark itself as a secret). Use it for a rig attached to a different
+	// server than the city, or with its own token.
 	BeadsCredential *string `toml:"beads_credential,omitempty"`
 	// BeadsAllowInsecureCredential is [beads] allow_insecure_credential for
 	// this rig's own beads_credential. Default false. It has no effect
@@ -1499,10 +1500,14 @@ type BeadsConfig struct {
 	// BEADS_HTTP_TOKEN_COMMAND and credentials-file ladder are ignored. An
 	// env or file source is re-read on every use, a command's token is
 	// reused for a minute, and a 401 re-reads any source at once. gc moves
-	// an env: variable out of its own environment, so no child process (an
-	// agent, a bd subprocess, a gc run by an agent) inherits it: prefer
-	// file: or command: when cities share a supervisor or agents run gc
-	// against the remote store. It authorizes the city scope and
+	// an env: variable out of its own environment and sets it again only for
+	// this city's own exec orders and agent sessions, so a gc they run
+	// resolves the same source and no other child process inherits it. An
+	// order's output is redacted by variable name, so NAME must mark itself
+	// as a secret (for example by containing TOKEN, SECRET, PASSWORD,
+	// CREDENTIAL or API_KEY) and must not be GC_CONTROLLER_TOKEN. Prefer
+	// file: or command: when cities share a supervisor: a child started
+	// before gc moved NAME still holds it. It authorizes the city scope and
 	// every rig on the same server (scheme, host and port) that sets no
 	// beads_credential of its own; gc refuses to send it to another server.
 	// Unset keeps the ambient ladder, which is keyed by host and port and is

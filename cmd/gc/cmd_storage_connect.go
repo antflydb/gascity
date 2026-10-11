@@ -60,7 +60,11 @@ the per-user .beads/http_target.json sidecar.
 
 A scope that already holds a local workspace is switched only with
 --convert-workspace (bd connect --clear restores it); one attached to another
-server or project is re-pinned only with --retarget.`,
+server or project is re-pinned only with --retarget.
+
+Stop the city's controller first (gc stop) and start it again afterwards: a
+live controller keeps serving the backend it started with, so the command
+refuses while one is running.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			request, err := resolveStorageOperatorRequest()
 			if err != nil {
@@ -88,6 +92,13 @@ func doStorageConnect(ctx context.Context, cityPath string, cfg *config.City, ra
 	scopeRoot, label, err := storageConnectScope(cityPath, cfg, opts.Rig)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// A live controller holds the city's stores open on the backend it started
+	// with and would keep serving it after the attach, splitting the city
+	// between two backends, the same refusal gc storage migrate makes.
+	if pid := infraMigrationForeignControllerPID(cityPath); pid != 0 {
+		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and keeps its stores open on the backend it started with, so it would not see the new attachment. Stop it (%s), run this again, then start the city (gc start)\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if ca := strings.TrimSpace(opts.CAFile); ca != "" && !filepath.IsAbs(ca) {

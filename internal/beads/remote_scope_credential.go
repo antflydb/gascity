@@ -457,8 +457,10 @@ func (c *sourceCredential) Refresh(ctx context.Context) (bool, error) {
 }
 
 // credentialEnvVault holds the values of env: credential sources moved out of
-// the process environment (sequesterCredentialEnv). Names and values never
-// leave it except as a scope's resolved token.
+// the process environment (sequesterCredentialEnv), keyed by every name it has
+// looked at ("" for one that was unset). Values leave it only as a scope's
+// resolved token, or through RemoteCredentialEnvValue into the environment gc
+// builds for one city's own children.
 var (
 	credentialEnvVaultMu sync.Mutex
 	credentialEnvVault   = map[string]string{}
@@ -467,11 +469,13 @@ var (
 // SequesterRemoteCredentialEnv moves each named variable (the NAME of an
 // env:NAME credential source) out of the process environment into gc's
 // private vault, so no child process gc spawns from then on (agents, bd
-// subprocesses, hooks, any runtime provider that inherits os.Environ()) sees
-// it: in a supervisor running several cities, a token sourced from the
-// supervisor's environment must not reach another city's children, nor
-// this city's agents. The scope's own bd children still get the token, scoped
-// to their server, through BEADS_HTTP_TOKEN.
+// subprocesses, hooks, any runtime provider that inherits os.Environ())
+// inherits it: in a supervisor running several cities, a token sourced from
+// the supervisor's environment must not reach another city's children. The
+// scope's own bd children still get the token, scoped to their server, through
+// BEADS_HTTP_TOKEN, and gc sets the variable again, from the vault
+// (RemoteCredentialEnvValue), for the owning city's own exec orders and agent
+// sessions, so a gc they run resolves the same source.
 //
 // The composition root calls it as soon as a city's config is read, before
 // that city spawns anything; resolving an env: source calls it too. A child
@@ -484,28 +488,56 @@ func SequesterRemoteCredentialEnv(names ...string) {
 	}
 }
 
+// RemoteCredentialEnvValue returns the value of name, the NAME of an env:NAME
+// credential source, moving it out of the process environment as
+// SequesterRemoteCredentialEnv does ("" when it was never exported). It is for
+// the environment gc builds for the owning city's own children only.
+func RemoteCredentialEnvValue(name string) string {
+	return sequesterCredentialEnv(name)
+}
+
 // sequesterCredentialEnv returns name's value, moving it out of the process
 // environment on first sight. A value re-exported later (an operator's, or a
-// test's) replaces the vaulted one and is moved out the same way. It reads
-// under the env mutex every Dolt open's projection holds.
+// test's) replaces the vaulted one and is moved out the same way. Moving a
+// value takes the env mutex every Dolt open's projection holds; a name already
+// looked at and not exported since is read under the vault mutex alone, so
+// the read every request makes never waits on an open.
 func sequesterCredentialEnv(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return ""
+	}
+	if value, ok := vaultedCredentialEnv(name); ok {
+		return value
 	}
 	nativeDoltOpenEnvMu.Lock()
 	defer nativeDoltOpenEnvMu.Unlock()
 	credentialEnvVaultMu.Lock()
 	defer credentialEnvVaultMu.Unlock()
-	if value, ok := os.LookupEnv(name); ok {
+	value, exported := os.LookupEnv(name)
+	if exported {
 		_ = os.Unsetenv(name)
-		if value != "" {
-			credentialEnvVault[name] = value
-			return value
-		}
-		delete(credentialEnvVault, name)
-		return ""
+	} else {
+		value = credentialEnvVault[name]
 	}
-	return credentialEnvVault[name]
+	credentialEnvVault[name] = value
+	return value
+}
+
+// vaultedCredentialEnv answers, under the vault mutex alone, a name the vault
+// has already looked at and that is not exported again. A projection that
+// withholds an exported name hides it only for its window, during which this
+// answers the vaulted value.
+func vaultedCredentialEnv(name string) (string, bool) {
+	credentialEnvVaultMu.Lock()
+	defer credentialEnvVaultMu.Unlock()
+	value, seen := credentialEnvVault[name]
+	if !seen {
+		return "", false
+	}
+	if _, exported := os.LookupEnv(name); exported {
+		return "", false
+	}
+	return value, true
 }
 
 // resetCredentialEnvVault forgets every vaulted value (tests).

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,5 +93,31 @@ func TestStorageConnectRefusesAnUnknownRig(t *testing.T) {
 	}
 	if len(*requests) != 0 {
 		t.Fatalf("an unknown rig reached beads connect: %+v", *requests)
+	}
+}
+
+// TestStorageConnectRefusesWhileAControllerIsLive: a live controller holds the
+// city's stores open on the backend it booted with, so an attach under it
+// would split the city (the controller keeps reading and writing the old
+// backend while every later command reaches the new one). The connect refuses
+// with the stop remedy before beads writes anything.
+func TestStorageConnectRefusesWhileAControllerIsLive(t *testing.T) {
+	requests := stubConnectRemoteScope(t, beads.RemoteConnectResult{}, nil)
+	foreign := os.Getpid() + 1
+	stubInfraControllerPing(t, foreign)
+	var stdout, stderr bytes.Buffer
+	if code := doStorageConnect(context.Background(), t.TempDir(), &config.City{}, "https://beads.example", storageConnectOptions{}, &stdout, &stderr); code != 1 {
+		t.Fatalf("connect exit %d with a live controller, want 1\nstdout:\n%s", code, stdout.String())
+	}
+	for _, want := range []string{fmt.Sprintf("controller PID %d", foreign), storageStopCommand, "gc start"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr does not name %q:\n%s", want, stderr.String())
+		}
+	}
+	if len(*requests) != 0 {
+		t.Fatalf("a connect under a live controller reached beads connect: %+v", *requests)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("a refused connect reported success:\n%s", stdout.String())
 	}
 }

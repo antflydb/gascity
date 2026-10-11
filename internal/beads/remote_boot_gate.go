@@ -131,7 +131,8 @@ func (e *RemoteCapabilityGateError) Error() string {
 // RemoteScopeUnreachableError is the boot gate's WARNING for one remote scope
 // whose server could not be reached at boot (a transport failure, never a
 // structural one). The gate does not refuse on it: callers report it, naming
-// the scope, and start the city.
+// the scope, and start the city. The store open is not retried, so the
+// message names the restart that reopens a store the outage kept closed.
 type RemoteScopeUnreachableError struct {
 	// ScopeRoot is the scope (city or rig) whose server was not reached.
 	ScopeRoot string
@@ -150,7 +151,7 @@ func (e *RemoteScopeUnreachableError) Error() string {
 	if e == nil {
 		return ""
 	}
-	return fmt.Sprintf("remote beads backend %q for %s is unreachable at boot: %s; starting anyway, and this scope's store reports the outage until its server answers",
+	return fmt.Sprintf("remote beads backend %q for %s is unreachable at boot: %s; starting anyway, and a store that cannot open stays unavailable: run gc restart once the server is reachable",
 		e.Backend, e.ScopeRoot, e.Summary)
 }
 

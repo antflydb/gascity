@@ -310,6 +310,10 @@ that have no such binding, or remove the binding first.
 
 ## Remote Beads Server: Wrong Token or `remote_credential` Refusal
 
+The bd that gc and your agents run for a remote scope needs the Beads HTTP
+client, which no Beads release ships yet: see
+[bd for a remote Beads server](/getting-started/installation#bd-for-a-remote-beads-server).
+
 A scope attached to a remote `bd serve` (`bd connect`, backend `http`)
 authenticates with bd's ambient credential ladder by default:
 `BEADS_HTTP_TOKEN`, `BEADS_HTTP_TOKEN_COMMAND`, then
@@ -338,12 +342,16 @@ gc picks up a rotated token without a restart. It re-reads an `env:` or
 After a 401 it re-reads any source at once, and every opener and subprocess of
 that scope then uses the new token.
 
-gc reads an `env:` variable from its own environment and then removes it, so no
-process gc starts inherits it. That covers agents, `bd` subprocesses and a `gc`
-that an agent runs. Prefer `file:` or `command:` when several cities share a
-supervisor, or when agents run `gc` or `bd` against the remote server
-themselves. A process started before gc loaded the city's config, such as an
-already running tmux server, keeps whatever it inherited.
+gc reads an `env:` variable from its own environment and then removes it. It
+sets the variable again only for this city's own exec orders and agent
+sessions, so a `gc` they run resolves the same source. No other process gc
+starts, and no other city's orders or agents, inherits it. gc redacts an
+order's output by variable name, so the name must mark the variable as a
+secret, for example by containing `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`
+or `API_KEY`. Any other name, and `GC_CONTROLLER_TOKEN`, fails config load.
+Prefer `file:` or `command:` when several cities share a supervisor: a process
+started before gc loaded the city's config, such as an already running tmux
+server, keeps whatever it inherited.
 
 When the credential cannot be used, the scope is refused before any request is
 sent. The error has gate `remote_credential` and names the source, never the

@@ -267,10 +267,10 @@ type remoteOpenPlan struct {
 //   - Otherwise (single-city posture): the ambient ladder RESOLVED NOW and
 //     carried explicitly, and the ambient plaintext grants (the sidecar's
 //     bd connect --allow-plaintext record or BEADS_HTTP_ALLOW_INSECURE),
-//     exactly as the bd CLI reads them. Resolving once, under the env mutex
-//     every Dolt open's projection holds, means the open never sees a
-//     concurrent Dolt open's projection (which withholds
-//     BEADS_CREDENTIALS_FILE).
+//     exactly as the bd CLI reads them. The walk does not hold the env
+//     mutex every Dolt open's projection holds: resolvedAmbientCredential
+//     walks again when a projection overlapped it, up to
+//     ambientCredentialWalks times, and the last walk stands.
 //
 // The transport and user agent come from the nativeOpenOptions seam.
 func remoteOpenPlanFor(ctx context.Context, cityPath, scopeRoot, activationRoot string) (remoteOpenPlan, error) {

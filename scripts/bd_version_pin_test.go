@@ -107,6 +107,17 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("%s pins wantPinnedBeadsModuleVersion = %q but go.mod pins github.com/steveyegge/beads to %q; the integration suite installs bd from go.mod, so the two must name the same version",
 			integrationPinFile, integrationPin, goModPin)
 	}
+	// The installation guide tells an operator which bd a remote beads scope
+	// needs and how to build it from the beads gc links, so it names the same
+	// pin: a pin move fails here until the guide moves with it.
+	const installGuide = "docs/getting-started/installation.md"
+	guide := readFile(t, root, installGuide)
+	if want := "github.com/steveyegge/beads/cmd/bd@" + goModPin; !strings.Contains(guide, want) {
+		t.Fatalf("%s does not build bd from go.mod's beads pin (want %q); update its remote-server bd section with the pin", installGuide, want)
+	}
+	if pseudo != nil && !strings.Contains(guide, "`"+pseudo[1]+"`") {
+		t.Fatalf("%s does not name the beads commit go.mod pins (`%s`); update its remote-server bd section with the pin", installGuide, pseudo[1])
+	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {

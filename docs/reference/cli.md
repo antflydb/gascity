@@ -4764,6 +4764,10 @@ A scope that already holds a local workspace is switched only with
 --convert-workspace (bd connect --clear restores it); one attached to another
 server or project is re-pinned only with --retarget.
 
+Stop the city's controller first (gc stop) and start it again afterwards: a
+live controller keeps serving the backend it started with, so the command
+refuses while one is running.
+
 ```
 gc storage connect <url> [flags]
 ```
