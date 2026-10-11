@@ -121,13 +121,13 @@ func boundSessionNameLength(name string) string {
 // typed session.Info projection (WI-5 W4); the close is a session-class op
 // routed through the session front door. Returns the IDs of session beads
 // that were closed.
-func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+func GCSweepSessionBeads(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, cfg, info, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)

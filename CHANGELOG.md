@@ -121,6 +121,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **Split-storage cities no longer close seats that still hold work-store
+  claims.** On a city whose sessions live on a class binding, the pool-slot
+  close gate, the drain-ack escalation, the pool-slot retire and the stranded
+  repair read the sessions binding as the work leg and never saw claims on the
+  city work store, so seats closed while holding claims and the stranded
+  branch never ran. Every close gate now reads the census's leg set (the city
+  work store, the serving rigs, the bindings) for every seat, from a per-tick
+  seat work index that reads each leg once per tick. A rig-bound seat's
+  city-store claim now holds the seat, and rig stores `city.toml` does not
+  declare are no longer read (#7480).
+- **The close cascade releases a closed seat's work on every leg.** On a split
+  city a dead or closed seat's claims on the city work store and the rigs
+  stayed on the closed row until the orphan sweep reset them. The cascade now
+  releases on the gates' legs and under the gates' identities (a claim made
+  under an old alias is left to the orphan sweep), fencing each release on the
+  row's status and assignee (#7487).
+- **A claim made after a tick's read stops the close.** Before a gate-decided
+  close, and before an idle-timeout kill, gc re-reads the seat's claims and
+  keeps the seat when it finds one; a close that releases anyway releases the
+  late claim too. The re-read is live on local stores and answers from the
+  cache only on the work store and bd rigs: when the cache cannot answer, the
+  close or kill goes ahead on the tick's read, and a late claim there stays on
+  the seat (#7525).
+- **`gc bd show <id>` works again on a refused split city whose binding holds
+  migrated beads.** The by-id relic refusal now applies per id: only an id the
+  class binding holds, or that the migration's copy manifest records
+  delivering, is refused as a frozen pre-migration copy. Every other work bead
+  reaches bd. Without a readable manifest the old city-wide refusal still
+  applies whenever the binding holds any id outside its reserved prefixes
+  (#7430).
 - **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
   data directory when its `lsof` scan fails.** A scan that hit its 30-second
   deadline returned partial output with no error, so directories a running
