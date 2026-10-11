@@ -74,6 +74,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **Releasing a dead session's claim no longer erases a newer claim on the
+  same bead.** With `[beads].conditional_writes` at `auto` or `require` on a
+  capable store, the retired-session and orphaned-pool release paths clear the
+  assignment and affinity metadata in one write guarded by the snapshot's
+  revision, so a successor that re-claimed the bead after the controller's
+  `List` (even under a reused assignee name) is left alone. Native-store list
+  rows carry that revision. The guard cannot tell a newer claim from any other
+  write, so a status, assignee or metadata change since the `List` is reported
+  as a conflict, the bead is left as it is, and the next tick decides again.
+  `require` refuses a store without the capability, `auto` degrades to the
+  legacy release, and `off` (the builtin default) is unchanged. A snapshot
+  without a revision (a row not rewritten since its store began recording
+  revisions) keeps the legacy status-and-assignee fence. Hand-backport of #7384.
 - `gc stop` stops the city's nudge pollers and never reopens a stopped city's
   store (#6857).
 - The supervisor event stream includes cities started after the client
