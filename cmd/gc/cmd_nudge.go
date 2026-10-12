@@ -262,6 +262,12 @@ func (t nudgeTarget) providerName() string {
 	return ""
 }
 
+// providerFamily returns the builtin provider family the target runs, which is
+// the name the claude wait-idle gates compare against.
+func (t nudgeTarget) providerFamily() string {
+	return t.providerName()
+}
+
 type queuedNudgeOptions struct {
 	ID                string
 	SessionID         string
