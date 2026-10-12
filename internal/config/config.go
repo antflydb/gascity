@@ -2809,6 +2809,13 @@ type DaemonConfig struct {
 	// false as a global kill switch (e.g., for production cities where a
 	// rebuild on the host should not auto-restart the supervisor).
 	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+	// FleetStartBreaker controls the fleet start breaker: when automatic
+	// session starts keep failing across several sessions and templates, the
+	// controller pauses automatic starts, probes with one start at a time, and
+	// resumes once a probe's session stays alive. Default: ENABLED. Set false
+	// to restore unguarded automatic starts. Read the effective value via
+	// FleetStartBreakerEnabled(), never the field.
+	FleetStartBreaker *bool `toml:"fleet_start_breaker,omitempty" jsonschema:"default=true"`
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
@@ -2887,6 +2894,12 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 		return true
 	}
 	return *d.AutoRestartOnDrift
+}
+
+// FleetStartBreakerEnabled reports whether the fleet start breaker guards
+// automatic session starts. The default is true.
+func (d *DaemonConfig) FleetStartBreakerEnabled() bool {
+	return false
 }
 
 // AutoReapClosedBeadWorktreesEnabled reports whether the patrol should

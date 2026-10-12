@@ -418,6 +418,9 @@ type startExecutionOptions struct {
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).
 	capacityGuard *endpointCapacityGuard
+	// fleetGuard is the fleet-wide start breaker over automatic starts. Nil
+	// leaves automatic starts unguarded.
+	fleetGuard *fleetStartGuard
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
@@ -531,6 +534,14 @@ func withClaimedWorkProbe(probe claimedWorkProbe) startExecutionOption {
 func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.capacityGuard = guard
+	}
+}
+
+// withFleetStartGuard installs the fleet start breaker for this reconcile
+// pass. Nil (or the option omitted) leaves automatic starts unguarded.
+func withFleetStartGuard(guard *fleetStartGuard) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.fleetGuard = guard
 	}
 }
 
