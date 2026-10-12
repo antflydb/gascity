@@ -63,6 +63,7 @@ type ProfileBackend interface {
 	SessionEventProvider
 	SessionObjectKiller
 	SessionRosterProvider
+	StateCacheStalenessProvider
 	TurnEventProvider
 	UnattendedSessionStopper
 }
@@ -74,7 +75,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
 	case ProfileSubprocess:
@@ -158,6 +159,7 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		StateCacheStalenessProvider
 		UnattendedSessionStopper
 		sleepTrait
 	}
@@ -328,6 +330,10 @@ func (f FullFake) TeardownServer() error {
 	f.record("TeardownServer", "")
 	return nil
 }
+
+// StateCacheStaleness implements [StateCacheStalenessProvider]: a fake keeps
+// no refreshing cache, so there is nothing to report.
+func (FullFake) StateCacheStaleness() (time.Duration, bool) { return 0, false }
 
 // StopUnattendedSession implements [UnattendedSessionStopper] as Stop.
 func (f FullFake) StopUnattendedSession(name, _ string) error {

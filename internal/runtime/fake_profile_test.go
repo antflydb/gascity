@@ -61,6 +61,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SessionObjectKiller":            reflect.TypeFor[runtime.SessionObjectKiller](),
 	"SessionRosterProvider":          reflect.TypeFor[runtime.SessionRosterProvider](),
 	"SleepCapabilityProvider":        reflect.TypeFor[runtime.SleepCapabilityProvider](),
+	"StateCacheStalenessProvider":    reflect.TypeFor[runtime.StateCacheStalenessProvider](),
 	"TransportCapabilityProvider":    reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":              reflect.TypeFor[runtime.TurnEventProvider](),
 	"UnattendedSessionStopper":       reflect.TypeFor[runtime.UnattendedSessionStopper](),
