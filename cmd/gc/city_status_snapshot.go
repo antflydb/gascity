@@ -63,8 +63,12 @@ type cityStatusSnapshot struct {
 	CityPath        string
 	EffectiveAPIURL string
 	Controller      ControllerJSON
-	Suspended       bool
-	Beads           *beads.BeadsDiagnostic
+	// FleetBreaker is the fleet start breaker's one-line state while it is
+	// open or half-open; empty otherwise, and when the controller cannot be
+	// asked.
+	FleetBreaker string
+	Suspended    bool
+	Beads        *beads.BeadsDiagnostic
 	// ConditionalWrites is the daemon's latched §12.5 snapshot; nil on the
 	// local fallback path (a stopped controller has no latched state to show).
 	ConditionalWrites *api.StatusConditionalWrites
@@ -175,6 +179,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		Controller:      controllerStatusForCity(cityPath),
 		Suspended:       suspended,
 	}
+	snapshot.FleetBreaker = fleetBreakerNote(snapshot.Controller, cityPath)
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
@@ -570,6 +575,9 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 	}
 	for _, line := range controllerStatusGuidance(snapshot.Controller, snapshot.CityPath) {
 		fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
+	}
+	if snapshot.FleetBreaker != "" {
+		fmt.Fprintf(stdout, "  Warning:    %s\n", snapshot.FleetBreaker) //nolint:errcheck // best-effort stdout
 	}
 
 	if snapshot.Suspended {

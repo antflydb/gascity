@@ -348,6 +348,7 @@ go_library(
         "execution_emit_store.go",
         "extmsg_binding_reaper.go",
         "feature_flags.go",
+        "fleet_breaker_control.go",
         "fleet_start_breaker.go",
         "formula_cook_attach_class.go",
         "formula_resolve.go",

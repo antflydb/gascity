@@ -2899,7 +2899,10 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 // FleetStartBreakerEnabled reports whether the fleet start breaker guards
 // automatic session starts. The default is true.
 func (d *DaemonConfig) FleetStartBreakerEnabled() bool {
-	return false
+	if d.FleetStartBreaker == nil {
+		return true
+	}
+	return *d.FleetStartBreaker
 }
 
 // AutoReapClosedBeadWorktreesEnabled reports whether the patrol should

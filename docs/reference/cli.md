@@ -31,6 +31,7 @@ gc [flags]
 | [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
+| [gc breaker](#gc-breaker) | Inspect and clear the fleet start breaker |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
 | [gc cities](#gc-cities) | List registered cities |
 | [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
@@ -555,6 +556,48 @@ gc beads show ga-abc --format=json
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--format` | string | `text` | output format: text or json |
+
+## gc breaker
+
+Inspect and clear the fleet start breaker.
+
+The fleet start breaker pauses automatic session starts when several
+different sessions fail to start (or stay up) within a short window, or when
+the runtime's state cache has gone stale. While it is open, automatic starts
+are limited to a probe at a time until a started session stays up. User
+initiated starts (attach, new, nudge) are never gated.
+
+The breaker is in-memory in the running controller, so these commands need a
+running controller. Disable it with [daemon] fleet_start_breaker = false.
+
+```
+gc breaker
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc breaker reset](#gc-breaker-reset) | Close the fleet start breaker and forget its failure window |
+| [gc breaker status](#gc-breaker-status) | Show the fleet start breaker's state |
+
+## gc breaker reset
+
+Close the fleet start breaker and forget its failure window
+
+```
+gc breaker reset
+```
+
+## gc breaker status
+
+Show the fleet start breaker's state
+
+```
+gc breaker status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc build-image
 

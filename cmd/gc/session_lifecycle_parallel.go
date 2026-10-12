@@ -271,6 +271,10 @@ type preparedStart struct {
 	// nil when the endpoint is unguarded. Every path that holds one resolves
 	// it exactly once (resolveStartCapacity / abandonCapacityTicket).
 	capacityTicket *capacityTicket
+	// fleetTicket is the fleet start breaker admission for this attempt, nil
+	// when the breaker is off. Every path that holds one resolves it exactly
+	// once (resolveStartFleet / abandonFleetTicket).
+	fleetTicket *fleetTicket
 	// preWakeUndo is what a capacity refusal needs to undo this attempt's
 	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
 	preWakeUndo preWakeUndo
@@ -2101,6 +2105,7 @@ func enqueuePreparedStartWaveForCity(
 			// Resolve before the commit so a stale, refused, or panicking
 			// commit cannot lose the endpoint verdict.
 			result = resolveStartCapacity(result, rec, stderr)
+			resolveStartFleet(result, rec, stderr)
 			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
 			// The commit is done: release the lease and the slot before the
 			// follow-up, so the pass it wakes finds the name free.
@@ -3994,6 +3999,9 @@ func executePlannedStartsTraced(
 	// early return (context cancellation, panic) resolves them so an
 	// abandoned admission cannot wedge its endpoint's probe.
 	var admitted []*capacityTicket
+	// fleetAdmitted is admitted for the fleet start breaker's tickets.
+	fleetGuard := startOpts.fleetGuard
+	var fleetAdmitted []*fleetTicket
 	// probed holds the endpoints whose probe this pass handed to a start. The
 	// rest of the pass defers them: an async probe can resolve while the pass
 	// is still admitting, and a herd let in then is cut short by its first
@@ -4004,6 +4012,9 @@ func executePlannedStartsTraced(
 	defer func() {
 		for _, ticket := range admitted {
 			abandonCapacityTicket(ticket, rec, stderr)
+		}
+		for _, ticket := range fleetAdmitted {
+			abandonFleetTicket(ticket, fleetGuard, rec, stderr)
 		}
 	}()
 	// leases holds the release of every runtime lease this pass took and has
@@ -4160,11 +4171,36 @@ func executePlannedStartsTraced(
 					}
 					continue
 				}
+				// Fleet start breaker admission follows the endpoint's: either
+				// gate defers before the identity breaker's restart accounting
+				// and before PreWake, so a deferred start writes nothing and
+				// spends no wake budget.
+				fleetTkt, fleetAdmit := fleetGuard.Admit(candidate.info.ID, candidate.logicalTemplate(cfg))
+				if !fleetAdmit {
+					abandonCapacityTicket(ticket, rec, stderr)
+					if release != nil {
+						release()
+					}
+					if done != nil {
+						done()
+					}
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByFleetStartBreaker), time.Time{}, time.Time{}, nil)
+					if trace != nil {
+						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonFleetStartBreakerOpen, TraceOutcomeDeferredByFleetStartBreaker, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+							"state": fleetGuard.Status().State.String(),
+						})
+					}
+					continue
+				}
 				if ticket != nil {
 					admitted = append(admitted, ticket)
 				}
+				if fleetTkt != nil {
+					fleetAdmitted = append(fleetAdmitted, fleetTkt)
+				}
 				drop := func(outcome string, err error) {
 					abandonCapacityTicket(ticket, rec, stderr)
+					abandonFleetTicket(fleetTkt, fleetGuard, rec, stderr)
 					if release != nil {
 						release()
 					}
@@ -4239,6 +4275,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				item.capacityTicket = ticket
+				item.fleetTicket = fleetTkt
 				if ticket != nil && ticket.probe {
 					probed[endpoint] = true
 				}
@@ -4257,6 +4294,7 @@ func executePlannedStartsTraced(
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 				// The start goroutines own these tickets and leases now.
 				admitted = admitted[:0]
+				fleetAdmitted = fleetAdmitted[:0]
 				leases = leases[:0]
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
@@ -4279,6 +4317,7 @@ func executePlannedStartsTraced(
 			for _, result := range results {
 				if !startOpts.async {
 					result = resolveStartCapacity(result, rec, stderr)
+					resolveStartFleet(result, rec, stderr)
 				}
 				if trace != nil {
 					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{

@@ -1866,6 +1866,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 	}
 	capacityGuard := reconcileOpts.capacityGuard
+	fleetGuard := reconcileOpts.fleetGuard
+	// fleetTracked counts the desired sessions this pass checked for
+	// liveness: the sessions the fleet breaker's state-cache trigger expects
+	// the runtime to be tracking.
+	fleetTracked := 0
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
@@ -2848,11 +2853,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the expected child process is alive (when ProcessNames configured).
 		// The desired-session fast path only needs running/alive; attachment
 		// and activity are probed by the narrower branches that use them.
+		fleetTracked++
 		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		if livenessErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 			continue
 		}
+		fleetGuard.ObserveLiveness(id, running && alive)
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		if running && !alive {
 			// Warm the peek before recordResetStallIfDue may evict the stale
@@ -4595,6 +4602,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				capacityGuard.noteDeferredWake(endpoint)
 				continue
 			}
+			// Fleet start breaker gate: while automatic starts are limited to
+			// probes and none is due, skip without writing or spending wake
+			// budget. Aggregated into the per-tick fleet record.
+			if !fleetGuard.Eligible() {
+				fleetGuard.NoteDeferred()
+				continue
+			}
 
 			if trace != nil {
 				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, traceRecordPayload{
@@ -4935,6 +4949,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	)
 	startedThisTick = plannedWakes
 	capacityGuard.recordTick(trace, rec, stderr)
+	if reporter, ok := sp.(runtime.StateCacheStalenessProvider); ok && fleetGuard != nil {
+		age, known := reporter.StateCacheStaleness()
+		fleetGuard.NoteStateCache(age, known, fleetTracked)
+	}
+	fleetGuard.recordTick(trace, rec, stderr)
 	recordPhase(TraceSiteSessionReconcileStartExecution, "session_reconcile.execute_planned_starts", phaseStart, map[string]any{
 		"start_candidate_count": len(startCandidates),
 		"planned_wake_count":    plannedWakes,

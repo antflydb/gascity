@@ -136,6 +136,7 @@ const (
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
 	TraceSiteLifecycleStartCapacityRefused       TraceSiteCode = "reconciler.start.capacity_refused"
 	TraceSiteEndpointCapacityBreaker             TraceSiteCode = "reconciler.endpoint.capacity_breaker"
+	TraceSiteFleetStartBreaker                   TraceSiteCode = "reconciler.fleet.start_breaker"
 	TraceSiteLifecycleShutdownPreserveSessions   TraceSiteCode = "lifecycle.shutdown.preserve_sessions"
 )
 
@@ -209,6 +210,7 @@ const (
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
+	TraceReasonFleetStartBreakerOpen TraceReasonCode = "fleet_start_breaker_open"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 )
 
@@ -301,6 +303,9 @@ const (
 	// TraceOutcomeDeferredByEndpointCapacity marks a start the endpoint
 	// capacity breaker deferred before any write.
 	TraceOutcomeDeferredByEndpointCapacity TraceOutcomeCode = "deferred_by_endpoint_capacity"
+	// TraceOutcomeDeferredByFleetStartBreaker marks an automatic start the
+	// fleet start breaker deferred before any write.
+	TraceOutcomeDeferredByFleetStartBreaker TraceOutcomeCode = "deferred_by_fleet_start_breaker"
 	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
 	// write because the name's on_death hook is queued or running.
 	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"
