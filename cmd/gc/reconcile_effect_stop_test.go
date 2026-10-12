@@ -510,3 +510,24 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestDormantStopKeepsASoftSuspend (mc-yxjzl ruling: an operator's suspend
+// survives a dormant stop's finalize in every case). Kills a finalize that
+// writes a soft-suspended row (Manager.Suspend's state=suspended) asleep or
+// drained: with or without open work assigned, the stopped seat stays
+// suspended with its suspended_at, so its work never restarts it.
+func TestDormantStopKeepsASoftSuspend(t *testing.T) {
+	for _, withWork := range []bool{false, true} {
+		since := rowAt(-time.Minute)
+		s, got, leaf := stopRun(t, []string{"state", "suspended", "suspended_at", since, "pool_managed", "true"}, func(e *selectionEntry) { e.Desired = desireKeep }, func(_ *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+			if withWork {
+				if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: id}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+		if m := got.Metadata; s.Outcome != settledLanded || stops(leaf) != 1 || got.Status == "closed" || m["state"] != string(session.StateSuspended) || m["suspended_at"] != since {
+			t.Errorf("work %t: settlement %+v, %d stops, status %s, row %v; want the seat stopped and still suspended", withWork, s, stops(leaf), got.Status, m)
+		}
+	}
+}

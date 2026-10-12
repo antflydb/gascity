@@ -251,11 +251,21 @@ func closeIfUnassigned(v txView) bool {
 // dormantChoice is an operator-dormant stop's finalize: finalizePatch, as
 // legacy completes the drain of a managed suspend, written through the Sleep
 // cell, which keeps the operator's hold; never a close, as the operator's
-// state is the row's. A killed row keeps sleep_reason=killed.
+// state is the row's. A killed row keeps sleep_reason=killed. An operator's
+// suspend survives the finalize in every case (mc-yxjzl ruling): a managed
+// suspend's user-hold intent the Sleep cell keeps; a soft suspend
+// (Manager.Suspend's state=suspended, no intent) is the row's state itself,
+// which the cell does not keep, so its finalize writes no lifecycle state and
+// keeps suspended_at; else a suspended seat with work would sleep and
+// restart for it.
 func dormantChoice(row session.Info, f finalizeFacts) finalizeChoice {
+	now := f.Now.UTC().Format(time.RFC3339)
+	if session.DispositionOfInfo(row).Operator == session.OperatorSuspendedSoft {
+		return finalizeChoice{Patch: session.MetadataPatch{"drain_at": now}}
+	}
 	f.CloseIfUnassigned = false
 	c := finalizePatch(f)
-	c.Patch["drain_at"] = f.Now.UTC().Format(time.RFC3339) // legacy's drain stamps it, and its completion keeps it
+	c.Patch["drain_at"] = now // legacy's drain stamps it, and its completion keeps it
 	if session.SleepReason(strings.TrimSpace(row.SleepReason)) == session.SleepReasonKilled {
 		c.Patch["sleep_reason"] = string(session.SleepReasonKilled)
 	}
