@@ -3796,7 +3796,7 @@ func TestRollbackPendingCreateUsesSingleTransactionForAllWrites(t *testing.T) {
 	}
 
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	batch := rollbackPendingCreate(info, sessionFrontDoor(store), now, ioDiscard{})
+	batch := rollbackPendingCreate(context.Background(), info, sessionFrontDoor(store), now, ioDiscard{})
 
 	if store.txCalls != 1 {
 		t.Fatalf("txCalls = %d, want 1", store.txCalls)
@@ -3869,7 +3869,7 @@ func TestRollbackPendingCreateIsNoopOnAlreadyClosedBead(t *testing.T) {
 	}
 
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	rollbackPendingCreate(info, sessionFrontDoor(store), now, ioDiscard{})
+	rollbackPendingCreate(context.Background(), info, sessionFrontDoor(store), now, ioDiscard{})
 
 	if store.txCalls != 0 {
 		t.Fatalf("txCalls = %d, want 0 (already-closed bead must be a no-op)", store.txCalls)
@@ -3909,7 +3909,7 @@ func TestRollbackPendingCreateClearingClaimUsesSingleTransactionForAllWrites(t *
 	}
 
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	batch := rollbackPendingCreateClearingClaim(info, sessionFrontDoor(store), now, ioDiscard{})
+	batch := rollbackPendingCreateClearingClaim(context.Background(), info, sessionFrontDoor(store), now, ioDiscard{})
 
 	if store.txCalls != 1 {
 		t.Fatalf("txCalls = %d, want 1", store.txCalls)
@@ -3997,7 +3997,7 @@ func TestRollbackPendingCreateClearingClaimIsNoopOnAlreadyClosedBead(t *testing.
 	}
 
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	batch := rollbackPendingCreateClearingClaim(info, sessionFrontDoor(store), now, ioDiscard{})
+	batch := rollbackPendingCreateClearingClaim(context.Background(), info, sessionFrontDoor(store), now, ioDiscard{})
 
 	if batch != nil {
 		t.Fatalf("returned batch = %v, want nil (already-closed bead must be a no-op)", batch)
@@ -4043,7 +4043,7 @@ func TestRollbackPendingCreateClearingClaimReturnsNilWhenTxFails(t *testing.T) {
 
 	var stderr bytes.Buffer
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	batch := rollbackPendingCreateClearingClaim(info, sessionFrontDoor(store), now, &stderr)
+	batch := rollbackPendingCreateClearingClaim(context.Background(), info, sessionFrontDoor(store), now, &stderr)
 
 	if batch != nil {
 		t.Fatalf("returned batch = %v, want nil when the Tx metadata batch fails", batch)
@@ -4088,7 +4088,7 @@ func TestRollbackPendingCreateClearingClaimKeepsSessionNameWhenCloseFails(t *tes
 
 	var stderr bytes.Buffer
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	batch := rollbackPendingCreateClearingClaim(info, sessionFrontDoor(store), now, &stderr)
+	batch := rollbackPendingCreateClearingClaim(context.Background(), info, sessionFrontDoor(store), now, &stderr)
 	if batch != nil {
 		t.Fatalf("returned batch = %v, want nil when the failed-create close fails", batch)
 	}
@@ -4157,7 +4157,7 @@ func TestRollbackPendingCreateClearingClaimRunsRetiredCleanupWhenPostCloseFails(
 
 	var stderr bytes.Buffer
 	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
-	batch := rollbackPendingCreateClearingClaim(info, sessionFrontDoor(store), now, &stderr)
+	batch := rollbackPendingCreateClearingClaim(context.Background(), info, sessionFrontDoor(store), now, &stderr)
 	if batch != nil {
 		t.Fatalf("returned batch = %v, want nil when the post-close write fails", batch)
 	}
