@@ -419,6 +419,17 @@ rules above), and `rbe` fails the push. Rebase onto main to execute
 remotely again; a change that moves the pin runs its remote suite in CI
 after it merges, as `bazel.yml`'s own preflight does.
 
+In CI, `bazel.yml`'s lanes tell the two reasons a checkout's pin differs
+from main's apart. A change that moves the pin skips its remote suite, as
+above. A pull request run whose base predates a re-pin does not move the
+pin: the run chose its base commit (`base-sha`) before main re-pinned, and
+"Re-run failed jobs" keeps that base. A remote lane on it fails its
+`worker-env` preflight with `rbe worker-env stale base`, because no pool
+worker serves its pin; **Re-run all jobs** (not "Re-run failed jobs") or push
+a commit, either of which resolves a fresh base. A lane that is not remote
+runs, and push, schedule and dispatch runs, which have no `base-sha`, keep
+the skip.
+
 ### Remote repo contents cache (CI lanes)
 
 A cold lane client spends 15-38 s re-running repository rules (go_deps,
@@ -570,6 +581,9 @@ rbe-worker for the pools and the canary; gascity's own
   issue open until the re-pin lands.
 - While the issue is open, remote `bazel.yml` runs on its pin fail at
   their preflight instead of queueing.
+- Pull request runs whose base predates the re-pin fail their remote
+  lanes at the preflight with "rbe worker-env stale base" once it merges;
+  they want Re-run all jobs, not Re-run failed jobs.
 - `rbe-worker-env-canary.yml` measures a Blacksmith runner every six
   hours, so drift usually opens the issue before CI meets it.
 - A change to the worker host (`tools/rbe/worker-env.txt`,
