@@ -198,8 +198,10 @@ func TestSystemResumeClock_MonotonicAdvances(t *testing.T) {
 	t.Parallel()
 	read := newSystemResumeClock()
 	a := read()
-	time.Sleep(2 * time.Millisecond)
 	b := read()
+	for deadline := time.Now().Add(time.Second); b.mono <= a.mono && time.Now().Before(deadline); {
+		b = read()
+	}
 	if b.mono <= a.mono {
 		t.Fatalf("monotonic reading did not advance: %v then %v", a.mono, b.mono)
 	}
