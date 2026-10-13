@@ -1,18 +1,15 @@
 package fsyncprobe
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 var probeFileName = regexp.MustCompile(`^\.gc-fsync-probe-\d+-\d+$`)
@@ -40,20 +37,30 @@ func TestMeasureFinishedReportsMeasuredTimeAndRemovesFile(t *testing.T) {
 	var seen []string
 	var seenSize int64
 	var seenRegular bool
+	base := time.Unix(1_700_000_000, 0)
+	ticks := []time.Time{base, base.Add(40 * time.Millisecond)}
+	prev := clock
+	clock = func() time.Time {
+		now := ticks[0]
+		if len(ticks) > 1 {
+			ticks = ticks[1:]
+		}
+		return now
+	}
+	t.Cleanup(func() { clock = prev })
 	res := Measure(dir, func(f *os.File) error {
 		seen = probeFiles(t, dir)
 		if info, err := f.Stat(); err == nil {
 			seenSize = info.Size()
 			seenRegular = info.Mode().IsRegular()
 		}
-		time.Sleep(40 * time.Millisecond)
 		return nil
 	})
 	if res.Status != StatusFinished {
 		t.Fatalf("Status = %q (error %q), want %q", res.Status, res.Error, StatusFinished)
 	}
-	if res.FsyncMS < 40 {
-		t.Fatalf("FsyncMS = %d, want >= 40 (the fake sync slept 40ms)", res.FsyncMS)
+	if res.FsyncMS != 40 {
+		t.Fatalf("FsyncMS = %d, want 40 (the clock advanced 40ms across the sync)", res.FsyncMS)
 	}
 	if len(seen) != 1 || !probeFileName.MatchString(seen[0]) {
 		t.Fatalf("probe files during sync = %v, want exactly one matching %s", seen, probeFileName)
@@ -94,29 +101,39 @@ func TestMeasureErrorCases(t *testing.T) {
 	}
 }
 
-// TestProbeWithWorkerFinished runs a real detached worker (the test binary
-// re-executed in worker mode) and expects the measurement back.
-func TestProbeWithWorkerFinished(t *testing.T) {
-	dir := t.TempDir()
-	res := ProbeWithWorker(dir, 10*time.Second, helperWorker(t, "measure", dir, ""))
-	if res.Status != StatusFinished {
-		t.Fatalf("Status = %q (error %q), want %q", res.Status, res.Error, StatusFinished)
-	}
-	if res.FsyncMS < 0 {
-		t.Fatalf("FsyncMS = %d, want >= 0", res.FsyncMS)
+// answerWith returns a starter whose "worker" writes res to the result pipe and
+// exits, the way a finished RunWorker does.
+func answerWith(t *testing.T, res Result) func(*os.File) error {
+	t.Helper()
+	return func(result *os.File) error {
+		defer result.Close() //nolint:errcheck // the encode below reports failures
+		return json.NewEncoder(result).Encode(res)
 	}
 }
 
-// TestProbeWithWorkerBoundHoldsForCaller is the proof of the binding trap: a
-// worker that never answers (a D-state fsync) must not hold the caller past
-// the bound, and the worker must still be alive when the caller returns.
-func TestProbeWithWorkerBoundHoldsForCaller(t *testing.T) {
-	dir := t.TempDir()
-	pidFile := filepath.Join(t.TempDir(), "worker.pid")
-	bound := 300 * time.Millisecond
+// TestProbeFinished expects the worker's measurement back through the pipe.
+func TestProbeFinished(t *testing.T) {
+	res := probe(t.TempDir(), 10*time.Second, answerWith(t, Result{Status: StatusFinished, FsyncMS: 7}))
+	if res.Status != StatusFinished || res.FsyncMS != 7 {
+		t.Fatalf("got %+v, want finished with fsync_ms 7", res)
+	}
+}
 
+// TestProbeBoundHoldsForCaller is the proof of the binding trap: a worker that
+// never answers (a D-state fsync) still holds its copy of the result pipe, and
+// must not hold the caller past the bound.
+func TestProbeBoundHoldsForCaller(t *testing.T) {
+	bound := 300 * time.Millisecond
 	start := time.Now()
-	res := ProbeWithWorker(dir, bound, helperWorker(t, "hang", dir, pidFile))
+	res := probe(t.TempDir(), bound, func(result *os.File) error {
+		fd, err := syscall.Dup(int(result.Fd()))
+		if err != nil {
+			return err
+		}
+		held := os.NewFile(uintptr(fd), "held-result")
+		t.Cleanup(func() { _ = held.Close() })
+		return nil
+	})
 	elapsed := time.Since(start)
 
 	if res.Status != StatusUnfinished {
@@ -128,36 +145,33 @@ func TestProbeWithWorkerBoundHoldsForCaller(t *testing.T) {
 	if elapsed < bound || elapsed > bound+2*time.Second {
 		t.Fatalf("returned after %v, want within [%v, %v]", elapsed, bound, bound+2*time.Second)
 	}
-
-	pid := waitForPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if err := syscall.Kill(pid, 0); err != nil {
-		t.Fatalf("worker %d is gone after the caller returned: %v (it must be left running, detached)", pid, err)
-	}
-	ownSID, _ := unix.Getsid(0)
-	if sid, err := unix.Getsid(pid); err != nil || sid == ownSID {
-		t.Fatalf("worker %d session = %d (err %v), want a session other than the caller's %d (Setsid)", pid, sid, err, ownSID)
-	}
 }
 
-// TestProbeWithWorkerSpawnFailureIsError reports a worker that cannot start
-// as status=error rather than a silent success.
-func TestProbeWithWorkerSpawnFailureIsError(t *testing.T) {
-	res := ProbeWithWorker(t.TempDir(), time.Second, func(string) *exec.Cmd {
-		return exec.Command(filepath.Join(t.TempDir(), "no-such-binary"))
-	})
+// TestProbeWorkerThatExitsWithoutAnswerIsError reports a worker that dies
+// before writing as status=error, not as a stall.
+func TestProbeWorkerThatExitsWithoutAnswerIsError(t *testing.T) {
+	res := probe(t.TempDir(), 10*time.Second, func(*os.File) error { return nil })
 	if res.Status != StatusError || res.Error == "" {
 		t.Fatalf("got %+v, want status=error with a message", res)
 	}
 }
 
-// TestProbeWithWorkerMissingDirIsErrorWithoutSpawning checks the directory
-// precondition in the caller, so a bad path never costs a worker.
-func TestProbeWithWorkerMissingDirIsErrorWithoutSpawning(t *testing.T) {
+// TestProbeSpawnFailureIsError reports a worker that cannot start as
+// status=error rather than a silent success.
+func TestProbeSpawnFailureIsError(t *testing.T) {
+	res := probe(t.TempDir(), time.Second, func(*os.File) error { return errors.New("boom") })
+	if res.Status != StatusError || res.Error == "" {
+		t.Fatalf("got %+v, want status=error with a message", res)
+	}
+}
+
+// TestProbeMissingDirIsErrorWithoutSpawning checks the directory precondition
+// in the caller, so a bad path never costs a worker.
+func TestProbeMissingDirIsErrorWithoutSpawning(t *testing.T) {
 	spawned := false
-	res := ProbeWithWorker(filepath.Join(t.TempDir(), "absent"), time.Second, func(string) *exec.Cmd {
+	res := probe(filepath.Join(t.TempDir(), "absent"), time.Second, func(*os.File) error {
 		spawned = true
-		return exec.Command("true")
+		return nil
 	})
 	if res.Status != StatusError {
 		t.Fatalf("Status = %q, want %q", res.Status, StatusError)
@@ -167,51 +181,60 @@ func TestProbeWithWorkerMissingDirIsErrorWithoutSpawning(t *testing.T) {
 	}
 }
 
-// helperWorker returns a worker factory that re-executes the test binary in
-// the named helper mode (the helper-process pattern).
-func helperWorker(t *testing.T, mode, dir, pidFile string) func(string) *exec.Cmd {
-	t.Helper()
-	return func(string) *exec.Cmd {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
-		cmd.Env = append(os.Environ(),
-			"FSYNCPROBE_HELPER_MODE="+mode,
-			"FSYNCPROBE_HELPER_DIR="+dir,
-			"FSYNCPROBE_HELPER_PIDFILE="+pidFile,
-		)
-		return cmd
+// TestProbeRejectsUnknownWorkerStatus keeps a worker from reporting a status
+// of its own choosing, such as unfinished.
+func TestProbeRejectsUnknownWorkerStatus(t *testing.T) {
+	res := probe(t.TempDir(), 10*time.Second, answerWith(t, Result{Status: StatusUnfinished, FsyncMS: 1}))
+	if res.Status != StatusError {
+		t.Fatalf("got %+v, want status=error for a worker-reported unfinished", res)
 	}
 }
 
-// TestHelperProcess is the re-exec target, not a test: it only acts when the
-// helper env is set.
-func TestHelperProcess(_ *testing.T) {
-	mode := os.Getenv("FSYNCPROBE_HELPER_MODE")
-	if mode == "" {
-		return
+// TestWorkerCommandIsDetached pins the properties the bound relies on: a new
+// session, null stdio, and the result pipe as ResultFD.
+func TestWorkerCommandIsDetached(t *testing.T) {
+	result, err := os.CreateTemp(t.TempDir(), "result")
+	if err != nil {
+		t.Fatal(err)
 	}
-	switch mode {
-	case "measure":
-		if err := RunWorker(os.Getenv("FSYNCPROBE_HELPER_DIR"), os.NewFile(ResultFD, "result")); err != nil {
-			os.Exit(2)
-		}
-	case "hang":
-		_ = os.WriteFile(os.Getenv("FSYNCPROBE_HELPER_PIDFILE"), []byte(strconv.Itoa(os.Getpid())), 0o644)
-		time.Sleep(time.Minute)
+	t.Cleanup(func() { _ = result.Close() })
+	cmd := workerCommand("/path/to/gc", "/data/dir", result)
+
+	want := []string{"/path/to/gc", "dolt-state", "fsync-probe-worker", "--dir", "/data/dir"}
+	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("Args = %v, want %v", cmd.Args, want)
 	}
-	os.Exit(0)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatalf("SysProcAttr = %+v, want Setsid", cmd.SysProcAttr)
+	}
+	if cmd.Stdin != nil || cmd.Stdout != nil || cmd.Stderr != nil {
+		t.Fatal("worker stdio must be null so no inherited pipe outlives the call")
+	}
+	if len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0] != result {
+		t.Fatalf("ExtraFiles = %v, want the result pipe as fd %d", cmd.ExtraFiles, ResultFD)
+	}
 }
 
-func waitForPID(t *testing.T, pidFile string) int {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(pidFile); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-				return pid
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
+// TestRunWorkerWritesJSONResult covers the worker body: it measures, writes
+// one JSON Result to its descriptor and closes it.
+func TestRunWorkerWritesJSONResult(t *testing.T) {
+	dir := t.TempDir()
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("worker never wrote its pid to %s", pidFile)
-	return 0
+	t.Cleanup(func() { _ = rd.Close() })
+	if err := RunWorker(dir, wr); err != nil {
+		t.Fatalf("RunWorker: %v", err)
+	}
+	var res Result
+	if err := json.NewDecoder(rd).Decode(&res); err != nil {
+		t.Fatalf("decode worker output: %v", err)
+	}
+	if res.Status != StatusFinished || res.FsyncMS < 0 {
+		t.Fatalf("got %+v, want a finished measurement", res)
+	}
+	if left := probeFiles(t, dir); len(left) != 0 {
+		t.Fatalf("probe files left by the worker: %v", left)
+	}
 }

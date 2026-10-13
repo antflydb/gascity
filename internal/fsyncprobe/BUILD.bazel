@@ -7,10 +7,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":fsyncprobe"],
-    deps = [
-        "//internal/testenv",
-        "@org_golang_x_sys//unix",
-    ],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

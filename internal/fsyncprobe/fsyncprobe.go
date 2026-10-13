@@ -10,7 +10,6 @@ package fsyncprobe
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,14 +62,14 @@ func Measure(dir string, syncFn func(*os.File) error) Result {
 	defer func() { _ = os.Remove(path) }()
 	defer func() { _ = f.Close() }()
 
-	start := time.Now()
+	start := clock()
 	if _, err := f.Write(make([]byte, probeBytes)); err != nil {
 		return errorResult(fmt.Errorf("write probe file: %w", err))
 	}
 	if err := syncFn(f); err != nil {
 		return errorResult(fmt.Errorf("sync probe file: %w", err))
 	}
-	return Result{Status: StatusFinished, FsyncMS: time.Since(start).Milliseconds()}
+	return Result{Status: StatusFinished, FsyncMS: clock().Sub(start).Milliseconds()}
 }
 
 // RunWorker is the detached worker's body: it measures a real fsync in dir,
@@ -84,6 +83,9 @@ func RunWorker(dir string, out *os.File) error {
 	return nil
 }
 
+// clock is the time source Measure uses to time the sync.
+var clock = time.Now
+
 // Probe measures an fsync in dir through a detached re-exec of the running gc
 // binary, and returns within timeout whether or not the fsync finishes.
 func Probe(dir string, timeout time.Duration) Result {
@@ -91,16 +93,33 @@ func Probe(dir string, timeout time.Duration) Result {
 	if err != nil {
 		return errorResult(fmt.Errorf("resolve gc executable: %w", err))
 	}
-	return ProbeWithWorker(dir, timeout, func(d string) *exec.Cmd {
-		return exec.Command(exe, "dolt-state", "fsync-probe-worker", "--dir", d)
+	return probe(dir, timeout, func(result *os.File) error {
+		cmd := workerCommand(exe, dir, result)
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start fsync probe worker: %w", err)
+		}
+		// A background goroutine reaps the worker; the caller never waits on
+		// it, so a worker stuck in the kernel outlives the call and finishes
+		// on its own.
+		go func() { _ = cmd.Wait() }()
+		return nil
 	})
 }
 
-// ProbeWithWorker is Probe with the worker command supplied by the caller. The
-// command runs in its own session with null stdio and the result pipe as
-// ResultFD. A background goroutine reaps it; the caller never waits on it, so
-// a worker stuck in the kernel outlives the call and finishes on its own.
-func ProbeWithWorker(dir string, timeout time.Duration, worker func(dir string) *exec.Cmd) Result {
+// workerCommand builds the detached worker: its own session, null stdio and
+// the result pipe as ResultFD.
+func workerCommand(exe, dir string, result *os.File) *exec.Cmd {
+	cmd := exec.Command(exe, "dolt-state", "fsync-probe-worker", "--dir", dir)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cmd.ExtraFiles = []*os.File{result}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd
+}
+
+// probe hands start the write end of a result pipe and reads the worker's
+// Result from the read end under timeout. The write end is closed here once
+// start returns, so only the worker holds it open.
+func probe(dir string, timeout time.Duration, start func(result *os.File) error) Result {
 	if err := requireDir(dir); err != nil {
 		return errorResult(err)
 	}
@@ -113,20 +132,11 @@ func ProbeWithWorker(dir string, timeout time.Duration, worker func(dir string) 
 	}
 	defer rd.Close() //nolint:errcheck // closing also unblocks the reader goroutine
 
-	cmd := worker(dir)
-	if cmd == nil {
-		_ = wr.Close()
-		return errorResult(errors.New("no worker command"))
-	}
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
-	cmd.ExtraFiles = []*os.File{wr}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		_ = wr.Close()
-		return errorResult(fmt.Errorf("start fsync probe worker: %w", err))
-	}
+	err = start(wr)
 	_ = wr.Close()
-	go func() { _ = cmd.Wait() }()
+	if err != nil {
+		return errorResult(err)
+	}
 
 	results := make(chan Result, 1)
 	go func() { results <- readResult(rd) }()

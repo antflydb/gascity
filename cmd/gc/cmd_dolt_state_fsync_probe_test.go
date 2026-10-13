@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,10 +124,7 @@ func newFsyncGuardFixture(t *testing.T, listening bool) *fsyncGuardFixture {
 	}
 	materializeBuiltinPacksForTest(t, cityPath)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	ln := listenOnRandomPort(t)
 	port := ln.Addr().(*net.TCPAddr).Port
 	if listening {
 		t.Cleanup(func() { _ = ln.Close() })
@@ -215,22 +211,8 @@ func (f *fsyncGuardFixture) recover(t *testing.T, noGCBin bool, extra ...string)
 		env = append(env, "GC_BIN="+f.fakeGC)
 	}
 	env = append(env, extra...)
-	cmd := exec.Command(f.script, "recover")
-	cmd.Env = sanitizedBaseEnv(env...)
-	done := make(chan struct{})
-	var b []byte
-	go func() {
-		b, err = cmd.CombinedOutput()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(60 * time.Second):
-		_ = cmd.Process.Kill()
-		<-done
-		t.Fatalf("gc-beads-bd recover did not finish in 60s; output:\n%s", b)
-	}
-	return string(b), err
+	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(env...), f.script, "recover")
+	return stdout + stderr, err
 }
 
 func (f *fsyncGuardFixture) calls(t *testing.T) string {
