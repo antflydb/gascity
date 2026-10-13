@@ -1264,8 +1264,8 @@ func (p *Provider) TeardownServer() error {
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
-	isSessionRunning(name string) bool
-	isRuntimeRunning(name string, processNames []string) bool
+	isSessionRunning(name string) (bool, error)
+	isRuntimeRunning(name string, processNames []string) (bool, error)
 	killSession(name string) error
 	waitForCommand(ctx context.Context, name string, timeout time.Duration) error
 	acceptStartupDialogs(ctx context.Context, name string) error
@@ -1383,12 +1383,12 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
-func (o *tmuxStartOps) isSessionRunning(name string) bool {
-	return o.tm.IsSessionRunning(name)
+func (o *tmuxStartOps) isSessionRunning(name string) (bool, error) {
+	return o.tm.IsSessionRunningWithError(name)
 }
 
-func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) bool {
-	return o.tm.IsRuntimeRunning(name, processNames)
+func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
+	return o.tm.IsRuntimeRunningWithError(name, processNames)
 }
 
 func (o *tmuxStartOps) killSession(name string) error {
@@ -1758,7 +1758,9 @@ func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
 	if hasErr != nil {
 		return fmt.Errorf("verifying session after ready deadline: %w", hasErr)
 	}
-	if alive && ops.isSessionRunning(name) {
+	// The session was created by this start, so an unanswerable probe falls
+	// through to the dead-session report below, never to a recycle.
+	if running, _ := ops.isSessionRunning(name); alive && running {
 		return nil
 	}
 	if alive {
@@ -1813,7 +1815,9 @@ func failIfSessionDiedDuringStartupProbe(ops startOps, name string) error {
 	if err != nil {
 		return fmt.Errorf("verifying session after startup probe: %w", err)
 	}
-	if alive && ops.isSessionRunning(name) {
+	// The session was created by this start, so an unanswerable probe falls
+	// through to the dead-session report below, never to a recycle.
+	if running, _ := ops.isSessionRunning(name); alive && running {
 		return nil
 	}
 	if alive {
@@ -2003,7 +2007,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	if !alive {
 		return startupSessionDiedError(name)
 	}
-	if !ops.isSessionRunning(name) {
+	// The session was created by this start, so an unanswerable probe reads
+	// as a dead session here, never as a recycle.
+	if running, _ := ops.isSessionRunning(name); !running {
 		return startupDeadSessionError(ops, name)
 	}
 
@@ -2339,7 +2345,7 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 
 	// Session exists but the pane is already dead (e.g. remain-on-exit corpse).
 	// Safe to recycle even when ProcessNames are unavailable.
-	if !ops.isSessionRunning(name) {
+	if running, _ := ops.isSessionRunning(name); !running {
 		if err := ops.killSession(name); err != nil {
 			return cleanupPromptFileOnError(promptFile, fmt.Errorf("killing dead session: %w", err))
 		}
@@ -2356,7 +2362,7 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	}
 
 	// We have process names — check if the agent is alive.
-	if ops.isRuntimeRunning(name, cfg.ProcessNames) {
+	if alive, _ := ops.isRuntimeRunning(name, cfg.ProcessNames); alive {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 

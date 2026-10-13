@@ -54,8 +54,12 @@ type fakeStartOps struct {
 
 	respawnErr error
 
-	isSessionRunningResult     *bool
-	isRuntimeRunningResult     bool
+	isSessionRunningResult *bool
+	isRuntimeRunningResult bool
+	// isSessionRunningErr and isRuntimeRunningErr make the matching probe
+	// answer "unknown": a non-nil error alongside the result.
+	isSessionRunningErr        error
+	isRuntimeRunningErr        error
 	killErr                    error
 	waitCommandErr             error
 	acceptStartupDialogsErr    error
@@ -121,24 +125,24 @@ func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[strin
 	return f.respawnErr
 }
 
-func (f *fakeStartOps) isSessionRunning(name string) bool {
+func (f *fakeStartOps) isSessionRunning(name string) (bool, error) {
 	f.calls = append(f.calls, startCall{
 		method: "isSessionRunning",
 		name:   name,
 	})
 	if f.isSessionRunningResult == nil {
-		return true
+		return true, f.isSessionRunningErr
 	}
-	return *f.isSessionRunningResult
+	return *f.isSessionRunningResult, f.isSessionRunningErr
 }
 
-func (f *fakeStartOps) isRuntimeRunning(name string, processNames []string) bool {
+func (f *fakeStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
 	f.calls = append(f.calls, startCall{
 		method:       "isRuntimeRunning",
 		name:         name,
 		processNames: processNames,
 	})
-	return f.isRuntimeRunningResult
+	return f.isRuntimeRunningResult, f.isRuntimeRunningErr
 }
 
 func (f *fakeStartOps) killSession(name string) error {

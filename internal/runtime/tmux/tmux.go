@@ -415,6 +415,14 @@ type Tmux struct {
 	// the production filesystem observation.
 	namedSocketLstat func(context.Context, string) (namedSocketObservation, error)
 
+	// processProbe runs the ps and pgrep queries behind process-tree liveness.
+	// Nil selects the production runner; tests inject a fake process table.
+	processProbe processProbe
+
+	// processWalkBound bounds one top-level process-tree walk. Zero selects
+	// defaultProcessWalkBound.
+	processWalkBound time.Duration
+
 	// certifiedPaneTerminator terminates each process plan captured by
 	// KillSessionWithCertifiedPaneProcessesExcluding. Nil selects
 	// terminateProcessKillPlan; tests inject a recorder to observe when
@@ -4658,6 +4666,30 @@ func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bo
 		}
 	}
 	return cmd != ""
+}
+
+// defaultProcessWalkBound bounds one process-tree walk when the Tmux does not
+// override it.
+const defaultProcessWalkBound = 10 * time.Second
+
+// processProbe runs one process query (ps or pgrep) under ctx. err is non-nil
+// only when the command could not be run to completion; a command that ran
+// reports its exit status in exitCode.
+type processProbe func(ctx context.Context, name string, args ...string) (stdout []byte, exitCode int, err error)
+
+// IsSessionRunningWithError is IsSessionRunning with an unknown answer.
+func (t *Tmux) IsSessionRunningWithError(session string) (bool, error) {
+	return t.IsSessionRunning(session), nil
+}
+
+// IsRuntimeRunningWithError is IsRuntimeRunning with an unknown answer.
+func (t *Tmux) IsRuntimeRunningWithError(session string, processNames []string) (bool, error) {
+	return t.IsRuntimeRunning(session, processNames), nil
+}
+
+// hasDescendantWithNames is the package-level walk with an unknown answer.
+func (t *Tmux) hasDescendantWithNames(ctx context.Context, pid string, names []string, depth int) (bool, error) {
+	return hasDescendantWithNames(pid, names, depth), ctx.Err()
 }
 
 // IsRuntimeRunning checks if a runtime appears to be running in the session.
