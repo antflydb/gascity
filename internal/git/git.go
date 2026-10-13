@@ -81,6 +81,11 @@ func (g *Git) DefaultBranch() (string, error) {
 	return "main", nil
 }
 
+// DefaultBranchCtx is DefaultBranch with a context. It does not yet honor ctx.
+func (g *Git) DefaultBranchCtx(_ context.Context) (string, error) {
+	return g.DefaultBranch()
+}
+
 // ProbeDefaultBranch returns the repo's mainline branch name. See
 // ProbeDefaultBranchFrom for the fallback chain; this drops the remote the
 // answer came from.

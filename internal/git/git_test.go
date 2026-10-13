@@ -1,11 +1,17 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -921,5 +927,178 @@ func TestParseWorktreeListUnquotesCQuotedPaths(t *testing.T) {
 	}
 	if got[0].Path != "/tmp/café" {
 		t.Errorf("Path = %q, want %q", got[0].Path, "/tmp/café")
+	}
+}
+
+// installBlockingGit puts a fake git first on PATH that appends its argv to a
+// log and then execs sleep, so a deadline kill reaps the sleeper directly. It
+// returns the log path.
+func installBlockingGit(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write blocking git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readGitCalls(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read fake git log: %v", err)
+	}
+	return string(data)
+}
+
+// A probe that misses its deadline returns the ctx error and no branch: it
+// must never invent "main" for a probe that did not answer.
+func TestDefaultBranchCtx_DeadlineReturnsErrorNotMain(t *testing.T) {
+	installBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	if err == nil {
+		t.Fatalf("DefaultBranchCtx = %q, nil; want a deadline error", branch)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty on a missed deadline", branch)
+	}
+}
+
+// A ctx that is already done spawns no git process at all.
+func TestDefaultBranchCtx_DoneContextSpawnsNothing(t *testing.T) {
+	logPath := installBlockingGit(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty", branch)
+	}
+	if calls := readGitCalls(t, logPath); calls != "" {
+		t.Fatalf("a done ctx spawned git:\n%s", calls)
+	}
+}
+
+// An ordinary non-zero exit (origin/HEAD unset) keeps walking the candidate
+// chain under a live deadline: a master-only repo answers "master".
+func TestDefaultBranchCtx_NonZeroExitKeepsCandidateChain(t *testing.T) {
+	clone := t.TempDir()
+	runGit(t, clone, "init")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	got, err := New(clone).DefaultBranchCtx(ctx)
+	if err != nil {
+		t.Fatalf("DefaultBranchCtx: %v", err)
+	}
+	if got != "master" {
+		t.Fatalf("DefaultBranchCtx = %q, want master", got)
+	}
+}
+
+// DefaultBranch keeps its no-deadline contract: with nothing answering it
+// still returns "main" and a nil error.
+func TestDefaultBranch_NoDeadlineStillFallsBackToMain(t *testing.T) {
+	got, err := New(t.TempDir()).DefaultBranch()
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", got)
+	}
+}
+
+// A deadline kill must not leave the call waiting on a pipe-holding orphan:
+// runCtx sets WaitDelay for a ctx that carries a deadline, so the call returns
+// while the orphan (still alive) holds the output pipe.
+func TestRunCtx_DeadlineBoundsWaitForPipeHoldingOrphan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
+	if _, err := exec.LookPath("mkfifo"); err != nil {
+		t.Skip("mkfifo not available")
+	}
+	scratch := t.TempDir()
+	ready := filepath.Join(scratch, "ready")
+	if out, err := exec.Command("mkfifo", ready).CombinedOutput(); err != nil {
+		t.Skipf("mkfifo: %v: %s", err, out)
+	}
+	binDir := t.TempDir()
+	// The orphan inherits the output pipe; the pid goes through the fifo so
+	// the test learns the orphan exists without polling.
+	script := "#!/bin/sh\n" +
+		"sleep 60 &\n" +
+		"echo $! > \"$GC_TEST_READY_FIFO\"\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("GC_TEST_READY_FIFO", ready)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pidCh := make(chan int, 1)
+	go func() {
+		data, err := os.ReadFile(ready)
+		if err != nil {
+			pidCh <- 0
+			return
+		}
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		pidCh <- pid
+	}()
+
+	// A deadline far in the future makes WaitDelay apply; cancel is what ends
+	// the call once the orphan is known to exist.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := New(t.TempDir()).runCtx(ctx, "status")
+		done <- err
+	}()
+
+	pid := <-pidCh
+	if pid == 0 {
+		t.Fatal("fake git never reported its orphan pid")
+	}
+	t.Cleanup(func() {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	cancel()
+
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+	p, ferr := os.FindProcess(pid)
+	if ferr != nil || p.Signal(syscall.Signal(0)) != nil {
+		t.Fatalf("orphan %d exited before runCtx returned: the call waited for the pipe holder instead of WaitDelay", pid)
 	}
 }

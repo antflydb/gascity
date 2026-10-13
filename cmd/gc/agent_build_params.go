@@ -114,6 +114,9 @@ type agentBuildParams struct {
 	// snapshots are not written. Start and adopt resolve side-effecting.
 	readOnly bool
 
+	gitLatch         *gitProbeLatch
+	gitProbeDeadline time.Duration
+
 	// realizeProbe times and counts pool realization for the realize_pools
 	// trace record. Set by buildDesiredState around its realization loop only;
 	// nil elsewhere, which disables the counters.
@@ -391,4 +394,26 @@ func resolveTmuxAliasForAgentIn(cityPath, cityName string, rigs []config.Rig, ag
 		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
 	}
 	return resolved, nil
+}
+
+// gitProbeLatch is not yet wired.
+type gitProbeLatch struct{ n int }
+
+func (l *gitProbeLatch) tripped() bool { return l == nil || l.n < 0 }
+
+func (l *gitProbeLatch) trip(_ error) bool { return l == nil }
+
+// defaultGitProbeTimeout bounds one default-branch probe.
+const defaultGitProbeTimeout = 10 * time.Second
+
+func (p *agentBuildParams) gitProbeTimeout() time.Duration {
+	if p == nil || p.gitProbeDeadline <= 0 {
+		return defaultGitProbeTimeout
+	}
+	return p.gitProbeDeadline
+}
+
+// defaultBranch does not yet bound the probe.
+func (p *agentBuildParams) defaultBranch(rigName, dir string) string {
+	return defaultBranchForRig(rigName, p.rigs, dir)
 }
