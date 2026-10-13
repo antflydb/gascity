@@ -467,17 +467,25 @@ func TestExecutePreparedStartWaveDefersUnfinishedOrphanScan(t *testing.T) {
 			}
 			ctx, build := tc.run()
 			sp := &startErrProvider{Fake: runtime.NewFake(), build: build}
+			// The runtime-only start runs under the candidate's lease.
+			cityPath := t.TempDir()
+			lease, release, err := tryRuntimeLease(nil, cityPath, "worker", "", 0)
+			if err != nil {
+				t.Fatalf("taking the candidate's flock: %v", err)
+			}
+			defer release()
 
 			results := executePreparedStartWaveForCity(
 				ctx,
 				[]preparedStart{{
 					candidate: startCandidate{
-						info: sessiontest.SeedBead(t, bead),
-						tp:   TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"},
+						info:  sessiontest.SeedBead(t, bead),
+						tp:    TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"},
+						lease: lease,
 					},
 					cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 				}},
-				t.TempDir(),
+				cityPath,
 				sp,
 				store,
 				nil,

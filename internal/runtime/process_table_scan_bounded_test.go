@@ -216,7 +216,7 @@ func TestFindRuntimesBySessionIDBoundedScanFinishingByBudgetWins(t *testing.T) {
 }
 
 func TestFindRuntimesBySessionIDBoundedLeavesNoGoroutineBehind(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	synctest.Test(t, func(_ *testing.T) {
 		sc := newBlockedScanner()
 		defer sc.unblock()
 		_, _ = FindRuntimesBySessionIDBounded(context.Background(), sc, "k-leak", "sid", scanBudget)
