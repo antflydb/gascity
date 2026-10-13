@@ -39,6 +39,10 @@ import (
 //   - a change that moves the pin, or touches the worker host's definition,
 //     is measured on the Blacksmith image inside the required bazel job, and
 //     a moved pin skips the remote suite (no worker serves it before merge).
+//   - a pull request run whose base commit predates a re-pin of the default
+//     branch (a stale base, not a change that moves the pin) fails its remote
+//     lane at the preflight with its cure (Re-run all jobs) instead of
+//     skipping bazel and reporting success.
 
 const (
 	rbeWorkerEnvDrift     = "tools/rbe/worker-env-drift"
