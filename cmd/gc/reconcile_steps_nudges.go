@@ -89,7 +89,7 @@ func (l *externalReadsLane) nudges(ctx context.Context, env externalReadsEnv) {
 	if ctx.Err() != nil {
 		return
 	}
-	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, l.events, l.requestExecutionStalled(env), l.stderr)
+	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, activityFloor{}, l.events, l.requestExecutionStalled(env), l.stderr)
 }
 
 // requestExecutionStalled is the execution backstop's requestDrain: it reads

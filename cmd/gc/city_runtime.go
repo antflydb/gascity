@@ -152,6 +152,7 @@ type CityRuntime struct {
 	ct                      crashTracker
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
+	resume                  *resumeDetector
 	adt                     assignedWorkDeferTracker
 	wg                      wispGC
 	od                      orderDispatcher
@@ -3473,6 +3474,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 			result.AssignedWorkStoreRefs,
 			result.StoreQueryPartial || result.SessionQueryPartial,
 			time.Now(),
+			cr.activityFloor(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
 			cr.stdout,
@@ -5189,3 +5191,6 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
 }
+
+// activityFloor returns the controller's current activity floor.
+func (cr *CityRuntime) activityFloor() activityFloor { return cr.resume.floor() }

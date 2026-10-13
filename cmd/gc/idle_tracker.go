@@ -206,3 +206,6 @@ func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.
 func idleTrackerContentClockApplies(provider, transport string) bool {
 	return transport != "acp" && provider == "claude"
 }
+
+// setActivityFloor sets the floor the activity route reads stamps through.
+func (m *memoryIdleTracker) setActivityFloor(activityFloor) {}

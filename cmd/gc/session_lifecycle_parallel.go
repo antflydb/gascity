@@ -482,6 +482,12 @@ func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	}
 }
 
+// withActivityFloor sets the activity floor this reconcile pass reads wall-clock
+// activity stamps through.
+func withActivityFloor(activityFloor) startExecutionOption {
+	return func(*startExecutionOptions) {}
+}
+
 // withAssignedWorkDeferTracker installs the consecutive same-bead
 // assigned-work defer backstop for this reconcile pass. Nil leaves the
 // backstop disabled (DecideIdleTimeout's AssignedWorkHas defer applies with

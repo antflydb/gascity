@@ -42,6 +42,10 @@ type executionBackstopFixture struct {
 	// workStore, when set, is the store handle the assigned-work snapshot
 	// carries for each claim (and so the one revalidate reads through).
 	workStore beads.Store
+
+	// floor is the controller's activity floor for the tick: zero unless a
+	// test simulates a detected host resume.
+	floor activityFloor
 }
 
 func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
@@ -123,7 +127,7 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	if f.provider != nil {
 		sp = f.provider
 	}
-	nudgeStalledPoolExecution(sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+	nudgeStalledPoolExecution(sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.floor, f.rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
@@ -1015,5 +1019,45 @@ func TestExecutionBackstopNewIncarnationInheritsNoSpentWindow(t *testing.T) {
 	f.tick(t)
 	if len(f.drained) != 1 {
 		t.Fatalf("after the incarnation's own grace with no nudge to send: drains %v, want one escalation", f.drained)
+	}
+}
+
+// TestExecutionBackstopResumeFloorHoldsNudgesAfterHostResume: after a suspend
+// every runtime's wall-clock activity is hours old, so without a floor the
+// backstop would read every claim holder as quiet and nudge them all. With the
+// floor at the resume instant the session has been quiet for the awake time
+// only.
+func TestExecutionBackstopResumeFloorHoldsNudgesAfterHostResume(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	for i := 0; i < 3; i++ {
+		// The resume was detected a second ago on every pass, and each pass is
+		// more than the grace after the last, so only the floor holds the nudge.
+		f.floor = activityFloor{at: f.now.Add(-time.Second)}
+		f.idleFor(t, 72*time.Hour)
+		f.tick(t)
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	}
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges within the grace of a detected resume = %d, want 0; stdout=%s", got, f.stdout.String())
+	}
+}
+
+// TestExecutionBackstopResumeFloorNudgesOnceGraceElapsesPastResume: the floor
+// delays the nudge, it does not suppress it.
+func TestExecutionBackstopResumeFloorNudgesOnceGraceElapsesPastResume(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.floor = activityFloor{at: f.now}
+	f.idleFor(t, 72*time.Hour)
+	f.tick(t) // inside the grace of the resume: not quiet, nothing observed
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 72*time.Hour)
+	f.tick(t) // first sighting of a quiet claim holder: start the grace clock
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 72*time.Hour)
+	f.tick(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges once the grace elapsed past the resume = %d, want 1; stdout=%s", got, f.stdout.String())
 	}
 }

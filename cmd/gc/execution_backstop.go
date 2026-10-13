@@ -156,6 +156,7 @@ func nudgeStalledPoolExecution(
 	workStoreRefs []string,
 	snapshotPartial bool,
 	now time.Time,
+	_ activityFloor,
 	rec events.Recorder,
 	requestDrain func(sessionBead beads.Bead) error,
 	stdout io.Writer,
