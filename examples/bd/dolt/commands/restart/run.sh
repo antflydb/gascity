@@ -66,7 +66,16 @@ FSYNC_STALL_HELPER="$BD_SCRIPT_DIR/dolt-fsync-stall.sh"
 if [ ! -f "$FSYNC_STALL_HELPER" ]; then
   FSYNC_STALL_HELPER="$(CDPATH= cd -- "$DOLT_PACK_DIR/../assets/scripts" 2>/dev/null && pwd)/dolt-fsync-stall.sh"
 fi
-. "$FSYNC_STALL_HELPER"
+if [ -f "$FSYNC_STALL_HELPER" ]; then
+  . "$FSYNC_STALL_HELPER"
+else
+  # Fail open like every other fsync-stall failure: restart must stay usable
+  # when the helper is not shipped beside the pack.
+  recovery_should_skip_due_to_fsync_stall() {
+    echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside the bd pack" >&2
+    return 1
+  }
+fi
 
 if recovery_should_skip_due_to_enospc; then
   if [ "$force_restart" != "true" ]; then
