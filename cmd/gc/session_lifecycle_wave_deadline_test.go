@@ -21,15 +21,18 @@ import (
 // subprocess or store has hung. Every other call is the Fake's.
 type wedgedLivenessProvider struct {
 	*runtime.Fake
-	wedged  map[string]bool
-	entered chan string
-	release chan struct{}
-	once    sync.Once
-	city    string         // created before the cleanup that unblocks, so it outlives the released starts
-	inProbe sync.WaitGroup // wedged probes not yet released
+	wedged map[string]bool
+	// wedgedStart names sessions whose provider Start (not the probe before
+	// it) blocks until release and then completes, ignoring ctx.
+	wedgedStart map[string]bool
+	entered     chan string
+	release     chan struct{}
+	once        sync.Once
+	city        string // created before the cleanup that unblocks, so it outlives the released starts
 
-	mu     sync.Mutex
-	probes map[string]int
+	mu      sync.Mutex
+	inProbe int // wedged probes entered and not yet released
+	probes  map[string]int
 }
 
 // newWedgedLivenessProvider wedges the named sessions and unblocks them when
@@ -50,7 +53,7 @@ func newWedgedLivenessProvider(t *testing.T, wedged ...string) *wedgedLivenessPr
 	}
 	t.Cleanup(func() {
 		p.unblock()
-		p.inProbe.Wait()
+		p.waitProbesReleased()
 		// The released starts finish their provider Start and write their
 		// results a moment after the probe returns.
 		time.Sleep(100 * time.Millisecond)
@@ -60,21 +63,56 @@ func newWedgedLivenessProvider(t *testing.T, wedged ...string) *wedgedLivenessPr
 
 func (p *wedgedLivenessProvider) unblock() { p.once.Do(func() { close(p.release) }) }
 
+//nolint:unparam // implements runtime.LivenessObserverWithError; the double never errors.
 func (p *wedgedLivenessProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	p.mu.Lock()
 	p.probes[name]++
 	p.mu.Unlock()
 	if p.wedged[name] {
-		p.inProbe.Add(1)
+		p.mu.Lock()
+		p.inProbe++
+		p.mu.Unlock()
 		select {
 		case p.entered <- name:
 		default:
 		}
 		<-p.release
-		p.inProbe.Done()
+		p.mu.Lock()
+		p.inProbe--
+		p.mu.Unlock()
 	}
 	running := p.IsRunning(name)
 	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+// waitProbesReleased blocks until every wedged probe has returned from its
+// release, so no start goroutine is mid-probe when the test's city goes away.
+func (p *wedgedLivenessProvider) waitProbesReleased() {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		n := p.inProbe
+		p.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Start blocks for a session in wedgedStart, as a provider call that takes no
+// ctx would, and then starts it on the Fake.
+func (p *wedgedLivenessProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.wedgedStart[name] {
+		p.mu.Lock()
+		p.inProbe++
+		p.mu.Unlock()
+		<-p.release
+		p.mu.Lock()
+		p.inProbe--
+		p.mu.Unlock()
+	}
+	return p.Fake.Start(ctx, name, cfg)
 }
 
 func (p *wedgedLivenessProvider) probeCount(name string) int {
@@ -217,7 +255,7 @@ func TestExecutePreparedStartWave_AbandonedStartCompletingLateDoesNotRaceTheCall
 	requireAbandoned(t, results[0], "wedged")
 }
 
-// TestExecutePreparedStartWave_CtxEndsTheWaitBeforeTheDeadline: a cancelled
+// TestExecutePreparedStartWave_CtxEndsTheWaitBeforeTheDeadline: a canceled
 // ctx ends the wait on its own, with the deadline an hour away.
 func TestExecutePreparedStartWave_CtxEndsTheWaitBeforeTheDeadline(t *testing.T) {
 	setWaveDeadlineSlack(t, time.Hour)
@@ -353,12 +391,16 @@ func TestExecutePlannedStarts_SyncWaveAbandonedStartTouchesNoRuntime(t *testing.
 }
 
 // TestExecutePlannedStarts_SyncWaveAbandonedStartCompletingLate is a
-// characterization, not new behaviour: the wave abandons a start, the start
+// characterization, not new behavior: the wave abandons a start, the start
 // later completes and leaves a runtime behind, and the next planner pass over
 // the same candidate must neither start a duplicate nor wedge the bead.
 func TestExecutePlannedStarts_SyncWaveAbandonedStartCompletingLate(t *testing.T) {
 	setWaveDeadlineSlack(t, 100*time.Millisecond)
 	f := newWedgedPlannerFixture(t)
+	// The start itself wedges, so it completes after the release and leaves a
+	// runtime behind (a wedged probe would resume on an expired startup ctx).
+	f.wedged.wedged = map[string]bool{}
+	f.wedged.wedgedStart = map[string]bool{"worker": true}
 	if got := f.plan(t, f.cand); got != 0 {
 		t.Fatalf("first pass woken = %d, want 0", got)
 	}
