@@ -2157,10 +2157,9 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	}
 	// ACP session/prompt delivery requires the process that owns the
 	// in-memory ACP connection. A sidecar `gc nudge poll` process can
-	// observe the control socket but cannot safely deliver prompts. In
-	// legacy mode this leaves warm-idle ACP delivery to hook-drain only;
-	// configure daemon.nudge_dispatcher = "supervisor" for dispatcher-owned
-	// queued delivery.
+	// observe the control socket but cannot safely deliver prompts. The
+	// controller's dispatcher delivers ACP queues in both modes
+	// (dispatchAllQueuedNudges), beside the hook drain.
 	if target.sessionTransport() == "acp" {
 		return
 	}

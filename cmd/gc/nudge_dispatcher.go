@@ -111,8 +111,12 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // sessionBeads, and try delivery. Returns the number of targets that
 // successfully delivered at least one item.
 //
-// This is a no-op when the dispatcher is configured for "legacy" mode —
-// the per-session `gc nudge poll` processes own delivery in that case.
+// In "legacy" mode the per-session `gc nudge poll` processes own delivery,
+// except for ACP sessions: session/prompt needs the process that owns the
+// in-memory ACP connection, so no poller is started for them
+// (ensureNudgePollerForTarget), and this pass delivers their queued items
+// (mc-z0og9). Legacy mode skips every other target, and returns at once
+// when no open session is on ACP.
 //
 // debugOut receives one GC_DEBUG-gated line per silently-skipped target (see
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
@@ -122,7 +126,8 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	acpOnly := !nudgeDispatcherIsSupervisor(cfg)
+	if acpOnly && !anyOpenACPSession(cityPath, cfg, sessionBeads) {
 		return 0, nil
 	}
 	now := time.Now()
@@ -188,6 +193,9 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	skipCounts := make(map[string]int64)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		if acpOnly && target.sessionTransport() != "acp" {
+			continue // its poller delivers it
+		}
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
@@ -266,6 +274,17 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// anyOpenACPSession reports an open session on the ACP transport, whose
+// queued nudges only the controller can deliver.
+func anyOpenACPSession(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) bool {
+	for _, info := range sessionBeads.OpenInfos() {
+		if resolveNudgeTargetFromSessionInfo(cityPath, cfg, info).sessionTransport() == "acp" {
+			return true
+		}
+	}
+	return false
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

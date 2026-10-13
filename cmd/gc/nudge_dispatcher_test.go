@@ -669,3 +669,76 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 		t.Fatal("wakeCh not signaled after enqueue")
 	}
 }
+
+// TestDispatchAllQueuedNudgesACPInLegacyMode (mc-z0og9; staging J34 B, both
+// reconciler modes): in the default legacy dispatcher mode no poller is
+// started for an ACP session (only the controller owns its connection), so
+// the controller's pass delivers its queued nudges as a runtime prompt; a
+// tmux session's queue is left to its poller, untouched, even in a pass an
+// open ACP session runs.
+func TestDispatchAllQueuedNudgesACPInLegacyMode(t *testing.T) {
+	for _, c := range []struct {
+		transport string
+		delivered int
+	}{
+		{"acp", 1},
+		{"", 0}, // tmux: its poller delivers
+	} {
+		t.Run("transport="+c.transport, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			nudges := openNudgeBeadStore(dir)
+			store := nudges.Store
+			if err := enqueueQueuedNudgeWithStore(dir, nudges, newQueuedNudge("worker", "j34 nudge", time.Now().Add(-time.Minute))); err != nil {
+				t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+			}
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+				t.Fatalf("fake.Start: %v", err)
+			}
+			fake.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+			meta := map[string]string{"session_name": "worker-session", "agent_name": "worker", "template": "worker"}
+			if c.transport != "" {
+				meta["transport"] = c.transport
+			}
+			created, err := store.Create(beads.Bead{Title: "Session: worker", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: meta})
+			if err != nil {
+				t.Fatalf("store.Create session bead: %v", err)
+			}
+			// An open ACP session with nothing queued, so the pass runs in both cases.
+			helper, err := store.Create(beads.Bead{
+				Title: "Session: helper", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+				Metadata: map[string]string{"session_name": "helper-session", "agent_name": "helper", "template": "helper", "transport": "acp"},
+			})
+			if err != nil {
+				t.Fatalf("store.Create session bead: %v", err)
+			}
+			legacy := &config.City{Daemon: config.DaemonConfig{}} // the default dispatcher mode
+			delivered, err := dispatchAllQueuedNudges(dir, legacy, store, store, fake, newSessionBeadSnapshot([]beads.Bead{created, helper}), nil)
+			if err != nil {
+				t.Fatalf("dispatchAllQueuedNudges: %v", err)
+			}
+			var prompts []string
+			for _, call := range fake.Calls {
+				if call.Method == "Nudge" {
+					prompts = append(prompts, call.Message)
+				}
+			}
+			pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			switch {
+			case delivered != c.delivered || len(prompts) != c.delivered:
+				t.Fatalf("delivered %d, prompts %q; want %d", delivered, prompts, c.delivered)
+			case c.delivered == 1 && (!strings.Contains(prompts[0], "j34 nudge") || len(pending) != 0):
+				t.Fatalf("prompt %q, pending %d; want the queued text delivered and the queue drained", prompts[0], len(pending))
+			case c.delivered == 0 && len(pending) != 1:
+				t.Fatalf("pending %d; want the poller's item left queued", len(pending))
+			}
+		})
+	}
+}
