@@ -95,3 +95,25 @@ func TestTerminateRuntimeBindsKillToScannedIdentity(t *testing.T) {
 		t.Fatalf("TerminateRuntime(recycled identity) = %v, want nil (the scanned process is gone)", err)
 	}
 }
+
+// A scan that surfaces no root has nothing to classify: the tracked map can
+// only mark entries already in the result, so asking tmux which sessions are
+// live (a subprocess per session) would be pure cost on every session start.
+func TestFindRuntimesBySessionIDWithNoRootsAsksTmuxNothing(t *testing.T) {
+	proctable.SetScanRootForTesting(t, t.TempDir())
+	fe := &fakeExecutor{}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
+
+	found, err := p.FindRuntimesBySessionID("gc-no-such-session")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("found = %+v, want none", found)
+	}
+	if len(fe.calls) != 0 {
+		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", fe.calls)
+	}
+}

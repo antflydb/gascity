@@ -410,3 +410,102 @@ func TestStartLeaseNameIsTheStartsName(t *testing.T) {
 		}
 	}
 }
+
+// startErrProvider fails Start with the error build returns, after running
+// any side effect build has (such as canceling the start's own context).
+type startErrProvider struct {
+	*runtime.Fake
+	build func() error
+}
+
+func (p *startErrProvider) Start(context.Context, string, runtime.Config) error { return p.build() }
+
+// A start whose pre-start orphan scan could not finish fails with an error
+// wrapping runtime.ErrRuntimeUnavailable plus the reason the wait ended. The
+// classifier must read that as a deferral whichever way the wait ended, ahead
+// of its start-context arms: the scan's budget expiring while the start's own
+// context is live, or the start's context canceled mid-scan. Neither is a
+// failed start (no rollback, no wake-failure budget spent, no probes).
+func TestExecutePreparedStartWaveDefersUnfinishedOrphanScan(t *testing.T) {
+	scanUnavailable := func(cause error) error {
+		return fmt.Errorf("starting session: pre-start orphan cleanup: %w: %w", runtime.ErrRuntimeUnavailable, cause)
+	}
+	for _, tc := range []struct {
+		name string
+		// run returns the parent context for the wave and the start error.
+		run func() (context.Context, func() error)
+	}{
+		{
+			name: "budget expired with a live start context",
+			run: func() (context.Context, func() error) {
+				return context.Background(), func() error { return scanUnavailable(context.DeadlineExceeded) }
+			},
+		},
+		{
+			name: "start context canceled mid-scan",
+			run: func() (context.Context, func() error) {
+				ctx, cancel := context.WithCancel(context.Background())
+				return ctx, func() error { cancel(); return scanUnavailable(context.Canceled) }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
+			bead, err := store.Create(beads.Bead{
+				ID: "gc-worker", Title: "worker", Type: sessionBeadType,
+				Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+					"session_name":  "worker",
+					"template":      "worker",
+					"state":         "asleep",
+					"last_woke_at":  clk.Now().Format(time.RFC3339),
+					"wake_attempts": "2",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create session: %v", err)
+			}
+			ctx, build := tc.run()
+			sp := &startErrProvider{Fake: runtime.NewFake(), build: build}
+
+			results := executePreparedStartWaveForCity(
+				ctx,
+				[]preparedStart{{
+					candidate: startCandidate{
+						info: sessiontest.SeedBead(t, bead),
+						tp:   TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"},
+					},
+					cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
+				}},
+				t.TempDir(),
+				sp,
+				store,
+				nil,
+				10*time.Second, 1,
+			)
+			if len(results) != 1 {
+				t.Fatalf("len(results) = %d, want 1", len(results))
+			}
+			result := results[0]
+			if result.err != nil || result.outcome != TraceOutcomeDeferred || result.rollbackPending || result.rateLimitScreen {
+				t.Fatalf("result = %#v, want deferred without error, rollback, or rate-limit screening", result)
+			}
+			if commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+				t.Fatal("deferred result counted as committed wake")
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get session: %v", err)
+			}
+			if got.Status != "open" || got.Metadata["wake_attempts"] != "2" {
+				t.Fatalf("session after deferral = %#v, want open state and unchanged failure budget", got)
+			}
+			if got.Metadata["last_woke_at"] != "" {
+				t.Fatalf("last_woke_at = %q, want cleared for retry", got.Metadata["last_woke_at"])
+			}
+			if stops := sp.CountCalls("Stop", "worker"); stops != 0 {
+				t.Fatalf("Stop calls = %d, want 0: a deferred start rolls nothing back", stops)
+			}
+		})
+	}
+}
