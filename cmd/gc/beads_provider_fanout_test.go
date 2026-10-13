@@ -179,6 +179,8 @@ func (fx *fanOutFixture) notProbed(err error) []string {
 		if !found {
 			continue
 		}
+		// The caller may append text after the list on the same line.
+		list, _, _ = strings.Cut(list, ")")
 		var names []string
 		for _, root := range strings.Split(list, ",") {
 			root = strings.TrimSpace(root)
