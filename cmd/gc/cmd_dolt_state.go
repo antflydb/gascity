@@ -7,8 +7,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/fsyncprobe"
 	"github.com/spf13/cobra"
 )
+
+// fsyncProbeFunc is the probe behind `gc dolt-state fsync-probe`; tests
+// replace it so they need no detached worker.
+var fsyncProbeFunc = fsyncprobe.Probe
 
 func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -349,6 +354,53 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	healthCheck.Flags().BoolVar(&checkReadOnly, "check-read-only", false, "include read-only status")
 	_ = healthCheck.MarkFlagRequired("port")
 	cmd.AddCommand(healthCheck)
+
+	fsyncProbe := &cobra.Command{
+		Use:    "fsync-probe",
+		Short:  "Time one fsync in a Dolt data directory",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			res := fsyncProbeFunc(dataDir, time.Duration(timeoutMS)*time.Millisecond)
+			fields := []string{"status\t" + res.Status, fmt.Sprintf("fsync_ms\t%d", res.FsyncMS)}
+			if res.Status == fsyncprobe.StatusError {
+				fields = []string{"status\t" + res.Status, "error\t" + res.Error}
+			}
+			for _, line := range fields {
+				if _, err := fmt.Fprintln(stdout, line); err != nil {
+					fmt.Fprintf(stderr, "gc dolt-state fsync-probe: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+			}
+			if res.Status == fsyncprobe.StatusError {
+				fmt.Fprintf(stderr, "gc dolt-state fsync-probe: %s\n", res.Error) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	fsyncProbe.Flags().StringVar(&dataDir, "dir", "", "Dolt data directory")
+	fsyncProbe.Flags().IntVar(&timeoutMS, "timeout-ms", 0, "bound in milliseconds; the probe returns by then even if the fsync has not")
+	_ = fsyncProbe.MarkFlagRequired("dir")
+	_ = fsyncProbe.MarkFlagRequired("timeout-ms")
+	cmd.AddCommand(fsyncProbe)
+
+	fsyncProbeWorker := &cobra.Command{
+		Use:    "fsync-probe-worker",
+		Short:  "Detached fsync-probe worker (re-exec target of fsync-probe)",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := fsyncprobe.RunWorker(dataDir, os.NewFile(fsyncprobe.ResultFD, "fsync-probe-result")); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state fsync-probe-worker: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	fsyncProbeWorker.Flags().StringVar(&dataDir, "dir", "", "Dolt data directory")
+	_ = fsyncProbeWorker.MarkFlagRequired("dir")
+	cmd.AddCommand(fsyncProbeWorker)
 
 	waitReady := &cobra.Command{
 		Use:    "wait-ready",
