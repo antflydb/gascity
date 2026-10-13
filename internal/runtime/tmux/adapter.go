@@ -1229,6 +1229,7 @@ func (p *Provider) Attach(name string) error {
 		return fmt.Errorf("refusing to attach to dead pane for session %q", name)
 	}
 	args := p.tm.attachCommandArgs(name, witness)
+	// Unbounded on purpose: an interactive attach runs until the user detaches.
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -2345,7 +2346,16 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 
 	// Session exists but the pane is already dead (e.g. remain-on-exit corpse).
 	// Safe to recycle even when ProcessNames are unavailable.
-	if running, _ := ops.isSessionRunning(name); !running {
+	// Recycling kills the existing session, so only a definitive "not running"
+	// may reach it (RUNTIME-CONTRACT-009). An unanswerable probe defers the
+	// start: the error wraps runtime.ErrRuntimeUnavailable and keeps the
+	// "session exists" and "gone" wordings out, so the caller retries later
+	// instead of dropping or recycling the session.
+	running, err := ops.isSessionRunning(name)
+	if err != nil {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("probing existing session %q before recycle: %w", name, err))
+	}
+	if !running {
 		if err := ops.killSession(name); err != nil {
 			return cleanupPromptFileOnError(promptFile, fmt.Errorf("killing dead session: %w", err))
 		}
@@ -2362,7 +2372,11 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	}
 
 	// We have process names — check if the agent is alive.
-	if alive, _ := ops.isRuntimeRunning(name, cfg.ProcessNames); alive {
+	alive, err := ops.isRuntimeRunning(name, cfg.ProcessNames)
+	if err != nil {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("probing existing session %q before recycle: %w", name, err))
+	}
+	if alive {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 

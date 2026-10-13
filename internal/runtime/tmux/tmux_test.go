@@ -1256,28 +1256,30 @@ func TestHasDescendantWithNames(t *testing.T) {
 	}
 
 	// Test with a definitely nonexistent PID
-	got := hasDescendantWithNames("999999999", []string{"node", "claude"}, 0)
-	if got {
-		t.Error("hasDescendantWithNames should return false for nonexistent PID")
+	tm := NewTmux()
+	ctx := context.Background()
+	got, err := tm.hasDescendantWithNames(ctx, "999999999", []string{"node", "claude"}, 0)
+	if got || err != nil {
+		t.Errorf("hasDescendantWithNames for nonexistent PID = (%v, %v), want (false, nil)", got, err)
 	}
 
 	// Test with empty names slice - should always return false
-	got = hasDescendantWithNames("1", []string{}, 0)
-	if got {
-		t.Error("hasDescendantWithNames should return false for empty names slice")
+	got, err = tm.hasDescendantWithNames(ctx, "1", []string{}, 0)
+	if got || err != nil {
+		t.Errorf("hasDescendantWithNames for empty names = (%v, %v), want (false, nil)", got, err)
 	}
 
 	// Test with nil names slice - should always return false
-	got = hasDescendantWithNames("1", nil, 0)
-	if got {
-		t.Error("hasDescendantWithNames should return false for nil names slice")
+	got, err = tm.hasDescendantWithNames(ctx, "1", nil, 0)
+	if got || err != nil {
+		t.Errorf("hasDescendantWithNames for nil names = (%v, %v), want (false, nil)", got, err)
 	}
 
 	// Exercise a real process-tree edge without recursively scanning every
 	// process on the host. The helper is a direct child of this test binary.
 	helper := startDescendantTestProcess(t)
-	if !hasDescendantWithNames(strconv.Itoa(os.Getpid()), []string{filepath.Base(os.Args[0])}, 0) {
-		t.Fatalf("hasDescendantWithNames did not find controlled child pid %d", helper.Process.Pid)
+	if found, err := tm.hasDescendantWithNames(ctx, strconv.Itoa(os.Getpid()), []string{filepath.Base(os.Args[0])}, 0); !found {
+		t.Fatalf("hasDescendantWithNames = (%v, %v), did not find controlled child pid %d", found, err, helper.Process.Pid)
 	}
 }
 

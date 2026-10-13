@@ -3453,10 +3453,7 @@ func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bo
 	if err != nil || strings.TrimSpace(pid) == "" {
 		return false
 	}
-	if processMatchesNames(pid, providers) {
-		return true
-	}
-	return hasDescendantWithNames(pid, providers, 0)
+	return t.processTreeRunsAny(pid, providers)
 }
 
 // AcceptStartupDialogs dismisses all Claude Code startup dialogs that can block
@@ -3809,16 +3806,12 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 			}
 		}
 
-		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
-		if processMatchesNames(r.pid, processNames) {
-			return r.target, nil
-		}
-
-		// Descendant walk: agents under shells ("bash -c 'exec claude'")
-		// or wrapper roots (systemd-run when GC_AGENT_SLICE is set) keep
-		// the shell/wrapper as pane_current_command — same unconditional
+		// Version-as-argv[0] (e.g., "2.1.30") checks the real binary name;
+		// then the descendant walk: agents under shells ("bash -c 'exec
+		// claude'") or wrapper roots (systemd-run when GC_AGENT_SLICE is set)
+		// keep the shell/wrapper as pane_current_command — same unconditional
 		// descendant fallback as IsRuntimeRunning.
-		if hasDescendantWithNames(r.pid, processNames, 0) {
+		if t.processTreeRunsAny(r.pid, processNames) {
 			return r.target, nil
 		}
 	}
@@ -4081,19 +4074,33 @@ func (t *Tmux) sessionPanesDead(session string) (bool, error) {
 
 // IsSessionRunning reports whether the tmux session exists and its primary pane
 // still has a live process. Dead panes kept by remain-on-exit are treated as
-// not running.
+// not running. A probe that cannot answer reads as not running; use
+// [Tmux.IsSessionRunningWithError] to tell that apart from a definitive no.
 func (t *Tmux) IsSessionRunning(session string) bool {
+	running, _ := t.IsSessionRunningWithError(session)
+	return running
+}
+
+// IsSessionRunningWithError is [Tmux.IsSessionRunning] with a three-valued
+// answer: (true, nil) is yes, (false, nil) is a definitive no (no such
+// session, no server, or a dead pane), and a non-nil error is unknown. The
+// error wraps [runtime.ErrRuntimeUnavailable] and the cause; its text names
+// only the session, so [runtime.IsSessionGone] never reads it as gone.
+func (t *Tmux) IsSessionRunningWithError(session string) (bool, error) {
 	has, err := t.HasSession(session)
-	if err != nil || !has {
-		return false
+	if err != nil {
+		return false, unknownProbeError(session, err)
+	}
+	if !has {
+		return false, nil
 	}
 	dead, err := t.IsPaneDead(session)
 	if err != nil {
 		// Fall back to session existence on query failures to avoid false
 		// negatives when tmux cannot report pane state.
-		return true
+		return true, nil
 	}
-	return !dead
+	return !dead, nil
 }
 
 // GetSessionActivity returns the last genuine agent activity time for a session.
@@ -4335,61 +4342,150 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 	return SessionHealthy
 }
 
+// defaultProcessWalkBound bounds one process-tree walk when the Tmux does not
+// override it: one deadline for the whole walk, not one per ps or pgrep.
+const defaultProcessWalkBound = 10 * time.Second
+
+// processProbe runs one process query (ps or pgrep) under ctx. err is non-nil
+// only when the command could not be run to completion (it could not be
+// started, or ctx ended first); a command that ran reports its exit status in
+// exitCode.
+type processProbe func(ctx context.Context, name string, args ...string) (stdout []byte, exitCode int, err error)
+
+// execProcessProbe is the production processProbe.
+func execProcessProbe(ctx context.Context, name string, args ...string) ([]byte, int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = tmuxWaitDelay
+	out, err := cmd.Output()
+	if err == nil {
+		return out, 0, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, 0, ctxErr
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return out, exitErr.ExitCode(), nil
+	}
+	return nil, 0, err
+}
+
+// processWalkContext returns the context for one top-level process-tree walk.
+// The walk passes it to every query, so the bound covers the walk, not each
+// query.
+func (t *Tmux) processWalkContext() (context.Context, context.CancelFunc) {
+	bound := t.processWalkBound
+	if bound <= 0 {
+		bound = defaultProcessWalkBound
+	}
+	return context.WithTimeout(context.Background(), bound)
+}
+
+// queryProcess runs one ps or pgrep query. Exit 0 is an answer (found), exit 1
+// is a definitive "no match", and anything else (a deadline, a command that
+// cannot be started, another exit status) is an error: unknown. Once ctx has
+// ended no further query runs.
+func (t *Tmux) queryProcess(ctx context.Context, name string, args ...string) (out string, found bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, fmt.Errorf("%s: %w", name, err)
+	}
+	probe := t.processProbe
+	if probe == nil {
+		probe = execProcessProbe
+	}
+	stdout, code, err := probe(ctx, name, args...)
+	switch {
+	case err != nil:
+		return "", false, fmt.Errorf("%s: %w", name, err)
+	case code == 0:
+		return string(stdout), true, nil
+	case code == 1:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("%s: exit status %d", name, code)
+	}
+}
+
 // processMatchesNames checks if a process's binary name matches any of the given names.
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
-func processMatchesNames(pid string, names []string) bool {
+// A process that is not there is a definitive no; a ps that cannot answer is
+// an error (unknown).
+func (t *Tmux) processMatchesNames(ctx context.Context, pid string, names []string) (bool, error) {
 	nameSet := proctable.ProcessNameSet(names)
 	if len(nameSet) == 0 {
-		return false
+		return false, nil
 	}
 
 	// Use ps to get the command name (COMM column gives the executable name)
-	cmd := exec.Command("ps", "-p", pid, "-o", "comm=")
-	out, err := cmd.Output()
-	if err != nil {
-		return false
+	comm, found, err := t.queryProcess(ctx, "ps", "-p", pid, "-o", "comm=")
+	if err != nil || !found {
+		return false, err
 	}
-	commPath := strings.TrimSpace(string(out))
+	commPath := strings.TrimSpace(comm)
 
 	// Fall back to argv[0] from the full command line. This catches wrapper
 	// scripts launched as "/path/to/codex" where COMM may report "bash" or
 	// another interpreter instead of the provider name.
-	cmd = exec.Command("ps", "-p", pid, "-o", "args=")
-	out, err = cmd.Output()
-	if err != nil {
-		return false
+	args, found, err := t.queryProcess(ctx, "ps", "-p", pid, "-o", "args=")
+	if err != nil || !found {
+		return false, err
 	}
-	return proctable.ProcessMatchesNameSet(commPath, string(out), nameSet)
+	return proctable.ProcessMatchesNameSet(commPath, args, nameSet), nil
 }
 
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
 // matching any of the given names. Recursively traverses the process tree up to maxDepth.
 // Used when the pane command is a shell (bash, zsh) that launched an agent.
-func hasDescendantWithNames(pid string, names []string, depth int) bool {
+//
+// A match anywhere is yes, even if other queries were unknown. With no match,
+// any unknown query makes the walk unknown (the first error); only a walk in
+// which every query answered, and found nothing, is a no. Reaching the depth
+// cap is a definitive no.
+func (t *Tmux) hasDescendantWithNames(ctx context.Context, pid string, names []string, depth int) (bool, error) {
 	if len(names) == 0 || depth > maxProcessDescendantDepth {
-		return false
+		return false, nil
 	}
 	// Use pgrep to find child processes.
-	cmd := exec.Command("pgrep", "-P", pid)
-	out, err := cmd.Output()
-	if err != nil {
-		return false
+	out, found, err := t.queryProcess(ctx, "pgrep", "-P", pid)
+	if err != nil || !found {
+		return false, err
 	}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
+	var unknown error
+	for _, line := range strings.Split(out, "\n") {
 		childPid := strings.TrimSpace(line)
 		if childPid == "" {
 			continue
 		}
-		if processMatchesNames(childPid, names) {
-			return true
+		matched, err := t.processMatchesNames(ctx, childPid, names)
+		if matched {
+			return true, nil
 		}
-		if hasDescendantWithNames(childPid, names, depth+1) {
-			return true
+		if unknown == nil {
+			unknown = err
+		}
+		matched, err = t.hasDescendantWithNames(ctx, childPid, names, depth+1)
+		if matched {
+			return true, nil
+		}
+		if unknown == nil {
+			unknown = err
 		}
 	}
-	return false
+	return false, unknown
+}
+
+// processTreeRunsAny reports whether pid, or a process below it, is one of
+// names. It starts its own bounded walk and reads an unknown as no, for the
+// callers that only act on a positive match.
+func (t *Tmux) processTreeRunsAny(pid string, names []string) bool {
+	ctx, cancel := t.processWalkContext()
+	defer cancel()
+	if matched, _ := t.processMatchesNames(ctx, pid, names); matched {
+		return true
+	}
+	matched, _ := t.hasDescendantWithNames(ctx, pid, names, 0)
+	return matched
 }
 
 // FindSessionByWorkDir finds tmux sessions where the pane's current working directory
@@ -4668,45 +4764,35 @@ func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bo
 	return cmd != ""
 }
 
-// defaultProcessWalkBound bounds one process-tree walk when the Tmux does not
-// override it.
-const defaultProcessWalkBound = 10 * time.Second
-
-// processProbe runs one process query (ps or pgrep) under ctx. err is non-nil
-// only when the command could not be run to completion; a command that ran
-// reports its exit status in exitCode.
-type processProbe func(ctx context.Context, name string, args ...string) (stdout []byte, exitCode int, err error)
-
-// IsSessionRunningWithError is IsSessionRunning with an unknown answer.
-func (t *Tmux) IsSessionRunningWithError(session string) (bool, error) {
-	return t.IsSessionRunning(session), nil
-}
-
-// IsRuntimeRunningWithError is IsRuntimeRunning with an unknown answer.
-func (t *Tmux) IsRuntimeRunningWithError(session string, processNames []string) (bool, error) {
-	return t.IsRuntimeRunning(session, processNames), nil
-}
-
-// hasDescendantWithNames is the package-level walk with an unknown answer.
-func (t *Tmux) hasDescendantWithNames(ctx context.Context, pid string, names []string, depth int) (bool, error) {
-	return hasDescendantWithNames(pid, names, depth), ctx.Err()
-}
-
 // IsRuntimeRunning checks if a runtime appears to be running in the session.
 // Checks both pane command and child processes (for agents started via shell).
-// This is the unified agent detection method for all agent types.
+// This is the unified agent detection method for all agent types. A probe that
+// cannot answer reads as not running; use [Tmux.IsRuntimeRunningWithError] to
+// tell that apart from a definitive no.
 func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
+	running, _ := t.IsRuntimeRunningWithError(session, processNames)
+	return running
+}
+
+// IsRuntimeRunningWithError is [Tmux.IsRuntimeRunning] with a three-valued
+// answer: (true, nil) is yes, (false, nil) is a definitive no, and a non-nil
+// error is unknown. A pane query that reports the session or server gone is a
+// definitive no; any other failure of a pane or process query (including a
+// walk that outlives its bound) is unknown. The error wraps
+// [runtime.ErrRuntimeUnavailable] and the cause; its text names only the
+// session, so [runtime.IsSessionGone] never reads it as gone.
+func (t *Tmux) IsRuntimeRunningWithError(session string, processNames []string) (bool, error) {
 	if len(processNames) == 0 {
-		return false
+		return false, nil
 	}
 	cmd, err := t.GetPaneCommand(session)
 	if err != nil {
-		return false
+		return false, paneQueryUnknown(session, err)
 	}
 	// Check direct pane command match
 	for _, name := range processNames {
 		if cmd == name {
-			return true
+			return true, nil
 		}
 	}
 	// Check for child processes if pane command is a shell or unrecognized.
@@ -4714,23 +4800,70 @@ func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
 	// - Agents started with "bash -c 'export ... && agent ...'"
 	// - Claude Code showing version as argv[0] (e.g., "2.1.29")
 	pid, err := t.GetPanePID(session)
-	if err != nil || pid == "" {
-		return false
+	if err != nil {
+		return false, paneQueryUnknown(session, err)
 	}
+	if pid == "" {
+		// GetPanePID reports an empty PID as an error; an empty answer that
+		// slipped through names no process, so there is nothing to find.
+		return false, nil
+	}
+	ctx, cancel := t.processWalkContext()
+	defer cancel()
 	// If pane command is a shell, check descendants
 	for _, shell := range supportedShells {
 		if cmd == shell {
-			return hasDescendantWithNames(pid, processNames, 0)
+			found, err := t.hasDescendantWithNames(ctx, pid, processNames, 0)
+			return processVerdict(session, found, err)
 		}
 	}
 	// If pane command is unrecognized (not in processNames, not a shell),
 	// check if the process ITSELF matches (handles version-as-argv[0] like "2.1.30")
 	// before checking descendants.
-	if processMatchesNames(pid, processNames) {
-		return true
+	matched, selfErr := t.processMatchesNames(ctx, pid, processNames)
+	if matched {
+		return true, nil
 	}
 	// Finally check descendants as fallback
-	return hasDescendantWithNames(pid, processNames, 0)
+	found, err := t.hasDescendantWithNames(ctx, pid, processNames, 0)
+	if !found && err == nil {
+		err = selfErr
+	}
+	return processVerdict(session, found, err)
+}
+
+// paneQueryUnknown is the "unknown" error for a failed pane query, or nil
+// when the query says the session or the server is gone: a definitive no.
+func paneQueryUnknown(session string, err error) error {
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return nil
+	}
+	return unknownProbeError(session, err)
+}
+
+// processVerdict turns a walk's result into the three-valued answer: a match
+// is yes whatever else went unanswered, otherwise any error is unknown.
+func processVerdict(session string, found bool, err error) (bool, error) {
+	if found {
+		return true, nil
+	}
+	if err != nil {
+		return false, unknownProbeError(session, err)
+	}
+	return false, nil
+}
+
+// unknownProbeError is the "unknown" answer of a liveness probe: it wraps
+// [runtime.ErrRuntimeUnavailable] and cause for errors.Is, and renders only
+// the session and ErrRuntimeUnavailable. The cause text is left out on
+// purpose: causes such as "executable file not found" or "no tmux server
+// running" contain words [runtime.IsSessionGone] reads as the session being
+// gone, which would turn a deferred start into a dropped one.
+func unknownProbeError(session string, cause error) error {
+	return &quietCauseError{
+		msg:  fmt.Sprintf("probing session %q: %s", session, runtime.ErrRuntimeUnavailable),
+		errs: []error{runtime.ErrRuntimeUnavailable, cause},
+	}
 }
 
 // IsAgentAlive checks if an agent is running in the session using agent-agnostic detection.

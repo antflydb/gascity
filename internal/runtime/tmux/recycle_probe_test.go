@@ -16,11 +16,11 @@ import (
 // with probes that answer "unknown" and prove nothing is killed, the prompt
 // file is cleaned up, and the error tells the caller to defer.
 
-// unknownProbeError is the cause behind an unknown probe: a ps that is not
+// unknownProbeFixture is the cause behind an unknown probe: a ps that is not
 // installed, or a tmux server that went away between the probes. Both causes
 // carry text IsSessionGone reads as gone, so a test that lets the cause text
 // reach the error message would turn a deferred start into a dropped one.
-func unknownProbeError(cause string) error {
+func unknownProbeFixture(cause string) error {
 	return &quietCauseError{
 		msg:  `probing session "gc-test": ` + runtime.ErrRuntimeUnavailable.Error(),
 		errs: []error{runtime.ErrRuntimeUnavailable, errors.New(cause)},
@@ -40,13 +40,13 @@ func TestEnsureFreshSession_UnknownProbeNeverRecycles(t *testing.T) {
 		{
 			name:         "agent probe unknown, pane running",
 			sessionState: &running,
-			agentErr:     unknownProbeError(`exec: "ps": executable file not found in $PATH`),
+			agentErr:     unknownProbeFixture(`exec: "ps": executable file not found in $PATH`),
 			wantCalls:    []string{"createSession", "isSessionRunning", "isRuntimeRunning"},
 		},
 		{
 			name:         "session probe unknown",
 			sessionState: &notRunning,
-			sessionErr:   unknownProbeError("no tmux server running on /tmp/tmux-1000/default"),
+			sessionErr:   unknownProbeFixture("no tmux server running on /tmp/tmux-1000/default"),
 			wantCalls:    []string{"createSession", "isSessionRunning"},
 		},
 	}
@@ -151,7 +151,7 @@ func TestDoStartSession_UnknownProbeStaysUnavailable(t *testing.T) {
 	ops := &fakeStartOps{
 		createErrs:             []error{ErrSessionExists},
 		isSessionRunningResult: &running,
-		isRuntimeRunningErr:    unknownProbeError(`exec: "ps": executable file not found in $PATH`),
+		isRuntimeRunningErr:    unknownProbeFixture(`exec: "ps": executable file not found in $PATH`),
 	}
 	err := doStartSession(context.Background(), ops, "gc-test", runtime.Config{
 		Command:      "claude",

@@ -193,7 +193,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 
 	panePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(panePID, []string{"sleep"}, 0) {
+	for !(&Tmux{}).processTreeRunsAny(panePID, []string{"sleep"}) {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -280,7 +280,7 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 
 	livePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(livePID, []string{"sleep"}, 0) {
+	for !(&Tmux{}).processTreeRunsAny(livePID, []string{"sleep"}) {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
