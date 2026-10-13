@@ -11,29 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// wantWaitChunk is the number of wait beads one CloseAll may carry when
-// CancelWaits can be cut off by its context (waitCancelChunk in production).
-const wantWaitChunk = 10
-
-// ctxCancelWaits is the context-first CancelWaits these tests exercise. The
-// tests reach it through a runtime assertion, not a direct call, so they
-// compile against the current signature and fail on an assertion until the
-// method takes a context.
-type ctxCancelWaits interface {
-	CancelWaits(ctx context.Context, sessionID string, now time.Time) ([]string, bool, error)
-}
-
-// cancelWaitsWithCtx calls store.CancelWaits(ctx, sessionID, now), failing the
-// test when the method does not take a context first.
-func cancelWaitsWithCtx(t *testing.T, ctx context.Context, store *Store, sessionID string, now time.Time) ([]string, bool, error) {
-	t.Helper()
-	c, ok := any(store).(ctxCancelWaits)
-	if !ok {
-		t.Fatal("(*Store).CancelWaits does not take a context.Context as its first parameter")
-	}
-	return c.CancelWaits(ctx, sessionID, now)
-}
-
 // ctxWaitStore is a MemStore that records every store call CancelWaits can
 // make, so a test can assert how many calls a context let through and what
 // each CloseAll carried. afterCloseAll runs once the real CloseAll returned,
@@ -148,15 +125,15 @@ func equalStrings(a, b []string) bool {
 }
 
 // TestCancelWaitsBackgroundCtxKeepsOneCloseAllPerIDClass pins that a context
-// that can never be cancelled leaves CancelWaits' call shape as it was: one
+// that can never be canceled leaves CancelWaits' call shape as it was: one
 // CloseAll for the cancellable ids and one for the terminal ids per lookup
 // batch, however many waits the batch holds.
 func TestCancelWaitsBackgroundCtxKeepsOneCloseAllPerIDClass(t *testing.T) {
 	const sessionID = "gc-session"
-	pending, terminal := 2*wantWaitChunk+1, 3
+	pending, terminal := 2*waitCancelChunk+1, 3
 	store := seedCtxWaits(t, sessionID, pending, terminal)
 
-	nudgeIDs, capped, err := cancelWaitsWithCtx(t, context.Background(), waitStoreOver(store), sessionID, time.Now().UTC())
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(context.Background(), sessionID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CancelWaits: %v", err)
 	}
@@ -184,15 +161,15 @@ func TestCancelWaitsBackgroundCtxKeepsOneCloseAllPerIDClass(t *testing.T) {
 }
 
 // TestCancelWaitsCancellableCtxChunksCloseAll pins that a context that can be
-// cancelled, but never is, reaches the same end state with the same nudge IDs
+// canceled, but never is, reaches the same end state with the same nudge IDs
 // and cap flag as the Background path, in CloseAll calls of at most
-// wantWaitChunk ids.
+// waitCancelChunk ids.
 func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
 	const sessionID = "gc-session"
-	pending, terminal := 2*wantWaitChunk+1, 3
+	pending, terminal := 2*waitCancelChunk+1, 3
 
 	base := seedCtxWaits(t, sessionID, pending, terminal)
-	wantIDs, wantCapped, err := cancelWaitsWithCtx(t, context.Background(), waitStoreOver(base), sessionID, time.Now().UTC())
+	wantIDs, wantCapped, err := waitStoreOver(base).CancelWaits(context.Background(), sessionID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("Background CancelWaits: %v", err)
 	}
@@ -200,7 +177,7 @@ func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store := seedCtxWaits(t, sessionID, pending, terminal)
-	gotIDs, gotCapped, err := cancelWaitsWithCtx(t, ctx, waitStoreOver(store), sessionID, time.Now().UTC())
+	gotIDs, gotCapped, err := waitStoreOver(store).CancelWaits(ctx, sessionID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("cancellable CancelWaits: %v", err)
 	}
@@ -215,8 +192,8 @@ func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
 	}
 	closed := 0
 	for i, ids := range store.closeAllIDs {
-		if len(ids) > wantWaitChunk {
-			t.Fatalf("CloseAll #%d carried %d ids, want at most %d", i+1, len(ids), wantWaitChunk)
+		if len(ids) > waitCancelChunk {
+			t.Fatalf("CloseAll #%d carried %d ids, want at most %d", i+1, len(ids), waitCancelChunk)
 		}
 		closed += len(ids)
 	}
@@ -238,12 +215,12 @@ func TestCancelWaitsPreCancelledCtxMakesNoStoreCalls(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := cancelWaitsWithCtx(t, ctx, waitStoreOver(store), sessionID, time.Now().UTC())
+	_, _, err := waitStoreOver(store).CancelWaits(ctx, sessionID, time.Now().UTC())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want errors.Is context.Canceled", err)
 	}
 	if got := store.calls - callsAfterSeed; got != 0 {
-		t.Fatalf("store calls with a pre-cancelled ctx = %d, want 0", got)
+		t.Fatalf("store calls with a pre-canceled ctx = %d, want 0", got)
 	}
 	if got := countOpenWaits(t, store.MemStore, sessionID); got != 7 {
 		t.Fatalf("open waits = %d, want 7 untouched", got)
@@ -256,7 +233,7 @@ func TestCancelWaitsPreCancelledCtxMakesNoStoreCalls(t *testing.T) {
 // ID of every wait it had collected, including those in chunks it did not close.
 func TestCancelWaitsCancelInsideCloseAllLeavesLaterChunksOpen(t *testing.T) {
 	const sessionID = "gc-session"
-	pending := 2*wantWaitChunk + 1
+	pending := 2*waitCancelChunk + 1
 	store := seedCtxWaits(t, sessionID, pending, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -266,15 +243,15 @@ func TestCancelWaitsCancelInsideCloseAllLeavesLaterChunksOpen(t *testing.T) {
 		}
 	}
 
-	nudgeIDs, _, err := cancelWaitsWithCtx(t, ctx, waitStoreOver(store), sessionID, time.Now().UTC())
+	nudgeIDs, _, err := waitStoreOver(store).CancelWaits(ctx, sessionID, time.Now().UTC())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want errors.Is context.Canceled", err)
 	}
 	if got := len(store.closeAllIDs); got != 2 {
 		t.Fatalf("CloseAll calls = %d, want 2: none after the cancelling call", got)
 	}
-	if got := countOpenWaits(t, store, sessionID); got != pending-2*wantWaitChunk {
-		t.Fatalf("open waits = %d, want %d left in the unclosed chunk", got, pending-2*wantWaitChunk)
+	if got := countOpenWaits(t, store, sessionID); got != pending-2*waitCancelChunk {
+		t.Fatalf("open waits = %d, want %d left in the unclosed chunk", got, pending-2*waitCancelChunk)
 	}
 	if len(nudgeIDs) != pending {
 		t.Fatalf("returned %d nudge IDs, want all %d including the unclosed chunk's", len(nudgeIDs), pending)
