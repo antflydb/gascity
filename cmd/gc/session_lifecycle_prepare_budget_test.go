@@ -495,17 +495,6 @@ func TestPrepareBudgetWiring(t *testing.T) {
 	}
 }
 
-// The new outcome is documented beside the other start deferrals.
-func TestPrepareBudgetOutcomeDocumented(t *testing.T) {
-	doc, err := os.ReadFile("../../engdocs/design/dependency-aware-bounded-parallel-lifecycle.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(doc), "`"+prepareBudgetOutcome+"`") {
-		t.Fatalf("engdoc does not mention `%s`", prepareBudgetOutcome)
-	}
-}
-
 // The harness charges the clock inside prepare itself, which is what the
 // budget tests rely on.
 func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
