@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -46,11 +47,10 @@ func (c *budgetClock) Advance(d time.Duration) {
 }
 
 // prepareLatencyStore makes a session bead's prepare slow: the first Get of an
-// id in latency advances the clock by that duration (later Gets are free, so
-// the cost of a prepare is exact), and every Get of an id in failGet fails.
-// prepareStartCandidateForCity re-reads the bead inside the session mutation
-// lock, and nothing reads a never-started row's id earlier in the pass, so the
-// clock moves while prepare runs (TestPrepareLatencyStore_ChargesInsidePrepare).
+// id in latency made from inside prepareStartCandidateForCity advances the
+// clock by that duration, and every such Get of an id in failGet fails. Gets from
+// elsewhere in the pass (the runtime lease's fresh read, the commit) are free,
+// so the cost of a prepare is exact whatever else reads the row.
 type prepareLatencyStore struct {
 	beads.Store
 	clk     *budgetClock
@@ -60,14 +60,33 @@ type prepareLatencyStore struct {
 	charged map[string]bool
 }
 
+// inPrepare reports whether the calling goroutine is inside
+// prepareStartCandidateForCity.
+func inPrepare() bool {
+	pcs := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, ".prepareStartCandidateForCity") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
 func (s *prepareLatencyStore) Get(id string) (beads.Bead, error) {
 	s.mu.Lock()
-	d := s.latency[id]
-	if s.charged[id] {
-		d = 0
+	var d time.Duration
+	var err error
+	if inPrepare() {
+		if !s.charged[id] {
+			d = s.latency[id]
+			s.charged[id] = true
+		}
+		err = s.failGet[id]
 	}
-	s.charged[id] = true
-	err := s.failGet[id]
 	s.mu.Unlock()
 	if d != 0 {
 		s.clk.Advance(d)
@@ -89,7 +108,7 @@ type prepareBudgetEnv struct {
 func newPrepareBudgetEnv(t *testing.T, names ...string) *prepareBudgetEnv {
 	t.Helper()
 	e := newCapacityEnv(t, false, names...)
-	lc := &budgetClock{f: e.reconcilerTestEnv.clk}
+	lc := &budgetClock{f: e.clk}
 	lat := &prepareLatencyStore{
 		Store:   e.store,
 		clk:     lc,
@@ -141,11 +160,21 @@ func (e *prepareBudgetEnv) deferredByBudget() []string {
 	return names
 }
 
-func (e *prepareBudgetEnv) requireDeferred(t *testing.T, want ...string) {
+// requireDeferred asserts the named candidates were deferred by the budget:
+// logged on stderr and recorded as trace decisions. An async pass flushes the
+// cycle's records after enqueueing its starts, so there the decisions are
+// counted instead of read back.
+func (e *prepareBudgetEnv) requireDeferred(t *testing.T, async bool, want ...string) {
 	t.Helper()
-	got := e.deferredByBudget()
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("trace deferred_by_prepare_budget = %v, want %v", got, want)
+	if async {
+		e.trace.mu.Lock()
+		got := e.trace.decisionCounts[string(TraceSiteLifecycleStartRun)]
+		e.trace.mu.Unlock()
+		if got != len(want) {
+			t.Fatalf("lifecycle_start_run trace decisions = %d, want %d\n%s", got, len(want), e.log.String())
+		}
+	} else if got := e.deferredByBudget(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("trace deferred_by_prepare_budget = %v, want %v\n%s", got, want, e.log.String())
 	}
 	for _, name := range want {
 		line := "session=" + name + " "
@@ -194,7 +223,7 @@ func TestExecutePlannedStarts_PrepareBudgetDefersRestOnceSpent(t *testing.T) {
 			if n := e.sp.CountCalls("Start", "a"); n != 1 {
 				t.Fatalf("a Start calls = %d, want 1", n)
 			}
-			e.requireDeferred(t, "b", "c")
+			e.requireDeferred(t, async, "b", "c")
 			e.requireUntouched(t, b, bBefore)
 			e.requireUntouched(t, c, cBefore)
 			if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 1 {
@@ -214,7 +243,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoAsyncSlotOrLease(t *te
 
 	e.run(testPrepareBudget, true, []startExecutionOption{withAsyncStartLimiter(limiter)}, a, b)
 
-	e.requireDeferred(t, "b")
+	e.requireDeferred(t, true, "b")
 	// a's start released its slot; with b never reserving one the limiter is
 	// empty and a one-slot limiter admitted a without ever refusing b for a
 	// full slot.
@@ -310,7 +339,7 @@ func TestExecutePlannedStarts_PrepareBudgetCarriesAcrossWaves(t *testing.T) {
 	if woken := e.run(testPrepareBudget, false, nil, a, b); woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)
 	}
-	e.requireDeferred(t, "b")
+	e.requireDeferred(t, false, "b")
 	e.requireUntouched(t, b, bBefore)
 }
 
@@ -328,7 +357,7 @@ func TestExecutePlannedStarts_PrepareBudgetCountsSlowFailingPrepare(t *testing.T
 	if !strings.Contains(e.log.String(), "session=a template=a outcome=failed") {
 		t.Fatalf("a's failed prepare not logged:\n%s", e.log.String())
 	}
-	e.requireDeferred(t, "b")
+	e.requireDeferred(t, false, "b")
 	e.requireUntouched(t, b, bBefore)
 }
 
@@ -490,4 +519,48 @@ func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
 	if got := e.clk.Now().Sub(before); got != 7*time.Second {
 		t.Fatalf("prepare advanced the clock by %s, want exactly 7s", got)
 	}
+}
+
+// The meter's own edges, beside the behavior tests: a nil clock falls back to
+// the wall clock, a backwards clock charges nothing, a limit of zero or less
+// never defers or reads the clock, and spent exactly at the limit defers.
+func TestPrepareMeter(t *testing.T) {
+	cand := startCandidate{tp: TemplateParams{TemplateName: "w", SessionName: "w"}}
+	f := &clock.Fake{Time: time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)}
+
+	t.Run("nil clock falls back to the wall clock", func(t *testing.T) {
+		m := &prepareMeter{limit: time.Hour}
+		m.begin()
+		m.end()
+		if m.spent < 0 || m.spent >= time.Hour {
+			t.Fatalf("spent = %s, want a small non-negative wall-clock charge", m.spent)
+		}
+	})
+	t.Run("backwards clock charges nothing", func(t *testing.T) {
+		m := &prepareMeter{limit: time.Second, clk: f}
+		m.begin()
+		f.Advance(-time.Minute)
+		m.end()
+		if m.spent != 0 {
+			t.Fatalf("spent = %s, want 0", m.spent)
+		}
+	})
+	t.Run("limit zero or less never defers", func(t *testing.T) {
+		for _, limit := range []time.Duration{0, -time.Second} {
+			m := &prepareMeter{limit: limit, clk: f, spent: time.Hour}
+			if m.deferIfSpent(ioDiscard{}, nil, 0, cand, &config.City{}) {
+				t.Fatalf("limit %s deferred", limit)
+			}
+		}
+	})
+	t.Run("exactly at the limit defers, just under does not", func(t *testing.T) {
+		m := &prepareMeter{limit: time.Minute, clk: f, spent: time.Minute - time.Nanosecond}
+		if m.deferIfSpent(ioDiscard{}, nil, 0, cand, &config.City{}) {
+			t.Fatal("deferred just under the limit")
+		}
+		m.spent = time.Minute
+		if !m.deferIfSpent(ioDiscard{}, nil, 0, cand, &config.City{}) {
+			t.Fatal("did not defer exactly at the limit")
+		}
+	})
 }
