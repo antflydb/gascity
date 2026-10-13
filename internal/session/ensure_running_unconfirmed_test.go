@@ -10,6 +10,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 // freshAnswer is one scripted fresh liveness read.
@@ -44,7 +46,7 @@ func (p *cachingFreshProvider) ObserveLivenessSince(name string, _ []string, _ t
 	p.observed++
 	a := p.answers[i]
 	if a.err == nil && !a.live.Running && p.managerRan {
-		_ = p.Fake.Stop(name)
+		_ = p.Stop(name)
 	}
 	return a.live, a.err
 }
@@ -64,9 +66,21 @@ const unconfirmedResumeCmd = "claude --dangerously --resume " + capacityTestSess
 // check after a successful Start.
 func seedUnconfirmedSession(t *testing.T, state State, keyed, cached bool, answers ...freshAnswer) (*Manager, *cachingFreshProvider, beads.Store, string, string) {
 	t.Helper()
+	return seedUnconfirmedSessionVia(t, nil, state, keyed, cached, answers...)
+}
+
+// seedUnconfirmedSessionVia is seedUnconfirmedSession with the manager over
+// wrap(the caching provider), a composite in front of it; nil is the provider
+// itself.
+func seedUnconfirmedSessionVia(t *testing.T, wrap func(*cachingFreshProvider) runtime.Provider, state State, keyed, cached bool, answers ...freshAnswer) (*Manager, *cachingFreshProvider, beads.Store, string, string) {
+	t.Helper()
 	store := beads.NewMemStore()
 	sp := &cachingFreshProvider{Fake: runtime.NewFake(), cached: cached, answers: answers}
-	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	var front runtime.Provider = sp
+	if wrap != nil {
+		front = wrap(sp)
+	}
+	mgr := newTestManager(t, store, front, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 	meta := map[string]string{
 		"state":           string(state),
 		"provider":        "claude",
@@ -110,32 +124,40 @@ func metadataOf(t *testing.T, store beads.Store, id string) map[string]string {
 }
 
 // converged reports err as a start path's convergence on a runtime that is
-// already up: the operator's Start returns nil, the reconciler's runtime-only
-// bridge the session-exists error it got.
+// already up: nil, or for the reconciler's runtime-only bridge also the
+// session-exists error its Start got.
 func converged(entry string, err error) bool {
-	if entry == "StartRuntimeOnly" {
-		return errors.Is(err, runtime.ErrSessionExists) && !errors.Is(err, runtime.ErrRuntimeUnavailable)
+	if entry == "StartRuntimeOnly" && errors.Is(err, runtime.ErrSessionExists) {
+		return !errors.Is(err, runtime.ErrRuntimeUnavailable)
 	}
 	return err == nil
 }
 
 // startEntry is each manager entry that brings a session up: the operator's
 // Start and the reconciler's runtime-only bridge.
-var startEntry = map[string]func(t *testing.T, mgr *Manager, id string) error{
-	"Start": func(t *testing.T, mgr *Manager, id string) error {
-		return mgr.Start(context.Background(), testActor(mgr, ActorOperator), id, unconfirmedResumeCmd, runtime.Config{WorkDir: "/tmp"})
+// Each is a factory: the runtime-only bridge runs under one held lease, so a
+// test that starts twice builds the starter once.
+var startEntry = map[string]func(t *testing.T, mgr *Manager, id string) func() error{
+	"Start": func(_ *testing.T, mgr *Manager, id string) func() error {
+		by := testActor(mgr, ActorOperator)
+		return func() error {
+			return mgr.Start(context.Background(), by, id, unconfirmedResumeCmd, runtime.Config{WorkDir: "/tmp"})
+		}
 	},
-	"StartRuntimeOnly": func(t *testing.T, mgr *Manager, id string) error {
-		return mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, unconfirmedResumeCmd, runtime.Config{WorkDir: "/tmp"})
+	"StartRuntimeOnly": func(t *testing.T, mgr *Manager, id string) func() error {
+		by := runtimeOnlyActor(t, mgr, id)
+		return func() error {
+			return mgr.StartRuntimeOnly(context.Background(), by, id, unconfirmedResumeCmd, runtime.Config{WorkDir: "/tmp"})
+		}
 	},
 }
 
 // A snapshot that says running is believed: no fresh read, no Start.
 func TestEnsureRunning_CachedRunningTakesNoFreshReadAndStartsNothing(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, true, freshUnknown)
-			if err := start(t, mgr, id); err != nil {
+			if err := newStart(t, mgr, id)(); err != nil {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if sp.observed != 0 {
@@ -151,10 +173,10 @@ func TestEnsureRunning_CachedRunningTakesNoFreshReadAndStartsNothing(t *testing.
 // A stale "absent" snapshot over a live runtime converges instead of
 // starting a second one or sweeping the live one as an orphan.
 func TestEnsureRunning_StaleAbsentSnapshotOverLiveRuntimeConverges(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, false, freshRunning)
-			if err := start(t, mgr, id); err != nil {
+			if err := newStart(t, mgr, id)(); err != nil {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if sp.observed != 1 {
@@ -173,12 +195,12 @@ func TestEnsureRunning_StaleAbsentSnapshotOverLiveRuntimeConverges(t *testing.T)
 // An unreadable runtime is neither running nor absent: the start path
 // refuses before it starts, scans for orphans or writes anything.
 func TestEnsureRunning_UnconfirmedLivenessStartsNothingAndChangesNothing(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, store, id, _ := seedUnconfirmedSession(t, StateAsleep, true, false, freshUnknown)
 			before := metadataOf(t, store, id)
 
-			err := start(t, mgr, id)
+			err := newStart(t, mgr, id)()
 
 			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Fatalf("%s error = %v, want runtime unavailable", entry, err)
@@ -199,11 +221,11 @@ func TestEnsureRunning_UnconfirmedLivenessStartsNothingAndChangesNothing(t *test
 // A confirmed absence still starts exactly once, and so does a corpse: a
 // listed session with no live pane is not running.
 func TestEnsureRunning_ConfirmedNotRunningStartsOnce(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		for name, answer := range map[string]freshAnswer{"absent": freshAbsent, "corpse": freshCorpse} {
 			t.Run(entry+"/"+name, func(t *testing.T) {
 				mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, false, answer)
-				if err := start(t, mgr, id); err != nil {
+				if err := newStart(t, mgr, id)(); err != nil {
 					t.Fatalf("%s: %v", entry, err)
 				}
 				if got := callCount(sp.Fake, "Start"); got != 1 {
@@ -218,12 +240,18 @@ func TestEnsureRunning_ConfirmedNotRunningStartsOnce(t *testing.T) {
 // up, so there is no fresh retry, no second Start, and the resume identity
 // stays. The next attempt converges on what is there.
 func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessKeepsResumeState(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
-			mgr, sp, store, id, _ := seedUnconfirmedSession(t, StateSuspended, true, false, freshUnknown)
+			// The bridge reads at its gate first; Start skips a suspended row's.
+			answers := []freshAnswer{freshUnknown}
+			if entry == "StartRuntimeOnly" {
+				answers = []freshAnswer{freshAbsent, freshUnknown}
+			}
+			mgr, sp, store, id, _ := seedUnconfirmedSession(t, StateSuspended, true, false, answers...)
 			before := metadataOf(t, store, id)
+			start := newStart(t, mgr, id)
 
-			err := start(t, mgr, id)
+			err := start()
 
 			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Fatalf("%s error = %v, want runtime unavailable", entry, err)
@@ -243,7 +271,7 @@ func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessKeepsResumeState(t *tes
 
 			sp.answers = []freshAnswer{freshRunning}
 			sp.observed = 0
-			if err := start(t, mgr, id); !converged(entry, err) {
+			if err := start(); !converged(entry, err) {
 				t.Fatalf("%s once the runtime reads running: %v, want convergence", entry, err)
 			}
 			if got := metadataOf(t, store, id)["session_key"]; got != capacityTestSessionKey {
@@ -255,10 +283,10 @@ func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessKeepsResumeState(t *tes
 
 // A confirmed absence after a successful Start is still the stale-key shape.
 func TestEnsureRunning_StaleKeyCheckOnConfirmedAbsenceStillRetriesFresh(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, store, id, _ := seedUnconfirmedSession(t, StateSuspended, true, false, freshAbsent)
-			if err := start(t, mgr, id); err != nil {
+			if err := newStart(t, mgr, id)(); err != nil {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if got := callCount(sp.Fake, "Start"); got != 2 {
@@ -274,13 +302,13 @@ func TestEnsureRunning_StaleKeyCheckOnConfirmedAbsenceStillRetriesFresh(t *testi
 // Start says the session exists. Whether that is convergence depends on a
 // fresh read: running converges, unknown is an error that is both.
 func TestEnsureRunning_SessionExistsConvergesOnFreshRead(t *testing.T) {
-	for entry, start := range startEntry {
+	for entry, newStart := range startEntry {
 		t.Run(entry+"/running", func(t *testing.T) {
 			mgr, sp, _, id, sessName := seedUnconfirmedSession(t, StateAsleep, false, false, freshAbsent, freshRunning)
 			if err := sp.Fake.Start(context.Background(), sessName, runtime.Config{}); err != nil {
 				t.Fatalf("seed runtime: %v", err)
 			}
-			if err := start(t, mgr, id); !converged(entry, err) {
+			if err := newStart(t, mgr, id)(); !converged(entry, err) {
 				t.Fatalf("%s: %v, want convergence on the running session", entry, err)
 			}
 		})
@@ -289,11 +317,50 @@ func TestEnsureRunning_SessionExistsConvergesOnFreshRead(t *testing.T) {
 			if err := sp.Fake.Start(context.Background(), sessName, runtime.Config{}); err != nil {
 				t.Fatalf("seed runtime: %v", err)
 			}
-			err := start(t, mgr, id)
+			err := newStart(t, mgr, id)()
 			if !errors.Is(err, runtime.ErrSessionExists) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Fatalf("%s error = %v, want both session-exists and runtime-unavailable", entry, err)
 			}
 		})
+	}
+}
+
+// Production puts hybrid, and auto over it, in front of the caching provider.
+// Neither claims the fresh read for a leaf that may not have it, so the
+// manager asks the leaf serving the name: a stale "absent" through them
+// converges on a live runtime, and an unreadable one starts nothing.
+func TestEnsureRunning_CompositeInFrontOfCachingProviderReadsTheLeafFresh(t *testing.T) {
+	never := func(string) bool { return false }
+	chains := map[string]func(*cachingFreshProvider) runtime.Provider{
+		"hybrid": func(p *cachingFreshProvider) runtime.Provider {
+			return hybrid.New(p, runtime.NewFake(), never)
+		},
+		"auto over hybrid": func(p *cachingFreshProvider) runtime.Provider {
+			return auto.New(hybrid.New(p, runtime.NewFake(), never), runtime.NewFake())
+		},
+	}
+	for chain, wrap := range chains {
+		for entry, newStart := range startEntry {
+			t.Run(chain+"/"+entry+"/running", func(t *testing.T) {
+				mgr, sp, _, id, _ := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshRunning)
+				if err := newStart(t, mgr, id)(); err != nil {
+					t.Fatalf("%s: %v", entry, err)
+				}
+				if got := callCount(sp.Fake, "Start"); got != 0 {
+					t.Errorf("Start called %d times, want 0 for a live runtime behind %s", got, chain)
+				}
+			})
+			t.Run(chain+"/"+entry+"/unknown", func(t *testing.T) {
+				mgr, sp, _, id, _ := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshUnknown)
+				err := newStart(t, mgr, id)()
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("%s error = %v, want runtime unavailable", entry, err)
+				}
+				if got := callCount(sp.Fake, "Start"); got != 0 {
+					t.Errorf("Start called %d times, want 0", got)
+				}
+			})
+		}
 	}
 }
 
@@ -315,7 +382,7 @@ func TestEnsureRunning_ProviderWithoutFreshReadKeepsItsIsRunningReadsBeforeStart
 		t.Fatalf("SetMetadata(session_name): %v", err)
 	}
 
-	if err := startEntry["Start"](t, mgr, b.ID); err != nil {
+	if err := startEntry["Start"](t, mgr, b.ID)(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 

@@ -569,7 +569,16 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+	running := false
+	if State(b.Metadata["state"]) != StateSuspended {
+		var runErr error
+		// An unreadable runtime is neither running nor absent: starting now
+		// could double-start the live runtime or kill it as an orphan.
+		if running, runErr = m.runningOrUnroute(sessName, unroute); runErr != nil {
+			return runErr
+		}
+	}
+	if running {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
@@ -708,14 +717,11 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
-		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+		} else if convErr := m.convergedOnRunning(err, sessName, unroute); convErr != nil {
 			// Another caller may have resumed the same session after we loaded the
 			// bead but before we reached Start. If the runtime is already up, treat
 			// the resume as converged and only persist active state below.
-			if unroute != nil {
-				unroute()
-			}
-			return fmt.Errorf("resuming session: %w", err)
+			return convErr
 		}
 	} else {
 		started = true
@@ -737,7 +743,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 			}
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		// An unreadable runtime may be up: a fresh retry would clear its
+		// resume identity and start a second one. The next attempt converges.
+		up, upErr := m.runningOrUnroute(sessName, unroute)
+		if upErr != nil {
+			return upErr
+		}
+		if !up {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if err != nil {
 				return err
@@ -778,7 +790,11 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if m.sp.IsRunning(sessName) {
+	running, runErr := m.runningOrUnroute(sessName, unroute)
+	if runErr != nil {
+		return runErr
+	}
+	if running {
 		return nil
 	}
 	if resumeCommand == "" {
@@ -851,7 +867,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
-		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
+		case errors.Is(err, runtime.ErrSessionExists):
+			if convErr := m.convergedOnRunning(err, sessName, unroute); convErr != nil {
+				return convErr
+			}
 			return err
 		default:
 			if unroute != nil {
@@ -869,7 +888,11 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			}
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		up, upErr := m.runningOrUnroute(sessName, unroute)
+		if upErr != nil {
+			return upErr
+		}
+		if !up {
 			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
 				return err
 			}
