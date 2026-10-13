@@ -247,11 +247,11 @@
         },
         "idle_timeout": {
           "type": "string",
-          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking. Idle time is awake time: after\nthe controller detects a host suspend and resume, a session is idle from\nthe later of its last activity and the resume."
         },
         "max_session_age": {
           "type": "string",
-          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Age is wall-clock,\nso a host suspend counts as elapsed age. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
         },
         "max_session_age_jitter": {
           "type": "string",
@@ -2955,7 +2955,7 @@
         },
         "progress_stall_timeout": {
           "type": "string",
-          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nStall time is awake time: after the controller detects a host suspend and\nresume, it is measured from the resume, not from an activity stamp that\npre-dates it.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
         },
         "claim_holder_stall_timeout": {
           "type": "string",

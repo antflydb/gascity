@@ -526,6 +526,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
 	cr := &CityRuntime{
+		resume:                  newResumeDetector(newSystemResumeClock()),
 		storageRoutes:           routes,
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
@@ -1388,6 +1389,9 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
+	// Before every phase, and before the beads-quiescence early return, so a
+	// resume is seen on the pass that follows it.
+	cr.observeResume()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
 	if cr.runsV2() {
@@ -3335,6 +3339,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withAsyncStartTracker(&cr.asyncStarts),
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
+		withActivityFloor(cr.activityFloor()),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
@@ -5192,5 +5197,26 @@ func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
 }
 
-// activityFloor returns the controller's current activity floor.
+// activityFloor returns the controller's current activity floor: the instant
+// of the latest detected host resume, or the zero floor when none has been
+// detected or the runtime has no detector.
 func (cr *CityRuntime) activityFloor() activityFloor { return cr.resume.floor() }
+
+// observeResume runs the host-resume detector for this pass. It runs once per
+// tick, ahead of every phase that reads an activity timestamp, and logs one
+// line when it fires.
+func (cr *CityRuntime) observeResume() {
+	if cr.resume == nil {
+		return
+	}
+	var patrol time.Duration
+	if cr.cfg != nil {
+		patrol = cr.cfg.Daemon.PatrolIntervalDuration()
+	}
+	if !cr.resume.observe(patrol) {
+		return
+	}
+	wall, mono := cr.resume.lastDeltas()
+	fmt.Fprintf(cr.stderr, "%s: host resume detected (wall clock advanced %s, monotonic clock %s); idle and stall time is measured from %s\n", //nolint:errcheck
+		cr.logPrefix, wall.Round(time.Second), mono.Round(time.Second), cr.resume.resumedAt().UTC().Format(time.RFC3339))
+}

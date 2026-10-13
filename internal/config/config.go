@@ -1705,6 +1705,9 @@ type SessionConfig struct {
 	// Such a session has likely parked (e.g. its turn ended on a provider auth
 	// error) and will not self-recover. Set this above the longest legitimate
 	// alive-idle period for the city; values below 5m are clamped to 5m.
+	// Stall time is awake time: after the controller detects a host suspend and
+	// resume, it is measured from the resume, not from an activity stamp that
+	// pre-dates it.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
@@ -3591,10 +3594,13 @@ type Agent struct {
 	SlingQuery string `toml:"sling_query,omitempty"`
 	// IdleTimeout is the maximum time an agent session can be inactive before
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
-	// Empty (default) disables idle checking.
+	// Empty (default) disables idle checking. Idle time is awake time: after
+	// the controller detects a host suspend and resume, a session is idle from
+	// the later of its last activity and the resume.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
 	// MaxSessionAge is the maximum wall-clock lifetime of a single runtime
-	// session before the controller preemptively restarts it. Duration string
+	// session before the controller preemptively restarts it. Age is wall-clock,
+	// so a host suspend counts as elapsed age. Duration string
 	// (e.g., "5h"). Empty (default) disables preemptive restarts. The restart
 	// is idle-gated: sessions with a pending interaction or an in-progress
 	// assigned work bead are left alone until they settle.

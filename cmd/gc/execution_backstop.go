@@ -156,7 +156,7 @@ func nudgeStalledPoolExecution(
 	workStoreRefs []string,
 	snapshotPartial bool,
 	now time.Time,
-	_ activityFloor,
+	floor activityFloor,
 	rec events.Recorder,
 	requestDrain func(sessionBead beads.Bead) error,
 	stdout io.Writer,
@@ -171,6 +171,7 @@ func nudgeStalledPoolExecution(
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
+		floor:        floor,
 		rec:          rec,
 		requestDrain: requestDrain,
 		claims:       newExecutionClaimSnapshot(work, workStores, workStoreRefs),
@@ -254,6 +255,7 @@ type poolExecutionBackstop struct {
 	cfg          *config.City
 	sp           runtime.Provider
 	now          time.Time
+	floor        activityFloor // latest detected host resume; quiet time is measured from it
 	rec          events.Recorder
 	requestDrain func(sessionBead beads.Bead) error
 	claims       executionClaimSnapshot
@@ -320,15 +322,17 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now)
+	return sessionQuietHold(p.sp, s, sessName, p.now, p.floor)
 }
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
 // session sessName (its row s) from being treated as quiet at now, "" when it
-// is quiet. The pool-claim backstop reads it before its terminal drain.
-func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+// is quiet. Quiet time is measured from the later of the runtime's activity
+// stamp and floor, so a host suspend is not quiet time. The pool-claim
+// backstop reads it before its terminal drain.
+func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time, floor activityFloor) string {
 	last, err := sp.GetLastActivity(sessName)
-	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
+	if err != nil || last.IsZero() || now.Sub(floor.raise(last)) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
 	if !executionSnapshotVetoApplies(s.Metadata) {

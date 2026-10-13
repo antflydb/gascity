@@ -519,7 +519,7 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	if p.drain.readTrigger == nil || p.drain.request == nil || sessName == "" || p.sp == nil {
 		return
 	}
-	if sessionQuietHold(p.sp, *s, sessName, p.now) != "" {
+	if sessionQuietHold(p.sp, *s, sessName, p.now, activityFloor{}) != "" {
 		return // not proven quiet: hold, the next tick looks again
 	}
 	trigger, found, err := p.drain.readTrigger(s.Metadata[idleClaimNudgeTriggerKey])
