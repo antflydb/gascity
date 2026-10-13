@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -53,10 +55,7 @@ func newWedgedLivenessProvider(t *testing.T, wedged ...string) *wedgedLivenessPr
 	}
 	t.Cleanup(func() {
 		p.unblock()
-		p.waitProbesReleased()
-		// The released starts finish their provider Start and write their
-		// results a moment after the probe returns.
-		time.Sleep(100 * time.Millisecond)
+		waitStartGoroutinesAtMost(t, 0)
 	})
 	return p
 }
@@ -83,21 +82,6 @@ func (p *wedgedLivenessProvider) ObserveLivenessWithError(name string, _ []strin
 	}
 	running := p.IsRunning(name)
 	return runtime.Liveness{Running: running, Alive: running}, nil
-}
-
-// waitProbesReleased blocks until every wedged probe has returned from its
-// release, so no start goroutine is mid-probe when the test's city goes away.
-func (p *wedgedLivenessProvider) waitProbesReleased() {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		p.mu.Lock()
-		n := p.inProbe
-		p.mu.Unlock()
-		if n == 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 // Start blocks for a session in wedgedStart, as a provider call that takes no
@@ -132,16 +116,50 @@ func (p *wedgedLivenessProvider) waitEntered(t *testing.T) {
 	}
 }
 
-// waitRunning polls until the Fake reports name running, that is until the
+// waitRunning blocks until the Fake reports name running, that is until the
 // provider Start of a released goroutine has returned.
 func (p *wedgedLivenessProvider) waitRunning(t *testing.T, name string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !p.IsRunning(name) {
-		if time.Now().After(deadline) {
-			t.Fatalf("session %q never started after the release", name)
+	pollUntil(t, fmt.Sprintf("session %q started after the release", name), func() bool { return p.IsRunning(name) })
+}
+
+// startGoroutines counts the goroutines still inside runPreparedStartCandidate,
+// the wave's start goroutines: one that has left it has written its result and
+// released its slot, and its exit is the only completion signal the wave
+// offers a caller that has stopped waiting.
+func startGoroutines() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := goruntime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "runPreparedStartCandidate(")
 		}
-		time.Sleep(5 * time.Millisecond)
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// waitStartGoroutinesAtMost blocks until no more than n start goroutines are
+// still running: the wedged ones the test has not released.
+func waitStartGoroutinesAtMost(t *testing.T, n int) {
+	t.Helper()
+	pollUntil(t, fmt.Sprintf("at most %d start goroutines left", n), func() bool { return startGoroutines() <= n })
+}
+
+// pollUntil is this file's one polling boundary: the wave's goroutines expose
+// no completion signal to a caller that has stopped waiting for them, so it
+// checks cond on a ticker until a safety deadline.
+func pollUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
+	for !cond() {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for: %s", what)
+		case <-tick.C:
+		}
 	}
 }
 
@@ -248,9 +266,8 @@ func TestExecutePreparedStartWave_AbandonedStartCompletingLateDoesNotRaceTheCall
 
 	sp.unblock()
 	sp.waitRunning(t, "wedged")
-	// Start has returned; the goroutine writes its result a moment later and
-	// nothing exposes that write, so give it room to happen under -race.
-	time.Sleep(200 * time.Millisecond)
+	// Start has returned; its goroutine writes its result before it exits.
+	waitStartGoroutinesAtMost(t, 0)
 
 	requireAbandoned(t, results[0], "wedged")
 }
@@ -267,8 +284,9 @@ func TestExecutePreparedStartWave_CtxEndsTheWaitBeforeTheDeadline(t *testing.T) 
 	go func() {
 		sp.waitEntered(t)
 		sp.waitRunning(t, "healthy")
-		// The healthy start has returned; let its result reach the collector.
-		time.Sleep(150 * time.Millisecond)
+		// The healthy start has returned; its result reaches the collector
+		// when its goroutine exits, leaving only the wedged one.
+		waitStartGoroutinesAtMost(t, 1)
 		cancel()
 	}()
 	results, elapsed := runWaveBounded(ctx, t, 10*time.Second, items, sp, time.Minute, 2)
@@ -407,7 +425,7 @@ func TestExecutePlannedStarts_SyncWaveAbandonedStartCompletingLate(t *testing.T)
 
 	f.wedged.unblock()
 	f.wedged.waitRunning(t, "worker")
-	time.Sleep(200 * time.Millisecond)
+	waitStartGoroutinesAtMost(t, 0)
 
 	next := f.cand
 	next.info = sessiontest.SeedBead(t, mustGetBead(t, f.store, f.cand.info.ID))
