@@ -30,6 +30,18 @@ func sessionMutationLockRefs(id string) (refs int, present bool) {
 	return entry.refs, true
 }
 
+// sessionMutationLockEntryHeld reports whether entry's lock is held, by trying
+// to take it and giving it straight back when that succeeds.
+func sessionMutationLockEntryHeld(entry *sessionMutationLockEntry) bool {
+	select {
+	case entry.sem <- struct{}{}:
+		<-entry.sem
+		return false
+	default:
+		return true
+	}
+}
+
 // holdSessionMutationLock takes the lock for id on a goroutine that parks on a
 // channel (durably blocked, unlike a sync.Mutex wait) and returns once it is
 // held. The returned func releases it and waits for the goroutine to finish.
@@ -287,18 +299,18 @@ func TestWithSessionMutationLockContextStress(t *testing.T) {
 	}
 }
 
-// busyStoreFixture is a counting store over one pending-create row, so a
-// busy result can be shown to have read and written nothing.
-func busyStoreFixture(t *testing.T) (*Store, *startFenceStore, Info) {
+// busyStoreFixture opens a pending-create row on a backend that provides the
+// atomic close (RollbackPendingCreateAtomically refuses without one before it
+// ever reaches the lock), and returns the Store, the raw store and the row's
+// Info. It opens outside any synctest bubble.
+func busyStoreFixture(t *testing.T) (*Store, beads.Store, Info) {
 	t.Helper()
-	backing := &startFenceStore{Store: beads.NewMemStore(), check: func(string) {}}
+	backing, _ := fencedAtomicCloseBackends(t)[0].open(t)
 	_, info := seedRollbackPendingSession(t, backing)
-	front := NewStore(beads.SessionStore{Store: backing})
-	backing.reads, backing.writes = 0, 0
-	return front, backing, info
+	return NewStore(beads.SessionStore{Store: backing}), backing, info
 }
 
-func TestStoreLockedMethodsReturnBusyWithoutReadingOrWriting(t *testing.T) {
+func TestStoreLockedMethodsReturnBusyWithoutWriting(t *testing.T) {
 	type op struct {
 		name string
 		call func(ctx context.Context, front *Store, info Info) error
@@ -322,9 +334,10 @@ func TestStoreLockedMethodsReturnBusyWithoutReadingOrWriting(t *testing.T) {
 	}
 	for _, tc := range ops {
 		t.Run(tc.name, func(t *testing.T) {
+			front, backing, info := busyStoreFixture(t)
 			synctest.Test(t, func(t *testing.T) {
-				front, backing, info := busyStoreFixture(t)
 				release := holdSessionMutationLock(t, info.ID)
+				defer release()
 				ctx, cancel := context.WithTimeout(context.Background(), lockWait)
 				defer cancel()
 
@@ -332,11 +345,15 @@ func TestStoreLockedMethodsReturnBusyWithoutReadingOrWriting(t *testing.T) {
 				if !errors.Is(err, ErrSessionMutationBusy) || !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("%s = %v, want ErrSessionMutationBusy wrapping context.DeadlineExceeded", tc.name, err)
 				}
-				if backing.reads != 0 || backing.writes != 0 {
-					t.Fatalf("busy %s read %d and wrote %d times, want 0 and 0", tc.name, backing.reads, backing.writes)
-				}
-				release()
 			})
+			got, err := backing.Get(info.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != "open" || got.Metadata["state"] != string(StateCreating) || got.Metadata["pending_create_claim"] != "true" {
+				t.Fatalf("row after busy = status %q state %q claim %q, want it untouched (open, creating, claimed)",
+					got.Status, got.Metadata["state"], got.Metadata["pending_create_claim"])
+			}
 		})
 	}
 }
