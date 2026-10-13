@@ -744,6 +744,93 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+// runtimeRunning reports whether sessName's runtime is running, for a start
+// path to decide whether to start it. A provider that caches (tmux's state
+// cache) can answer IsRunning false for a live runtime, so a false is
+// confirmed by a fresh read ([runtime.FreshLivenessObserver], see
+// freshReader). A fresh read that fails returns its error (wrapping
+// [runtime.ErrRuntimeUnavailable] when the runtime could not be read): an
+// unreadable runtime is neither running nor absent, and the caller must not
+// start, scan for orphans or reset resume state on it. Only Running counts: a
+// corpse is not running and still reaches Start. With no fresh read to ask, it
+// answers as IsRunning does.
+func (m *Manager) runtimeRunning(sessName string) (bool, error) {
+	if m.sp.IsRunning(sessName) {
+		return true, nil
+	}
+	return m.freshRunning(sessName)
+}
+
+// freshRunning is the fresh-read half of runtimeRunning, for a caller whose own
+// read already answered not running (a delivery's fresh read must not be
+// overridden by a caching provider's IsRunning, mc-ir8qp). With no fresh read
+// to ask it answers false.
+func (m *Manager) freshRunning(sessName string) (bool, error) {
+	reader := m.freshReader(sessName)
+	if reader == nil {
+		return false, nil
+	}
+	obs, err := runtime.ObserveLivenessSince(reader, sessName, nil, time.Now())
+	if err != nil {
+		return false, fmt.Errorf("confirming %q is not running: %w", sessName, err)
+	}
+	return obs.Running, nil
+}
+
+// freshReader is the provider to ask for a fresh read of sessName: the leaf
+// backend serving the name when it has the capability, since a composite in
+// front of it (hybrid) routes by name and answers from its leaf's cached read,
+// and does not claim the capability itself (cmd/gc/reconcile_effect_runtime.go
+// judges freshness on the leaf for the same reason); otherwise the provider
+// itself when it has the capability (auto, whose read also covers its other
+// backend); otherwise nil. A route not yet known (auto before SeedRoutes) still
+// names the default leaf, which is where a cached "absent" comes from: the
+// caller already read not running, which looked at the other backend.
+func (m *Manager) freshReader(sessName string) runtime.Provider {
+	leaf, _, _ := runtime.ResolveBackend(m.sp, sessName)
+	if _, ok := leaf.(runtime.FreshLivenessObserver); ok {
+		return leaf
+	}
+	if _, ok := m.sp.(runtime.FreshLivenessObserver); ok {
+		return m.sp
+	}
+	return nil
+}
+
+// runningOrUnroute is runtimeRunning for a start path that holds an ACP route:
+// when the runtime cannot be read it releases the route before returning the
+// error, since the caller abandons the start.
+func (m *Manager) runningOrUnroute(sessName string, unroute func()) (bool, error) {
+	running, err := m.runtimeRunning(sessName)
+	if err != nil && unroute != nil {
+		unroute()
+	}
+	return running, err
+}
+
+// convergedOnRunning handles a failed Start (startErr) and returns nil only
+// when the start converged: Start refused because sessName's runtime already
+// exists and is running, as when another caller resumed it first. Otherwise it
+// releases the ACP route and returns the error to surface: startErr wrapped as
+// a failed resume or, when the runtime cannot be read, an error matching both
+// startErr and the read's failure.
+func (m *Manager) convergedOnRunning(startErr error, sessName string, unroute func()) error {
+	var err error
+	if errors.Is(startErr, runtime.ErrSessionExists) {
+		var running bool
+		if running, err = m.runtimeRunning(sessName); err == nil && running {
+			return nil
+		}
+	}
+	if unroute != nil {
+		unroute()
+	}
+	if err != nil {
+		return fmt.Errorf("resuming session: %w: %w", startErr, err)
+	}
+	return fmt.Errorf("resuming session: %w", startErr)
+}
+
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
 // a non-nil error only when an orphan could not be confirmed dead, so callers
