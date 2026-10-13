@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -753,5 +754,48 @@ func TestStopForCleanupMissingServerUsesLocalConfirmer(t *testing.T) {
 		if !dead && !errors.Is(err, serverGone) {
 			t.Errorf("StopForCleanup = %v over a live server, want the missing-server answer", err)
 		}
+	}
+}
+
+type freshLivenessProvider struct {
+	*runtime.Fake
+	live  runtime.Liveness
+	err   error
+	names []string
+	since []time.Time
+}
+
+func (p *freshLivenessProvider) ObserveLivenessSince(name string, _ []string, since time.Time) (runtime.Liveness, error) {
+	p.names = append(p.names, name)
+	p.since = append(p.since, since)
+	return p.live, p.err
+}
+
+// A fresh read through hybrid is the routed backend's, answer and error
+// unchanged: a caller that must not mistake an unreadable runtime for an
+// absent one gets the same ErrRuntimeUnavailable it would from the leaf.
+func TestProvider_ForwardsFreshLivenessToRoutedBackend(t *testing.T) {
+	since := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	unavailable := fmt.Errorf("tmux transport: %w", runtime.ErrRuntimeUnavailable)
+	local := &freshLivenessProvider{Fake: runtime.NewFake(), live: runtime.Liveness{Running: true, Alive: true}}
+	remote := &freshLivenessProvider{Fake: runtime.NewFake(), err: unavailable}
+	h := New(local, remote, isRemote)
+
+	observer, ok := runtime.Provider(h).(runtime.FreshLivenessObserver)
+	if !ok {
+		t.Fatal("hybrid.Provider does not implement runtime.FreshLivenessObserver")
+	}
+
+	got, err := observer.ObserveLivenessSince("local-agent", nil, since)
+	if err != nil || got != local.live {
+		t.Fatalf("ObserveLivenessSince(local) = %+v, %v; want %+v, nil", got, err, local.live)
+	}
+	if len(local.names) != 1 || local.names[0] != "local-agent" || !local.since[0].Equal(since) || len(remote.names) != 0 {
+		t.Fatalf("local reads = %v since %v, remote reads = %v; want one local read at %v", local.names, local.since, remote.names, since)
+	}
+
+	got, err = observer.ObserveLivenessSince("remote-agent-1", nil, since)
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || got != (runtime.Liveness{}) {
+		t.Fatalf("ObserveLivenessSince(remote) = %+v, %v; want zero and runtime unavailable", got, err)
 	}
 }
