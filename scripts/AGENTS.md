@@ -53,3 +53,18 @@ the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because
 that suite is not what CI enforces; `GC_PREPUSH_SUITE=go` opts in explicitly.
+
+## The tmux test inventory is derived, never counted
+
+The `internal/runtime/tmux` integration inventory is `scripts/runtime-tmux-tests.manifest`
+(every test name, in discovery order) plus `scripts/runtime-tmux-integration-files.manifest`
+(the `_test.go` files that compile only with `-tags integration`, one basename
+per line, ascending). Both are admin-gated through CODEOWNERS `/scripts/`.
+`scripts/runtime_tmux_manifest_test.go` and `scripts/runtime_tmux_lane_test.go`
+derive their expectations from the source tree, so never type an inventory
+count (total, default-lane, integration-only, or per-shard) into a test: two
+PRs that each add a test would conflict on it. Adding a test costs manifest
+lines only; a new integration-only test file costs one sorted record line.
+The shard rule is `i % shard_total == shard_index - 1` in
+`scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
+restates it and runs each shard through the real script).
