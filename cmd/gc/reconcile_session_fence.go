@@ -206,7 +206,7 @@ func stopFenced(ctx context.Context, sp runtime.Provider, v fenceVerdict, proces
 	case !held: // the passed runtime left the name since: nothing of the row's to stop
 		return v, confirmStopped(ctx, sp, processNames, name, now())
 	}
-	if err := v.Leaf.Stop(name); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+	if err := stopPassed(v, name); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
 		v.Proceed, v.Reason = false, fenceStopFailed
 		return v, false
 	}
@@ -216,6 +216,23 @@ func stopFenced(ctx context.Context, sp runtime.Provider, v fenceVerdict, proces
 	}
 	unroute(sp, name)
 	return v, true
+}
+
+// stopPassed stops the runtime the fence passed. A stop that keeps both the
+// attach check (L3) and the token check (L2), an A4 stop's, goes through the
+// leaf's exact-object stop when it has one (runtime.UnattendedSessionStopper,
+// tmux's StopUnattendedSession): it certifies the row's token between two
+// pane listings, refuses an attached, copy-mode or linked-window session,
+// and kills by the certified session and pane ids, so a replacement that
+// took the name after stillHeld's read is never killed by name (mc-rbd8z,
+// the #7788 review). Any other stop (an own-runtime stop, which keeps no
+// attach check) is the leaf's name-based Stop.
+func stopPassed(v fenceVerdict, name string) error {
+	token := strings.TrimSpace(v.Row.InstanceToken)
+	if stopper, ok := v.Leaf.(runtime.UnattendedSessionStopper); ok && v.attach && v.token && token != "" {
+		return stopper.StopUnattendedSession(name, token)
+	}
+	return v.Leaf.Stop(name)
 }
 
 // stillHeld re-reads, immediately before the name-based Stop, what the fence

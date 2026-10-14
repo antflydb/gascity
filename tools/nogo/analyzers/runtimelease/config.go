@@ -84,7 +84,7 @@ var allowed = map[string]Allowance{
 	cmdGC + ":stopInterruptedStartsForStop":       {Reason: "the standalone city stop (no controller): takes the name's flock itself (tryRuntimeLease) and leaves a name whose flock a live start holds"},
 	cmdGC + ":attachmentCachingProvider.Relaunch": {Reason: "the attachment-caching wrapper forwarding to its provider; its callers hold the lease"},
 	cmdGC + ":statusProvider.Relaunch":            {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
-	cmdGC + ":stopFenced":                         {Reason: "v2's fenced stop: its effects run under runTx's lockRuntimeName"},
+	cmdGC + ":stopPassed":                         {Reason: "v2's fenced stop (stopFenced): its effects run under runTx's lockRuntimeName"},
 	cmdGC + ":statusProvider.Start":               {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	cmdGC + ":statusProvider.Stop":                {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	// internal/session: the Manager.

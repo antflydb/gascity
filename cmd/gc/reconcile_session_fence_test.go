@@ -70,6 +70,10 @@ type fenceLeaf struct {
 	// probe (L3) or pending read (L4), before it answers: an outside write
 	// landing while the fence reads that leg.
 	OnAttachRead, OnPendingRead func(name string)
+	// Unattended records each exact-object stop's token (tmux's
+	// StopUnattendedSession); RefuseUnattended, when set, refuses them.
+	Unattended       []string
+	RefuseUnattended error
 }
 
 // newFenceLeaf is a hardened leaf as tmux (a reporter: its attachment probe
@@ -92,6 +96,14 @@ func (r leafReads) ObserveLivenessWithError(name string, pn []string) (runtime.L
 		return runtime.Liveness{}, err
 	}
 	return r.FullFake.ObserveLivenessWithError(name, pn)
+}
+
+func (r leafReads) StopUnattendedSession(name, token string) error {
+	r.l.Unattended = append(r.l.Unattended, token)
+	if r.l.RefuseUnattended != nil {
+		return r.l.RefuseUnattended
+	}
+	return r.FullFake.StopUnattendedSession(name, token)
 }
 
 func (r leafReads) IsAttachedWithError(name string) (bool, error) {
@@ -608,5 +620,44 @@ func TestFenceRechecksAttachBeforeTheStop(t *testing.T) {
 	leaf.SetAttached("rt_a", true) // an operator attached between the fence and the stop
 	if v, confirmed := stopFenced(context.Background(), leaf.P, v, nil, time.Now); v.Proceed || v.Reason != fenceAttached || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
 		t.Fatalf("%+v confirmed=%t, want held attached and nothing stopped", v, confirmed)
+	}
+}
+
+// TestFencedStopUsesTheExactObjectStop (mc-rbd8z, the #7788 review). Kills
+// an A4 stop killing by name: a stop that keeps the attach and token checks
+// goes through the leaf's exact-object stop with the row's token, never the
+// name-based Stop, so a replacement that took the name after the fence's
+// last read is never killed; a refusal there holds (stop failed) and falls
+// back to no name-based kill. A stop that keeps no attach check (an
+// own-runtime stop's) uses the name-based Stop.
+func TestFencedStopUsesTheExactObjectStop(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		legs   fenceLegs
+		refuse error
+		exact  bool
+		reason string
+	}{
+		{"an A4 stop: attach and token kept", legsFull, nil, true, ""},
+		{"the exact stop refuses", legsFull, errors.New("attached clients observed"), true, fenceStopFailed},
+		{"an own-runtime stop: no attach check", legLiveness | legToken, nil, false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			leaf := newFenceLeaf(runtime.ProfileTmux)
+			startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+			leaf.RefuseUnattended = c.refuse
+			v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: c.legs}, fenceOpts{stop: true})
+			named := leaf.CountCalls("Stop", "rt_a")
+			switch {
+			case c.exact && (len(leaf.Unattended) != 1 || leaf.Unattended[0] != "tok-a"):
+				t.Fatalf("exact stops %v, want one with the row's token tok-a", leaf.Unattended)
+			case c.exact && c.refuse == nil && (named != 1 || !confirmed): // the fake's exact stop is its Stop
+				t.Fatalf("%+v confirmed=%t, %d name-based stops; want the exact stop alone, confirmed", v, confirmed, named)
+			case c.refuse != nil && (v.Proceed || v.Reason != c.reason || confirmed || named != 0):
+				t.Fatalf("%+v confirmed=%t, %d name-based stops; want held %s, nothing stopped by name", v, confirmed, named, c.reason)
+			case !c.exact && (len(leaf.Unattended) != 0 || named != 1 || !confirmed):
+				t.Fatalf("exact stops %v, %d name-based stops, confirmed=%t; want the name-based Stop", leaf.Unattended, named, confirmed)
+			}
+		})
 	}
 }

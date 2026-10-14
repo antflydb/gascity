@@ -45,7 +45,7 @@ var effectBannedMethods = []string{
 	"WakeSession", "RequestWakeUnlessHeld", "OperatorSuspend", "ApplyDisposition", "ApplyDispositionFresh", "ApplySleep", "ApplyLifecycle", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
-	"StopUnattendedSession", "StopForCleanup",
+	"StopForCleanup",
 	"NewStore", // session.NewStore: the raw session front door
 }
 
@@ -78,13 +78,13 @@ var effectLintAllowed = map[string][]string{
 
 // effectProviderVerbs are the runtime.Provider verbs an effect or step never
 // calls on a provider directly: destructive calls go through the fence
-// (fenceDestructive, stopFenced) or a SessionObjectKiller, and only the
+// (fenceDestructive, stopFenced's stopPassed) or a SessionObjectKiller, and only the
 // start effect starts a runtime. Every verb takes the runtime name, so a
 // call with no arguments (a timer's Stop) is not one; a selector that is not
 // called (a field such as Start) is not one either, nor is a package
 // function (session.KillPendingPatch). Any method named Kill* is one too
 // (effectProviderVerb; STALE-READ M4).
-var effectProviderVerbs = []string{"Start", "Stop", "SetMeta", "Nudge", "Interrupt", "KillCorpseObject", "KillZombieObject", "Relaunch", "ClearScrollback"}
+var effectProviderVerbs = []string{"Start", "Stop", "StopUnattendedSession", "SetMeta", "Nudge", "Interrupt", "KillCorpseObject", "KillZombieObject", "Relaunch", "ClearScrollback"}
 
 // effectProviderVerb reports whether a called method name is a provider
 // verb: one listed, or any Kill*.
@@ -99,7 +99,10 @@ func effectProviderVerb(name string) bool {
 // SessionObjectKiller kills call no verb.
 var effectProviderAllowed = map[string][]string{
 	"startLaunch": {"Start"}, // the start effect's launch Call: the FreshOnly provider Start (C5a1)
-	"stopFenced":  {"Stop"},  // the fenced leaf's Stop, then C8.8
+	// The fenced leaf's stop once the fence passed, then C8.8: tmux's
+	// exact-object, token-certified stop for an A4 stop (mc-rbd8z), the
+	// name-based Stop otherwise.
+	"stopPassed": {"Stop", "StopUnattendedSession"},
 	// The corpse and zombie kills: by exact session object (re-checked
 	// server-side) on the read's leaf, L3 re-read just before (v5 F2, D3).
 	"killCorpse":   {"KillCorpseObject", "KillZombieObject"},
