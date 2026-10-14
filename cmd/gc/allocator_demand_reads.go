@@ -284,7 +284,7 @@ func projectControlDispatcherRoutes(cfg *config.City, rows []beads.Bead, refs []
 		return rows, nil
 	}
 	// With no store the repair defers every route it would rewrite.
-	repair := newControlDispatcherRouteRepair(cfg, nil)
+	repair := newControlDispatcherRouteRepair(cfg, nil, nil)
 	// A misaligned input suppresses every control route and reports no gap,
 	// as legacy does.
 	aligned := len(rows) == len(refs)

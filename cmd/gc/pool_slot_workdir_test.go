@@ -372,7 +372,7 @@ func TestRepairPoolSlotWorkDirClobber(t *testing.T) {
 	stores := []beads.Store{store, store, store, store, store, store}
 	cfg := gaConfig()
 
-	repairPoolSlotWorkDirClobber(cfg, all, stores, io.Discard)
+	repairPoolSlotWorkDirClobber(cfg, all, stores, nil, "assigned", io.Discard)
 
 	got, err := mem.Get("ga-clobbered")
 	if err != nil {
@@ -413,7 +413,7 @@ func TestRepairPoolSlotWorkDirClobber(t *testing.T) {
 		second = append(second, refreshed)
 	}
 	store.writes = 0
-	repairPoolSlotWorkDirClobber(cfg, second, stores, io.Discard)
+	repairPoolSlotWorkDirClobber(cfg, second, stores, nil, "assigned", io.Discard)
 	if store.writes != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (repair must be one-shot/idempotent)", store.writes)
 	}
@@ -438,7 +438,7 @@ func TestRepairPoolSlotWorkDirClobberNilConfigIsInert(t *testing.T) {
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{perBead}, nil)
 	store := &countingStore{Store: mem}
 
-	repairPoolSlotWorkDirClobber(nil, []beads.Bead{perBead}, []beads.Store{store}, io.Discard)
+	repairPoolSlotWorkDirClobber(nil, []beads.Bead{perBead}, []beads.Store{store}, nil, "assigned", io.Discard)
 
 	if store.writes != 0 {
 		t.Errorf("nil cfg wrote %d times, want 0", store.writes)

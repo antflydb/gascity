@@ -767,7 +767,7 @@ func TestV2DemandReadsExactLegMatchesLegacyOnSQLite(t *testing.T) {
 func legacyControlRoutes(t *testing.T, cfg *config.City, rows []beads.Bead, stores []beads.Store, refs []string) ([]beads.Bead, []ControlDispatcherScopeGap, map[string]bool) {
 	t.Helper()
 	edited := cloneBeadRows(rows)
-	gaps := repairControlDispatcherRoutesForStoreScope(t.Name(), cfg, edited, stores, refs, io.Discard)
+	gaps := repairControlDispatcherRoutesForStoreScope(t.Name(), cfg, edited, stores, refs, nil, io.Discard)
 	return edited, gaps, openControlDispatcherDemand(cfg, edited)
 }
 

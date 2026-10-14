@@ -42,7 +42,7 @@ func TestStampRunSessionIdentityStampsInProgressAssignedBead(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, workDir)})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	got, err := mem.Get("co-run1")
 	if err != nil {
@@ -58,7 +58,7 @@ func TestStampRunSessionIdentityStampsInProgressAssignedBead(t *testing.T) {
 	// Idempotent: a second pass over the now-stamped bead writes nothing.
 	stamped, _ := mem.Get("co-run1")
 	store.writes = 0
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{stamped}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (stamp must be idempotent)", store.writes)
 	}
@@ -76,7 +76,7 @@ func TestStampRunSessionIdentityDoesNotManufactureWorktreeEvidence(t *testing.T)
 	poolSession.Metadata["pool_managed"] = "true"
 	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	got, err := mem.Get(run.ID)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sn, wd)})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	gotStep, _ := mem.Get("gpk-step")
 	if gotStep.Metadata["gc.session_name"] != sn || gotStep.Metadata["gc.work_dir"] != wd {
@@ -119,7 +119,7 @@ func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	// Idempotent: a second pass writes nothing (step + root already stamped).
 	stamped, _ := mem.Get("gpk-step")
 	store.writes = 0
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{stamped}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (step+root already stamped)", store.writes)
 	}
@@ -140,7 +140,7 @@ func TestStampRunSessionIdentityNamedSessionUsesAlias(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{mayor})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	got, _ := mem.Get("dr-run")
 	if got.Metadata["gc.session_name"] != "mayor" {
@@ -186,7 +186,7 @@ func TestStampRunSessionIdentityResolvesByIDAndAliasHistory(t *testing.T) {
 			store := &countingStore{Store: mem}
 			sessions := newSessionBeadSnapshot([]beads.Bead{tc.sess})
 
-			stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+			stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 			got, _ := mem.Get("r")
 			if got.Metadata["gc.session_name"] != tc.wantName {
@@ -206,7 +206,7 @@ func TestStampRunSessionIdentitySkipsAmbiguousAssignee(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{a, b})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	if store.writes != 0 {
 		t.Errorf("ambiguous assignee must not be stamped, got %d writes", store.writes)
@@ -222,7 +222,7 @@ func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	store := &countingStore{Store: mem}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession("worker-b", "/new")})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	got, _ := mem.Get("co-run2")
 	if got.Metadata["gc.session_name"] != "worker-b" || got.Metadata["gc.work_dir"] != "/new" {
@@ -244,7 +244,7 @@ func TestStampRunSessionIdentitySkipsNonExecuting(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
 			store := &countingStore{Store: mem}
-			stampRunSessionIdentity(gaConfig(), []beads.Bead{wb}, []beads.Store{store}, sessions, io.Discard)
+			stampRunSessionIdentity(gaConfig(), []beads.Bead{wb}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 			if store.writes != 0 {
 				t.Errorf("expected no stamp, got %d writes", store.writes)
 			}
@@ -258,9 +258,9 @@ func TestStampRunSessionIdentityToleratesLengthMismatchAndNilSnapshot(t *testing
 	store := &countingStore{Store: mem}
 
 	// Mismatched slice lengths must be a no-op, not a panic.
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{}, newSessionBeadSnapshot(nil), io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{}, newSessionBeadSnapshot(nil), nil, nil, io.Discard)
 	// Nil snapshot must be a no-op, not a panic.
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, nil, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, nil, nil, nil, io.Discard)
 	if store.writes != 0 {
 		t.Errorf("expected no writes on degenerate input, got %d", store.writes)
 	}
@@ -288,7 +288,7 @@ func TestStampRunSessionIdentityPreservesRealEvidenceAgainstPoolSlotSelfCwd(t *t
 	// Not pool_managed: stampTestSession leaves pool_managed unset/false.
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, poolSlotSelf)})
 
-	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, nil, nil, io.Discard)
 
 	got, err := mem.Get(run.ID)
 	if err != nil {
@@ -321,7 +321,7 @@ func TestStampRunRootFromStepPreservesRootEvidenceAgainstPoolSlotCwd(t *testing.
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
 	store := &countingStore{Store: mem}
 
-	stampRunRootFromStep(gaConfig(), store, step, sessionName, poolSlotSelf, true, map[string]struct{}{}, io.Discard)
+	stampRunRootFromStep(gaConfig(), store, step, runRootStamp{sessionName: sessionName, workDir: poolSlotSelf, allowUnownedWorkDir: true}, newRootGetMemo(), (*repairWriteBudget)(nil).sweep("test", 0), 0, io.Discard)
 
 	gotRoot, err := mem.Get("ga-root")
 	if err != nil {
@@ -372,8 +372,8 @@ func TestRepairPoolSlotWorkDirClobberThenStampPreservesLiveWorkDir(t *testing.T)
 	// buildDesiredStateWithSessionBeadsAt.
 	snapshot := []beads.Bead{newRun()}
 	stores := []beads.Store{store}
-	repairPoolSlotWorkDirClobber(cfg, snapshot, stores, io.Discard)
-	stampRunSessionIdentity(cfg, snapshot, stores, sessions, io.Discard)
+	repairPoolSlotWorkDirClobber(cfg, snapshot, stores, nil, "assigned", io.Discard)
+	stampRunSessionIdentity(cfg, snapshot, stores, sessions, nil, nil, io.Discard)
 
 	got, err := mem.Get("ga-run")
 	if err != nil {

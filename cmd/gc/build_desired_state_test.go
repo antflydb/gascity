@@ -12593,6 +12593,7 @@ func TestRepairControlDispatcherRoutesDoesNotGuessUnscopedControlOwnership(t *te
 		work,
 		[]beads.Store{store},
 		[]string{"rig:fixture"},
+		nil,
 		io.Discard,
 	)
 
@@ -13029,6 +13030,7 @@ func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T)
 		work,
 		[]beads.Store{store, store},
 		[]string{"rig:fixture", "rig:fixture"},
+		nil,
 		io.Discard,
 	)
 
@@ -13067,7 +13069,7 @@ func TestRepairControlDispatcherRoutesReportsNoScopeGapWhenDispatcherIsConfigure
 	}}
 
 	gaps := repairControlDispatcherRoutesForStoreScope(
-		t.Name(), cfg, work, []beads.Store{beads.NewMemStore()}, []string{"rig:fixture"}, io.Discard,
+		t.Name(), cfg, work, []beads.Store{beads.NewMemStore()}, []string{"rig:fixture"}, nil, io.Discard,
 	)
 
 	if len(gaps) != 0 {
@@ -13231,7 +13233,7 @@ func TestControlDispatcherRouteRepairAgreesWithTheMinter(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	repairControlDispatcherRoutesForStoreScope(t.TempDir(), cfg, work, stores, refs, &stderr)
+	repairControlDispatcherRoutesForStoreScope(t.TempDir(), cfg, work, stores, refs, nil, &stderr)
 	if stderr.Len() != 0 {
 		t.Fatalf("repair stderr = %q, want silent: every root scope has a dispatcher", stderr.String())
 	}
@@ -13518,6 +13520,7 @@ func TestRepairControlDispatcherRoutesSuppressesCrossScopeDemandOnWriteFailure(t
 		work,
 		[]beads.Store{store},
 		[]string{"fixture"},
+		nil,
 		&stderr,
 	)
 	if got := work[0].Metadata["gc.routed_to"]; got != "" {
@@ -13561,6 +13564,7 @@ func TestRepairControlDispatcherRoutesClearsFallbackMarkerFromCanonicalRoute(t *
 		work,
 		[]beads.Store{store},
 		[]string{"rig:fixture"},
+		nil,
 		io.Discard,
 	)
 
@@ -13621,7 +13625,7 @@ func TestRepairControlDispatcherRoutesBoundsUpgradeWritesPerTick(t *testing.T) {
 		stores = append(stores, store)
 	}
 
-	repairControlDispatcherRoutesForStoreScope(t.Name(), cfg, work, stores, refs, io.Discard)
+	repairControlDispatcherRoutesForStoreScope(t.Name(), cfg, work, stores, refs, nil, io.Discard)
 	if store.updates != controlDispatcherRouteRepairLimitPerTick {
 		t.Fatalf("route repair updates = %d, want bounded %d", store.updates, controlDispatcherRouteRepairLimitPerTick)
 	}
@@ -13712,7 +13716,7 @@ func TestRepairControlDispatcherRoutesCursorIsIndependentAcrossCities(t *testing
 			stores = append(stores, store)
 			refs = append(refs, "fixture")
 		}
-		repairControlDispatcherRoutesForStoreScope(domain, cfg, work, stores, refs, io.Discard)
+		repairControlDispatcherRoutesForStoreScope(domain, cfg, work, stores, refs, nil, io.Discard)
 	}
 
 	for range 3 {

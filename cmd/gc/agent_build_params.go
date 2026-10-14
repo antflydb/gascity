@@ -48,6 +48,13 @@ type agentBuildParams struct {
 	// instead of the legacy SessionNameFor function.
 	beadStore beads.Store
 
+	// repairBudget is this build's one durable repair-write budget, drawn on by
+	// the legacy tick's repair writers; rootGets memoizes this build's
+	// workflow-root reads for the run-identity stamp. Both are nil outside the
+	// legacy desired-state build, where nil means unbounded and unmemoized.
+	repairBudget *repairWriteBudget
+	rootGets     *rootGetMemo
+
 	// sessionBeads caches the open session-bead snapshot for the current
 	// desired-state build so per-agent resolution does not rescan the store.
 	sessionBeads *sessionBeadSnapshot

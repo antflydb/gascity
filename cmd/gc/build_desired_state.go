@@ -521,6 +521,9 @@ func buildDesiredStateWithSessionBeadsAt(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	// One repair-write budget and one workflow-root read memo for this build.
+	bp.repairBudget = newRepairWriteBudget().forDomain(cityPath)
+	bp.rootGets = newRootGetMemo()
 	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
@@ -604,7 +607,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// stamp. Repair reads the snapshot it was collected with; the live
 		// stamp gets the last word.
 		repairsStart := trace.demandNow()
-		repairPoolSlotWorkDirClobber(cfg, assignedWorkBeads, assignedWorkStores, stderr)
+		repairPoolSlotWorkDirClobber(cfg, assignedWorkBeads, assignedWorkStores, bp.repairBudget, "assigned", stderr)
 		repairDone := trace.demandNow()
 		// Durably record which session is executing each in-progress work
 		// bead. The Assignee link is transient (cleared on close), so without
@@ -613,20 +616,22 @@ func buildDesiredStateWithSessionBeadsAt(
 		// storePartial: stamping the beads that WERE collected is always
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
-		stampRunSessionIdentity(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		stampRunSessionIdentity(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, bp.repairBudget, bp.rootGets, stderr)
 		stampDone := trace.demandNow()
 		// Re-home work pre-assigned to a legacy template identity onto the
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
 		// agent-side work_query/claim path matches identities by raw string).
-		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, bp.repairBudget, stderr)
 		// The demand pass's own writes over the assigned snapshot, between the
 		// collect_assigned_work and collect_unassigned_routed records.
 		recordDemandSubPhase(trace, "demand_snapshot.assigned_repairs", repairsStart, map[string]any{
-			"beads":           len(assignedWorkBeads),
-			"repair_ms":       repairDone.Sub(repairsStart).Milliseconds(),
-			"stamp_ms":        stampDone.Sub(repairDone).Milliseconds(),
-			"canonicalize_ms": trace.demandSince(stampDone).Milliseconds(),
+			"beads":            len(assignedWorkBeads),
+			"repair_ms":        repairDone.Sub(repairsStart).Milliseconds(),
+			"stamp_ms":         stampDone.Sub(repairDone).Milliseconds(),
+			"canonicalize_ms":  trace.demandSince(stampDone).Milliseconds(),
+			"budget_attempts":  bp.repairBudget.attemptCount(),
+			"budget_exhausted": bp.repairBudget.exhausted(),
 		})
 		// Re-home open, unassigned work still routed to a legacy template identity.
 		// This is the demand/claim half of the migration: empty-assignee open work
@@ -645,9 +650,9 @@ func buildDesiredStateWithSessionBeadsAt(
 		// site: the sweep reads the snapshot it was collected with, before any
 		// later pass writes through the store behind it.
 		repairsStart = trace.demandNow()
-		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, bp.repairBudget, "unassigned", stderr)
 		repairDone = trace.demandNow()
-		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, bp.repairBudget, stderr)
 		canonicalizeDone := trace.demandNow()
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -655,9 +660,9 @@ func buildDesiredStateWithSessionBeadsAt(
 		// treats as a different target entirely. Collapsing it here, before
 		// demand is counted below, is what makes the row both countable and
 		// claimable in the same tick instead of neither.
-		collapseSlotSuffixedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		collapseSlotSuffixedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, bp.repairBudget, stderr)
 		collapseDone := trace.demandNow()
-		controlDispatcherScopeGaps = repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
+		controlDispatcherScopeGaps = repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, bp.repairBudget, stderr)
 		// Nested inside collect_unassigned_routed, which keeps its boundaries:
 		// the two records overlap and must not be summed.
 		recordDemandSubPhase(trace, "demand_snapshot.unassigned_repairs", repairsStart, map[string]any{
@@ -666,7 +671,10 @@ func buildDesiredStateWithSessionBeadsAt(
 			"canonicalize_ms":      canonicalizeDone.Sub(repairDone).Milliseconds(),
 			"collapse_ms":          collapseDone.Sub(canonicalizeDone).Milliseconds(),
 			"dispatcher_repair_ms": trace.demandSince(collapseDone).Milliseconds(),
+			"budget_attempts":      bp.repairBudget.attemptCount(),
+			"budget_exhausted":     bp.repairBudget.exhausted(),
 		})
+		bp.repairBudget.report(stderr)
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
 		// work, so the assigned-work snapshot is now stale for demand
 		// bucketing. Read the post-rewrite state from a fresh per-store
@@ -5909,15 +5917,21 @@ func sessionBeadIdentifierInfo(info session.Info) string {
 // only a newly claimed (or reassigned) bead triggers a single write. A write
 // failure is logged and skipped — stamping is best-effort observability and
 // must never block reconciliation.
-func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+//
+// Writes draw on budget (nil = unbounded). roots memoizes the workflow-root
+// reads for the build (nil = a memo for this pass alone), so a multi-step
+// run's shared root is read once rather than per step.
+func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, budget *repairWriteBudget, roots *rootGetMemo, stderr io.Writer) {
 	if sessionBeads == nil || len(workBeads) != len(workStores) {
 		return
 	}
 	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
-	// Roots stamped this pass, so a multi-step run's shared root is resolved
-	// once rather than per step.
-	stampedRoots := map[string]struct{}{}
-	for i, wb := range workBeads {
+	roots = rootMemoOrNew(roots)
+	sweep := budget.sweep("stamp-run-session-identity", len(workBeads))
+	defer sweep.finish()
+	for offset := range workBeads {
+		i := sweep.index(offset)
+		wb := workBeads[i]
 		if wb.Status != "in_progress" {
 			continue
 		}
@@ -5949,7 +5963,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
-			if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
+			if _, err := sweep.write(store, i, func() error { return store.SetMetadataBatch(wb.ID, patch) }); err != nil && stderr != nil {
 				fmt.Fprintf(stderr, "stampRunSessionIdentity: %s: %v\n", wb.ID, err) //nolint:errcheck
 			}
 		}
@@ -5958,7 +5972,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, runRootStamp{sessionName: sessionName, workDir: workDir, allowUnownedWorkDir: !sbInfo.PoolManaged}, roots, sweep, i, stderr)
 	}
 }
 
@@ -5976,25 +5990,27 @@ func workDirStampHasOwnershipEvidence(metadata map[string]string, workDir string
 }
 
 // stampRunRootFromStep copies a step's resolved session_name/work_dir onto its
-// workflow root (gc.root_bead_id), once per root per pass. Idempotent: it reads
+// workflow root (gc.root_bead_id), once per root per build. Idempotent: it reads
 // the root and writes only the keys that differ. Best-effort — a root that is
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
-func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
+//
+// The root is read through roots, so every step of a run reads it once per
+// build; a failed read is remembered for the rest of this build, and the next
+// build reads it again. The write draws on the pass's budget; idx is the
+// step's index in the pass.
+func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, stamp runRootStamp, roots *rootGetMemo, sweep *repairSweep, idx int, stderr io.Writer) {
 	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
 	}
-	if _, done := stampedRoots[rootID]; done {
+	entry := rootMemoOrNew(roots).resolve(store, rootID)
+	if entry.err != nil || entry.stamped {
 		return
 	}
-	root, err := store.Get(rootID)
-	if err != nil {
-		// Cross-store / missing / transient — do NOT mark stamped, so a later
-		// step this pass (or a later reconcile) can retry resolving the root.
-		return
-	}
-	stampedRoots[rootID] = struct{}{}
+	entry.stamped = true
+	root := entry.root
+	sessionName, workDir, allowUnownedWorkDir := stamp.sessionName, stamp.workDir, stamp.allowUnownedWorkDir
 	patch := map[string]string{}
 	if sessionName != "" && strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
@@ -6007,7 +6023,7 @@ func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, 
 	if len(patch) == 0 {
 		return
 	}
-	if err := store.SetMetadataBatch(rootID, patch); err != nil && stderr != nil {
+	if _, err := sweep.write(store, idx, func() error { return store.SetMetadataBatch(rootID, patch) }); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "stampRunSessionIdentity root %s: %v\n", rootID, err) //nolint:errcheck
 	}
 }
@@ -6045,8 +6061,9 @@ func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, 
 // Idempotent by design: it writes only when the canonical identity differs from
 // what is already on the bead, so steady-state reconciles perform no writes. A
 // write failure is logged and skipped — recovery is best-effort and must never
-// block reconciliation.
-func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+// block reconciliation. Writes draw on budget (nil = unbounded) and the pass
+// resumes where the last build ran out of it.
+func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, budget *repairWriteBudget, stderr io.Writer) {
 	if cfg == nil || len(workBeads) != len(workStores) {
 		return
 	}
@@ -6057,7 +6074,11 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		return
 	}
 	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
-	for i, wb := range workBeads {
+	sweep := budget.sweep("canonicalize-legacy-bound-assigned", len(workBeads))
+	defer sweep.finish()
+	for offset := range workBeads {
+		i := sweep.index(offset)
+		wb := workBeads[i]
 		if wb.Status != "in_progress" && wb.Status != "open" {
 			continue
 		}
@@ -6092,7 +6113,7 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		if routedChanged {
 			opts.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: canonicalRouted}
 		}
-		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
+		if _, err := sweep.write(store, i, func() error { return store.Update(wb.ID, opts) }); err != nil && stderr != nil {
 			fmt.Fprintf(stderr, "canonicalizeLegacyBoundAssignedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
 		}
 	}
@@ -6123,12 +6144,17 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 // identity differs from the persisted route, so steady-state reconciles perform
 // no writes, and a route that is already canonical or resolves to no configured
 // agent is left untouched. A write failure is logged and skipped — recovery is
-// best-effort and must never block reconciliation.
-func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
+// best-effort and must never block reconciliation. Writes draw on budget (nil =
+// unbounded) and the pass resumes where the last build ran out of it.
+func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, budget *repairWriteBudget, stderr io.Writer) {
 	if cfg == nil || len(workBeads) != len(workStores) {
 		return
 	}
-	for i, wb := range workBeads {
+	sweep := budget.sweep("canonicalize-legacy-bound-unassigned", len(workBeads))
+	defer sweep.finish()
+	for offset := range workBeads {
+		i := sweep.index(offset)
+		wb := workBeads[i]
 		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
@@ -6151,7 +6177,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 			continue
 		}
 		opts := beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: canonicalRouted}}
-		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
+		if _, err := sweep.write(store, i, func() error { return store.Update(wb.ID, opts) }); err != nil && stderr != nil {
 			fmt.Fprintf(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
 		}
 	}
@@ -6794,6 +6820,10 @@ func controlDispatcherRouteRepairCursorForDomain(repairDomain string) *atomic.Ui
 // tick's demand snapshot and retried on later ticks; marker-only cleanup leaves
 // an already-canonical route eligible for demand.
 //
+// Its own per-pass cap and rotating cursor stay as they are; each write also
+// draws on budget, the build's shared repair-write budget (nil = unbounded), and
+// a write the budget refuses is deferred exactly as one past the own cap is.
+//
 // It returns one summary per scope whose control-dispatcher is missing entirely
 // — a config gap the repair cannot fix, only report — so the caller can emit a
 // counted event alongside the per-scope stderr line.
@@ -6803,6 +6833,7 @@ func repairControlDispatcherRoutesForStoreScope(
 	workBeads []beads.Bead,
 	workStores []beads.Store,
 	workStoreRefs []string,
+	budget *repairWriteBudget,
 	stderr io.Writer,
 ) []ControlDispatcherScopeGap {
 	if cfg == nil || len(workBeads) == 0 {
@@ -6819,7 +6850,7 @@ func repairControlDispatcherRoutesForStoreScope(
 		// blanket suppression as a scope gap would fabricate a config finding.
 		return nil
 	}
-	repair := newControlDispatcherRouteRepair(cfg, stderr)
+	repair := newControlDispatcherRouteRepair(cfg, budget, stderr)
 	cursor := controlDispatcherRouteRepairCursorForDomain(repairDomain)
 	start := int((cursor.Add(controlDispatcherRouteRepairLimitPerTick) - controlDispatcherRouteRepairLimitPerTick) % uint64(len(workBeads)))
 	for offset := range workBeads {
@@ -6850,12 +6881,14 @@ type controlDispatcherRouteRepair struct {
 	scopeGaps       []ControlDispatcherScopeGap
 	gapIndexByScope map[string]int
 	writesRemaining int
+	budget          *repairWriteBudget
 	stderr          io.Writer
 }
 
-func newControlDispatcherRouteRepair(cfg *config.City, stderr io.Writer) *controlDispatcherRouteRepair {
+func newControlDispatcherRouteRepair(cfg *config.City, budget *repairWriteBudget, stderr io.Writer) *controlDispatcherRouteRepair {
 	return &controlDispatcherRouteRepair{
 		cfg:             cfg,
+		budget:          budget,
 		routeByScope:    make(map[string]controlDispatcherRouteLookup),
 		gapIndexByScope: make(map[string]int),
 		writesRemaining: controlDispatcherRouteRepairLimitPerTick,
@@ -6961,11 +6994,18 @@ func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Sto
 		deferRouteRepair(bead, needsRouteRepair)
 		return
 	}
-	r.write(bead, store, current, route, needsRouteRepair, clearFallback)
+	attempted, _ := r.budget.write(store, func() error {
+		return r.write(bead, store, current, route, needsRouteRepair, clearFallback)
+	})
+	if !attempted {
+		deferRouteRepair(bead, needsRouteRepair)
+	}
 }
 
 // write is persist's store write, and the in-memory mirror of what it wrote.
-func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
+// It reports the store error it already handled, so the budget can see the
+// attempt failed.
+func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) error {
 	metadata := make(map[string]string, 2)
 	if needsRouteRepair {
 		metadata[beadmeta.RoutedToMetadataKey] = route
@@ -6981,9 +7021,10 @@ func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store
 			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s route %q -> %q: %v\n", bead.ID, current, route, err) //nolint:errcheck
 		}
 		deferRouteRepair(bead, needsRouteRepair)
-		return
+		return err
 	}
 	applyRouteRepairInMemory(bead, route, needsRouteRepair, clearFallback)
+	return nil
 }
 
 // applyRouteRepairInMemory mirrors a persisted route repair onto the in-memory

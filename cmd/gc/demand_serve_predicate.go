@@ -342,11 +342,17 @@ func routeHasSlotSuffixShape(routedTo string) bool {
 // Idempotent by construction: it writes only when the collapse differs from what
 // is persisted, so steady state performs no writes. Same error discipline as its
 // sibling — a write failure is logged and skipped, never blocking reconciliation.
-func collapseSlotSuffixedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
+// Writes draw on budget (nil = unbounded) and the pass resumes where the last
+// build ran out of it.
+func collapseSlotSuffixedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, budget *repairWriteBudget, stderr io.Writer) {
 	if cfg == nil || len(workBeads) != len(workStores) {
 		return
 	}
-	for i, wb := range workBeads {
+	sweep := budget.sweep("collapse-slot-suffixed", len(workBeads))
+	defer sweep.finish()
+	for offset := range workBeads {
+		i := sweep.index(offset)
+		wb := workBeads[i]
 		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
@@ -359,7 +365,7 @@ func collapseSlotSuffixedRoutedWork(cfg *config.City, workBeads []beads.Bead, wo
 			continue
 		}
 		opts := beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: collapsed}}
-		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
+		if _, err := sweep.write(store, i, func() error { return store.Update(wb.ID, opts) }); err != nil && stderr != nil {
 			fmt.Fprintf(stderr, "collapseSlotSuffixedRoutedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
 		}
 	}

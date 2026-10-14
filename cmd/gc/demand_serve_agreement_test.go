@@ -338,7 +338,7 @@ func TestControlRowServableAgreesWithTheRouteRepair(t *testing.T) {
 					}
 					row := beads.Bead{ID: "c-1", Status: "open", Type: "task", Metadata: meta}
 					repaired := beads.Bead{ID: row.ID, Status: row.Status, Type: row.Type, Metadata: maps.Clone(meta)}
-					newControlDispatcherRouteRepair(cfg, io.Discard).repairBead(&repaired, nil, bindingRef)
+					newControlDispatcherRouteRepair(cfg, nil, io.Discard).repairBead(&repaired, nil, bindingRef)
 
 					kept := repaired.Metadata[beadmeta.RoutedToMetadataKey] == route
 					if got := controlRowServableByTemplate(cfg, row, route); got != kept {
@@ -457,7 +457,7 @@ func TestSlotSuffixCollapseIsPersistedForClaimableFormsOnly(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	collapseSlotSuffixedRoutedWork(cfg, seeded, stores, &stderr)
+	collapseSlotSuffixedRoutedWork(cfg, seeded, stores, nil, &stderr)
 	if stderr.Len() != 0 {
 		t.Fatalf("collapse reported errors: %s", stderr.String())
 	}
@@ -488,7 +488,7 @@ func TestSlotSuffixCollapseIsIdempotent(t *testing.T) {
 
 	counting := &countingUpdateStore{Store: store}
 	var stderr bytes.Buffer
-	collapseSlotSuffixedRoutedWork(cfg, []beads.Bead{created}, []beads.Store{counting}, &stderr)
+	collapseSlotSuffixedRoutedWork(cfg, []beads.Bead{created}, []beads.Store{counting}, nil, &stderr)
 	if counting.updates != 1 {
 		t.Fatalf("updates on the first pass = %d, want 1", counting.updates)
 	}
@@ -497,7 +497,7 @@ func TestSlotSuffixCollapseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-reading: %v", err)
 	}
-	collapseSlotSuffixedRoutedWork(cfg, []beads.Bead{rewritten}, []beads.Store{counting}, &stderr)
+	collapseSlotSuffixedRoutedWork(cfg, []beads.Bead{rewritten}, []beads.Store{counting}, nil, &stderr)
 	if counting.updates != 1 {
 		t.Fatalf("updates after the row is already canonical = %d, want no second write", counting.updates)
 	}

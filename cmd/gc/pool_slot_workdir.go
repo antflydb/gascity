@@ -152,11 +152,18 @@ func poolSlotWorkDirRepairFor(cfg *config.City, b beads.Bead) *poolSlotWorkDirRe
 // steady-state reconciles after the first repair perform no writes. A write
 // failure is logged and skipped -- recovery is best-effort and must never
 // block reconciliation.
-func repairPoolSlotWorkDirClobber(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
+//
+// Writes draw on budget (nil = unbounded); site names which of the build's
+// lists this call sweeps, so each list keeps its own resume point.
+func repairPoolSlotWorkDirClobber(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, budget *repairWriteBudget, site string, stderr io.Writer) {
 	if len(workBeads) != len(workStores) {
 		return
 	}
-	for i, wb := range workBeads {
+	sweep := budget.sweep("pool-slot-workdir/"+site, len(workBeads))
+	defer sweep.finish()
+	for offset := range workBeads {
+		i := sweep.index(offset)
+		wb := workBeads[i]
 		store := workStores[i]
 		if store == nil {
 			continue
@@ -166,7 +173,7 @@ func repairPoolSlotWorkDirClobber(cfg *config.City, workBeads []beads.Bead, work
 			continue
 		}
 		patch := map[string]string{beadmeta.WorkDirMetadataKey: repair.RestoreValue}
-		if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
+		if _, err := sweep.write(store, i, func() error { return store.SetMetadataBatch(wb.ID, patch) }); err != nil && stderr != nil {
 			fmt.Fprintf(stderr, "repairPoolSlotWorkDirClobber: %s: %v\n", wb.ID, err) //nolint:errcheck
 		}
 	}
