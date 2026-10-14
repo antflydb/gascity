@@ -25,6 +25,7 @@ type budgetTestStore struct {
 	delay   time.Duration
 	failIDs map[string]bool
 	failAll bool
+	hidden  map[string]bool // ids whose Get reports not-found, as a root not yet visible
 
 	writes  int
 	written []string // ids of write attempts, in order
@@ -64,6 +65,9 @@ func (s *budgetTestStore) Get(id string) (beads.Bead, error) {
 		s.gets = map[string]int{}
 	}
 	s.gets[id]++
+	if s.hidden[id] {
+		return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
+	}
 	return s.Store.Get(id)
 }
 
@@ -455,9 +459,7 @@ func rootMemoFixture(t *testing.T, steps int, rootExists bool) (*budgetTestStore
 	t.Helper()
 	const sessionName = "rootmemo-worker-1"
 	seed := []beads.Bead{}
-	if rootExists {
-		seed = append(seed, beads.Bead{ID: "rm-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}})
-	}
+	seed = append(seed, beads.Bead{ID: "rm-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}})
 	work := make([]beads.Bead, 0, steps)
 	for i := range steps {
 		step := beads.Bead{
@@ -469,6 +471,9 @@ func rootMemoFixture(t *testing.T, steps int, rootExists bool) (*budgetTestStore
 	}
 	store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, "/home/ds/rootmemo-worker-1")})
+	if !rootExists {
+		store.hidden = map[string]bool{"rm-root": true}
+	}
 	return store, work, sessions
 }
 
@@ -487,9 +492,7 @@ func TestStampRunSessionIdentityReadsAMissingRootOncePerBuild(t *testing.T) {
 
 	// The next build retries: the failure is not remembered across builds, and
 	// a root that has appeared by then is stamped.
-	if _, err := store.Create(beads.Bead{ID: "rm-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}}); err != nil {
-		t.Fatalf("creating the root: %v", err)
-	}
+	store.hidden = nil
 	stampRunSessionIdentity(gaConfig(), reloadRows(t, store, work), stores, sessions, nil, newRootGetMemo(), io.Discard)
 	if got := store.gets["rm-root"]; got != 2 {
 		t.Fatalf("Get(rm-root) ran %d times over two builds, want 2 (one per build)", got)

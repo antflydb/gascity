@@ -29,7 +29,7 @@ const (
 // controlDispatcherRouteRepairCursors.
 var repairRotationHints sync.Map // map[string]*atomic.Uint64
 
-// repairWriteBudget (RED stub: pass-through, no caps, no rotation, no failure memo) is the one write budget of a single desired-state build:
+// repairWriteBudget is the one write budget of a single desired-state build:
 // at most repairWritesPerBuild attempts and repairWriteTimeBudget of time spent
 // inside writes, drawn on by every repair writer the build runs. A nil budget
 // is unbounded, which is what the off-tick callers (the v2 allocator lane and
@@ -81,6 +81,10 @@ func (b *repairWriteBudget) write(store beads.Store, fn func() error) (attempted
 func (b *repairWriteBudget) admit(store beads.Store) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.spentLocked() {
+		b.deferred++
+		return false
+	}
 	b.attempts++
 	b.stores[demandLabelKey(store)] = struct{}{}
 	return true
@@ -95,7 +99,7 @@ func (b *repairWriteBudget) charge(d time.Duration) {
 
 // spentLocked reports whether either cap is spent. The caller holds b.mu.
 func (b *repairWriteBudget) spentLocked() bool {
-	return false
+	return b.attempts >= repairWritesPerBuild || b.spent >= repairWriteTimeBudget
 }
 
 // attempted reports whether this build has attempted a durable write against
@@ -178,6 +182,7 @@ func (b *repairWriteBudget) sweep(site string, n int) *repairSweep {
 		return s
 	}
 	s.hint = b.rotationHint(site)
+	s.start = int(s.hint.Load() % uint64(n))
 	return s
 }
 
@@ -247,9 +252,7 @@ func (m *rootGetMemo) resolve(store beads.Store, rootID string) *rootGetEntry {
 	}
 	root, err := store.Get(rootID)
 	entry := &rootGetEntry{root: root, err: err}
-	if err == nil {
-		m.entries[key] = entry
-	}
+	m.entries[key] = entry
 	return entry
 }
 
