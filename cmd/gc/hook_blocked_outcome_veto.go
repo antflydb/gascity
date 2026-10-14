@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -195,14 +194,17 @@ func withHookBlockedOutcomeVeto(run hookStoreRunner, blockers beads.ExactBatchGe
 }
 
 // filterBlockedOutcomeHookCandidates drops the candidates whose ready-blocking
-// dependency is closed with a work outcome that does not satisfy it
-// (beads.DependencySatisfied): a blocker closed gc.work_outcome=blocked has
-// committed its work without landing it, so the dependent must not start yet.
+// dependency is closed with a readiness outcome that does not satisfy it
+// (beads.DependencySatisfied over beads.ReadinessWorkOutcome): a blocker closed
+// gc.work_outcome=blocked has committed its work without landing it, so the
+// dependent must not start yet. The readiness outcome is the raw work outcome
+// except for a formula step that closed gc.outcome=pass, whose dispatch verdict
+// supersedes it — such a step's dependents stay servable.
 // candidates is the already-filtered work-query JSON (filterUnreadyHookCandidates
 // has run); the survivors come back in their original order.
 //
 // The veto is deliberately narrow, mirroring the store-side veto it agrees with
-// (BdStore.filterReadyByWorkOutcome):
+// (BdStore.filterReadyByWorkOutcome, which reads the same readiness outcome):
 //   - only OPEN candidates are considered. An in_progress row is a resume, and
 //     the demand side never gates a claimed row, so vetoing it here would strand
 //     work a session is already doing;
@@ -295,7 +297,7 @@ func hookBlockerHandedOff(ids []string, found map[string]beads.Bead) bool {
 		if !ok || blocker.Status != "closed" {
 			continue
 		}
-		if !beads.DependencySatisfied(blocker.Status, blocker.Metadata[beadmeta.WorkOutcomeMetadataKey]) {
+		if !beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata)) {
 			return true
 		}
 	}
