@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -245,7 +246,19 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		var ok bool
+		if target.sessionTransport() == "acp" {
+			var pending bool
+			if ok, pending, err = deliverACPQueuedNudgesBounded(cityPath, target, func() (bool, error) {
+				return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+			}); pending {
+				skipCounts["acp-delivery-pending"]++
+				logNudgeDispatchSkip(debugOut, "acp-delivery-pending", target.agentKey(), target.sessionName, "")
+				continue
+			}
+		} else {
+			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -274,6 +287,45 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// acpDeliveryWait bounds how long a dispatch pass waits for one ACP
+// target's queued delivery. An ACP nudge waits up to its busy timeout (60s
+// by default) for a busy agent, and the pass runs on the controller's loop
+// (#7816 review), so a delivery still running past the bound is left to
+// finish on its own, its items claimed, and the pass moves on.
+var acpDeliveryWait = 3 * time.Second
+
+// acpDeliveries are the ACP targets with a delivery running, by city and
+// session name: one at a time per target, so a busy agent never piles up
+// waiting deliveries across passes.
+var acpDeliveries sync.Map
+
+// deliverACPQueuedNudgesBounded runs deliver for target off the pass, and
+// waits for it at most acpDeliveryWait. pending reports a delivery still
+// running, this one or an earlier pass's; ok and err are deliver's when it
+// returned in time.
+func deliverACPQueuedNudgesBounded(cityPath string, target nudgeTarget, deliver func() (bool, error)) (ok, pending bool, err error) {
+	key := cityPath + "\x00" + target.sessionName
+	if _, running := acpDeliveries.LoadOrStore(key, struct{}{}); running {
+		return false, true, nil
+	}
+	type result struct {
+		ok  bool
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer acpDeliveries.Delete(key)
+		ok, err := deliver()
+		done <- result{ok, err}
+	}()
+	select {
+	case r := <-done:
+		return r.ok, false, r.err
+	case <-time.After(acpDeliveryWait):
+		return false, true, nil
+	}
 }
 
 // anyOpenACPSession reports an open session on the ACP transport, whose
