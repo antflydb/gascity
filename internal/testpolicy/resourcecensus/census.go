@@ -108,8 +108,6 @@ type Ledger struct {
 type Baseline struct {
 	Scope           Scope    `toml:"scope"`
 	Resource        Resource `toml:"resource"`
-	BaselineCalls   int      `toml:"baseline_calls"`
-	BaselineFiles   int      `toml:"baseline_files"`
 	ReportedCalls   int      `toml:"reported_calls"`
 	ReportedFiles   int      `toml:"reported_files"`
 	OwnerBead       string   `toml:"owner_bead"`
@@ -1279,6 +1277,9 @@ func ParseLedger(data []byte) (Ledger, error) {
 			fields = append(fields, key.String())
 		}
 		sort.Strings(fields)
+		if removed := removedLedgerFields(fields); len(removed) > 0 {
+			return Ledger{}, countsFailure(fmt.Sprintf("ledger field %s was removed in policy version 3: per-row counts now live in %s", strings.Join(removed, ", "), CountsPath))
+		}
 		return Ledger{}, fmt.Errorf("unknown ledger field: %s", strings.Join(fields, ", "))
 	}
 	return ledger, nil
@@ -1311,13 +1312,17 @@ func PolicyExpiries() []waiverclock.Expiry {
 	return collectExpiries(bootstrapPolicy)
 }
 
+// validateAgainstPolicy checks the ledger's structure: its rows equal the
+// bootstrap policy, the Medium and reviewed hermetic rows exist in the scan,
+// and the rows are sorted. The counts live in the counts file and are judged by
+// ValidateCounts.
 func validateAgainstPolicy(policy, ledger Ledger, census Census) error {
 	fail := func(problems ...string) error {
 		if len(problems) == 0 {
 			return nil
 		}
 		sort.Strings(problems)
-		return errors.New(strings.Join(problems, "\n"))
+		return countsFailure(problems...)
 	}
 
 	if problems := validateManifestAgainstPolicy(policy, ledger); len(problems) > 0 {
@@ -1329,26 +1334,13 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census) error {
 	if err := validateReviewedHermeticBodies(ledger.ReviewedHermeticBody, census); err != nil {
 		return fail(err.Error())
 	}
-
-	var problems []string
-	for _, baseline := range ledger.AuditBaseline {
-		prefix := fmt.Sprintf("audit baseline scope=%s resource=%s", baseline.Scope, baseline.Resource)
-		problems = append(problems, validateBaseline(prefix, baseline, census)...)
-	}
-	for _, debt := range ledger.Debt {
-		prefix := fmt.Sprintf("debt baseline scope=%s resource=%s", debt.Scope, debt.Resource)
-		problems = append(problems, validateBaseline(prefix, debt, census)...)
-	}
-	for _, debt := range ledger.SmallDebt {
-		problems = append(problems, validateSmallBaseline(debt, census, ledger.Medium)...)
-	}
-	return fail(problems...)
+	return nil
 }
 
 func validateManifestAgainstPolicy(policy, ledger Ledger) []string {
 	var problems []string
-	if policy.Version != 2 {
-		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 2", policy.Version))
+	if policy.Version != 3 {
+		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 3", policy.Version))
 	}
 	if ledger.Version != policy.Version {
 		problems = append(problems, fmt.Sprintf("ledger version = %d, bootstrap policy requires %d", ledger.Version, policy.Version))
@@ -1356,6 +1348,8 @@ func validateManifestAgainstPolicy(policy, ledger Ledger) []string {
 	problems = append(problems, validateRowsAgainstPolicy("audit", policy.AuditBaseline, ledger.AuditBaseline)...)
 	problems = append(problems, validateRowsAgainstPolicy("debt", policy.Debt, ledger.Debt)...)
 	problems = append(problems, validateMediumRowsAgainstPolicy(policy.Medium, ledger.Medium)...)
+	problems = append(problems, validateMediumRowOrder(ledger.Medium)...)
+	problems = append(problems, validateReviewedHermeticRowOrder(ledger.ReviewedHermeticBody)...)
 	problems = append(problems, validateReviewedHermeticRowsAgainstPolicy(policy.ReviewedHermeticBody, ledger.ReviewedHermeticBody)...)
 	problems = append(problems, validateRowsAgainstPolicy("small debt", policy.SmallDebt, ledger.SmallDebt)...)
 	return problems
@@ -1404,8 +1398,6 @@ func comparePolicyFields(prefix string, got, want Baseline) []string {
 		name      string
 		got, want int
 	}{
-		{"baseline_calls", got.BaselineCalls, want.BaselineCalls},
-		{"baseline_files", got.BaselineFiles, want.BaselineFiles},
 		{"reported_calls", got.ReportedCalls, want.ReportedCalls},
 		{"reported_files", got.ReportedFiles, want.ReportedFiles},
 	} {
@@ -1438,29 +1430,11 @@ func validateBaselineDefinition(prefix string, row Baseline) []string {
 	if _, ok := knownResources[row.Resource]; !ok {
 		problems = append(problems, fmt.Sprintf("%s: unknown resource %q", prefix, row.Resource))
 	}
-	if row.BaselineCalls < 0 || row.BaselineFiles < 0 {
-		problems = append(problems, prefix+": baselines must be non-negative")
-	}
 	if row.ReportedCalls < 0 || row.ReportedFiles < 0 {
 		problems = append(problems, prefix+": historical census must be non-negative")
 	}
 	problems = append(problems, validateOwnership(prefix, row)...)
 	return problems
-}
-
-func validateBaseline(prefix string, row Baseline, census Census) []string {
-	if row.BaselineCalls < 0 || row.BaselineFiles < 0 {
-		return []string{prefix + ": baselines must be non-negative"}
-	}
-	actual := census.Count(row.Scope, row.Resource)
-	switch {
-	case actual.Calls > row.BaselineCalls || actual.Files > row.BaselineFiles:
-		return []string{fmt.Sprintf("source resource census grew: scope=%s resource=%s calls=%d (baseline %d), files=%d (baseline %d)", row.Scope, row.Resource, actual.Calls, row.BaselineCalls, actual.Files, row.BaselineFiles)}
-	case actual.Calls < row.BaselineCalls || actual.Files < row.BaselineFiles:
-		return []string{fmt.Sprintf("source resource census baseline is stale: scope=%s resource=%s calls=%d (baseline %d), files=%d (baseline %d); lower the checked baseline to bank the improvement", row.Scope, row.Resource, actual.Calls, row.BaselineCalls, actual.Files, row.BaselineFiles)}
-	default:
-		return nil
-	}
 }
 
 func knownScope(scope Scope) bool {
@@ -1614,11 +1588,7 @@ func renderedSourceScope(scope Scope) string {
 }
 
 func renderedBaseline(row Baseline) string {
-	result := fmt.Sprintf("%s: %d calls / %d files", row.Resource, row.BaselineCalls, row.BaselineFiles)
-	if row.ReportedCalls != 0 && (row.ReportedCalls != row.BaselineCalls || row.ReportedFiles != row.BaselineFiles) {
-		result += fmt.Sprintf(" (historical regex census: %d / %d)", row.ReportedCalls, row.ReportedFiles)
-	}
-	return result
+	return string(row.Resource)
 }
 
 const (
