@@ -744,16 +744,34 @@ func parseReadyArgsForTest(t *testing.T, args []string) (readyOpts, []metadataFi
 
 const blockedOutcomeIdentity = "gascity/pm"
 
-// blockedOutcomeOutcomes are the three blocker dispositions that matter: a
-// legacy close with no typed outcome, a landed close, and the handed-off close
-// the veto keys on.
-var blockedOutcomeOutcomes = []string{"", beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeBlocked}
+// blockedOutcomeBlocker is one closed-blocker shape and whether the dependent
+// is servable (and so counted) behind it.
+type blockedOutcomeBlocker struct {
+	label    string
+	meta     map[string]string
+	servable bool
+}
 
-func outcomeLabel(outcome string) string {
-	if outcome == "" {
-		return "legacy-no-outcome"
-	}
-	return outcome
+// blockedOutcomeBlockers are the blocker dispositions that matter: a legacy
+// close with no typed outcome, a landed close, the handed-off close the veto
+// keys on, and formula steps carrying a handed-off work outcome. A step that
+// passed was advanced past by dispatch, so beads.ReadinessWorkOutcome ignores
+// its work outcome and the dependent is servable; a step that did not pass is
+// judged on the work outcome like any other blocker.
+var blockedOutcomeBlockers = []blockedOutcomeBlocker{
+	{"legacy-no-outcome", nil, true},
+	{beadmeta.WorkOutcomeShipped, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, true},
+	{beadmeta.WorkOutcomeBlocked, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, false},
+	{"passed-step-blocked", map[string]string{
+		beadmeta.StepRefMetadataKey:     "mol-x.review",
+		beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}, true},
+	{"failed-step-blocked", map[string]string{
+		beadmeta.StepRefMetadataKey:     "mol-x.review",
+		beadmeta.OutcomeMetadataKey:     beadmeta.OutcomeFail,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}, false},
 }
 
 // blockedOutcomeBdRunner answers like the real bd for the be-hs42e.5.2 shape.
@@ -765,7 +783,7 @@ func outcomeLabel(outcome string) string {
 // read it two ways: the controller's closed-inclusive lookup is a `bd list`
 // that BdStore filters to the blocker IDs in Go (bd list has no --id flag), and
 // the hook's veto is one batched `bd show <ids...>`.
-func blockedOutcomeBdRunner(blockerOutcome string, assigned bool) (beads.CommandRunner, string) {
+func blockedOutcomeBdRunner(blockerMeta map[string]string, assigned bool) (beads.CommandRunner, string) {
 	assignee := ""
 	if assigned {
 		assignee = `"assignee":"` + blockedOutcomeIdentity + `",`
@@ -777,11 +795,15 @@ func blockedOutcomeBdRunner(blockerOutcome string, assigned bool) (beads.Command
 		`"dependencies":[` +
 		`{"issue_id":"ga-dep","depends_on_id":"ga-blocker","type":"blocks","metadata":"{}"},` +
 		`{"issue_id":"ga-dep","depends_on_id":"ga-parent","type":"parent-child","metadata":"{}"}]}]`
-	blockerMeta := ""
-	if blockerOutcome != "" {
-		blockerMeta = `,"metadata":{"gc.work_outcome":"` + blockerOutcome + `"}`
+	blockerMetaJSON := ""
+	if len(blockerMeta) > 0 {
+		encoded, err := json.Marshal(blockerMeta)
+		if err != nil {
+			panic(err)
+		}
+		blockerMetaJSON = `,"metadata":` + string(encoded)
 	}
-	blockerJSON := `[{"id":"ga-blocker","title":"sibling built by a builder","status":"closed","issue_type":"task","created_at":"2026-09-26T18:00:00Z"` + blockerMeta + `}]`
+	blockerJSON := `[{"id":"ga-blocker","title":"sibling built by a builder","status":"closed","issue_type":"task","created_at":"2026-09-26T18:00:00Z"` + blockerMetaJSON + `}]`
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if len(args) == 0 {
 			return nil, fmt.Errorf("unexpected command: %s", name)
@@ -837,15 +859,15 @@ func blockedOutcomeServed(rawReady string, blockers beads.ExactBatchGetter) bool
 //     assigned row, and the full ready read behind the default scale check for
 //     the routed-only row.
 //
-// The legacy and shipped rows are servable and counted. The handed-off row is
-// neither. The expected verdict is asserted alongside the agreement so the test
+// The legacy, shipped and passed-step rows are servable and counted. The
+// handed-off rows are neither. The expected verdict is asserted alongside the agreement so the test
 // cannot pass by both sides being wrong the same way.
 func TestDemandServeAgreement_BlockedOutcomeBlocker(t *testing.T) {
 	for _, assigned := range []bool{true, false} {
-		for _, outcome := range blockedOutcomeOutcomes {
-			name := fmt.Sprintf("assigned=%v/blocker=%s", assigned, outcomeLabel(outcome))
+		for _, blocker := range blockedOutcomeBlockers {
+			name := fmt.Sprintf("assigned=%v/blocker=%s", assigned, blocker.label)
 			t.Run(name, func(t *testing.T) {
-				runner, rawReady := blockedOutcomeBdRunner(outcome, assigned)
+				runner, rawReady := blockedOutcomeBdRunner(blocker.meta, assigned)
 				store := beads.NewBdStore("/city", runner)
 
 				served := blockedOutcomeServed(rawReady, store)
@@ -864,11 +886,11 @@ func TestDemandServeAgreement_BlockedOutcomeBlocker(t *testing.T) {
 
 				if served != counted {
 					t.Fatalf("AGREEMENT VIOLATED: the worker's hook serves ga-dep = %v, the controller's demand read counts it = %v "+
-						"(blocker closed with gc.work_outcome=%q). A row servable but not counted is work no session is ever woken for.",
-						served, counted, outcome)
+						"(blocker closed with metadata %v). A row servable but not counted is work no session is ever woken for.",
+						served, counted, blocker.meta)
 				}
-				if want := outcome != beadmeta.WorkOutcomeBlocked; served != want {
-					t.Fatalf("ga-dep servable and counted = %v, want %v for a blocker closed with gc.work_outcome=%q", served, want, outcome)
+				if served != blocker.servable {
+					t.Fatalf("ga-dep servable and counted = %v, want %v for a blocker closed with metadata %v", served, blocker.servable, blocker.meta)
 				}
 			})
 		}

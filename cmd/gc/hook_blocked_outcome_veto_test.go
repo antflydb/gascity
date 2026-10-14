@@ -47,8 +47,17 @@ type vetoBlocker struct {
 // for which ids) and not only what it decides.
 type vetoBd struct {
 	blockers map[string]vetoBlocker
-	showErr  error
-	calls    [][]string
+	// extraMeta adds metadata keys to a blocker beyond gc.work_outcome, keyed by
+	// blocker id (a formula step carries gc.step_ref and gc.outcome).
+	extraMeta map[string]map[string]string
+	showErr   error
+	calls     [][]string
+}
+
+// stepMeta is the metadata a closed formula step carries: its step ref and the
+// dispatch verdict it closed with.
+func stepMeta(outcome string) map[string]string {
+	return map[string]string{beadmeta.StepRefMetadataKey: "mol-x.review", beadmeta.OutcomeMetadataKey: outcome}
 }
 
 func (f *vetoBd) store() beads.ExactBatchGetter {
@@ -73,8 +82,19 @@ func (f *vetoBd) run(_, name string, args ...string) ([]byte, error) {
 			continue
 		}
 		meta := ""
+		md := map[string]string{}
 		if b.outcome != "" {
-			meta = fmt.Sprintf(`,"metadata":{%q:%q}`, beadmeta.WorkOutcomeMetadataKey, b.outcome)
+			md[beadmeta.WorkOutcomeMetadataKey] = b.outcome
+		}
+		for k, v := range f.extraMeta[id] {
+			md[k] = v
+		}
+		if len(md) > 0 {
+			encoded, err := json.Marshal(md)
+			if err != nil {
+				return nil, err
+			}
+			meta = `,"metadata":` + string(encoded)
 		}
 		issues = append(issues, fmt.Sprintf(`{"id":%q,"title":"blocker","status":%q,"issue_type":"task","created_at":"2026-09-26T18:00:00Z"%s}`, id, b.status, meta))
 	}
@@ -147,25 +167,37 @@ func TestFilterBlockedOutcomeHookCandidatesVetoDecision(t *testing.T) {
 		status   string
 		edgeType string
 		blocker  vetoBlocker
+		extra    map[string]string
 		wantKept bool
 	}{
-		{"blocks edge, closed, blocked outcome", "open", "blocks", blocked, false},
-		{"waits-for edge, closed, blocked outcome", "open", "waits-for", blocked, false},
-		{"conditional-blocks edge, closed, blocked outcome", "open", "conditional-blocks", blocked, false},
-		{"closed, shipped outcome", "open", "blocks", vetoBlocker{"closed", beadmeta.WorkOutcomeShipped}, true},
-		{"closed, legacy close with no typed outcome", "open", "blocks", vetoBlocker{"closed", ""}, true},
-		{"closed, unrecognized future outcome fails open", "open", "blocks", vetoBlocker{"closed", "future-outcome"}, true},
-		{"blocker still open is bd's verdict, not this veto's", "open", "blocks", vetoBlocker{"open", beadmeta.WorkOutcomeBlocked}, true},
-		{"blocker in_progress is bd's verdict, not this veto's", "open", "blocks", vetoBlocker{"in_progress", beadmeta.WorkOutcomeBlocked}, true},
-		{"parent-child edge is not ready-blocking", "open", "parent-child", blocked, true},
-		{"related edge is not ready-blocking", "open", "related", blocked, true},
-		{"discovered-from edge is not ready-blocking", "open", "discovered-from", blocked, true},
-		{"tracks edge is not ready-blocking", "open", "tracks", blocked, true},
-		{"in_progress candidate is a resume and is never vetoed", "in_progress", "blocks", blocked, true},
+		{"blocks edge, closed, blocked outcome", "open", "blocks", blocked, nil, false},
+		{"waits-for edge, closed, blocked outcome", "open", "waits-for", blocked, nil, false},
+		{"conditional-blocks edge, closed, blocked outcome", "open", "conditional-blocks", blocked, nil, false},
+		{"closed, shipped outcome", "open", "blocks", vetoBlocker{"closed", beadmeta.WorkOutcomeShipped}, nil, true},
+		{"closed, legacy close with no typed outcome", "open", "blocks", vetoBlocker{"closed", ""}, nil, true},
+		{"closed, unrecognized future outcome fails open", "open", "blocks", vetoBlocker{"closed", "future-outcome"}, nil, true},
+		{"blocker still open is bd's verdict, not this veto's", "open", "blocks", vetoBlocker{"open", beadmeta.WorkOutcomeBlocked}, nil, true},
+		{"blocker in_progress is bd's verdict, not this veto's", "open", "blocks", vetoBlocker{"in_progress", beadmeta.WorkOutcomeBlocked}, nil, true},
+		{"parent-child edge is not ready-blocking", "open", "parent-child", blocked, nil, true},
+		{"related edge is not ready-blocking", "open", "related", blocked, nil, true},
+		{"discovered-from edge is not ready-blocking", "open", "discovered-from", blocked, nil, true},
+		{"tracks edge is not ready-blocking", "open", "tracks", blocked, nil, true},
+		{"in_progress candidate is a resume and is never vetoed", "in_progress", "blocks", blocked, nil, true},
+		// gc.work_outcome is a work-record disposition; a formula step that closed
+		// gc.outcome=pass was advanced past by dispatch, so its work outcome does
+		// not gate readiness (beads.ReadinessWorkOutcome). The plain-bead row pins
+		// that the override needs gc.step_ref.
+		{"passed formula step carrying blocked is not vetoed", "open", "blocks", blocked, stepMeta(beadmeta.OutcomePass), true},
+		{"failed formula step carrying blocked is vetoed", "open", "blocks", blocked, stepMeta(beadmeta.OutcomeFail), false},
+		{"skipped formula step carrying blocked is vetoed", "open", "blocks", blocked, stepMeta(beadmeta.OutcomeSkipped), false},
+		{"plain bead with gc.outcome=pass and no step ref is vetoed", "open", "blocks", blocked, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bd := &vetoBd{blockers: map[string]vetoBlocker{"ga-blocker": tc.blocker}}
+			bd := &vetoBd{
+				blockers:  map[string]vetoBlocker{"ga-blocker": tc.blocker},
+				extraMeta: map[string]map[string]string{"ga-blocker": tc.extra},
+			}
 			in := vetoRows(vetoRow("ga-dep", tc.status, 2, vetoEdge{"ga-blocker", tc.edgeType}))
 
 			out, err := filterBlockedOutcomeHookCandidates(in, bd.store())
