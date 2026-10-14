@@ -1047,28 +1047,34 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, recorded []string
 	return complete
 }
 
-// stopVerifyListTimeout bounds the listing that confirms a controller-handled
-// stop: a wedged runtime server (a SIGSTOPped tmux) never answers it.
+// stopVerifyListTimeout bounds the confirmation of a controller-handled
+// stop: a wedged runtime server (a SIGSTOPped tmux) never answers a listing,
+// and a stopped session can take a few seconds to leave it (a deleted k8s
+// pod lists Running through its grace period).
 var stopVerifyListTimeout = 10 * time.Second
+
+// stopVerifyPollInterval spaces the confirming listings.
+var stopVerifyPollInterval = 250 * time.Millisecond
 
 // confirmControllerStopForStop reports whether a stop the controller handled
 // (the supervisor's, or a standalone controller's) left no session of the
 // city running (mc-3low3). The controller's shutdown is bounded, so a
 // runtime it could not stop, or a server that never answered it (a wedged
 // tmux), outlives it, and gc stop must say so and fail rather than report
-// "City stopped.". It lists the city's runtime, bounded by
-// stopVerifyListTimeout: a listing that does not answer in time, one that is
-// incomplete, or any session still listed fails the stop, each reported. A
-// runtime that does not attest its listing proves nothing either way, and a
-// provider that cannot be opened is reported; neither changes the outcome
-// the controller reported, as before.
+// "City stopped.". It lists the city's runtime until a complete listing is
+// empty, for up to stopVerifyListTimeout: a session still listed, an
+// incomplete listing, or a listing that does not answer by then fails the
+// stop, each reported. A runtime that does not attest its listing proves
+// nothing either way, nor does one whose listing is shared with other cities
+// (k8s's namespace), and a provider that cannot be opened is reported; none
+// of these changes the outcome the controller reported, as before.
 func confirmControllerStopForStop(cfg *config.City, cityPath string, stderr io.Writer) bool {
 	sp, err := sessionProviderForStopProbe(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: could not open the runtime to confirm the stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return true
 	}
-	if !runtime.ListRunningAttested(sp) {
+	if !runtime.ListRunningAttested(sp) || runtime.ListRunningShared(sp) {
 		return true
 	}
 	type listed struct {
@@ -1076,28 +1082,36 @@ func confirmControllerStopForStop(cfg *config.City, cityPath string, stderr io.W
 		complete bool
 		report   bytes.Buffer
 	}
-	done := make(chan *listed, 1)
-	go func() {
-		l := &listed{}
-		l.names, l.complete = listRunningForStop(sp, &l.report)
-		done <- l
-	}()
-	select {
-	case l := <-done:
-		_, _ = io.Copy(stderr, &l.report)
-		switch {
-		case !l.complete:
-			fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete after the controller stopped, so sessions may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
-			return false
-		case len(l.names) > 0:
-			names := slices.Clone(l.names)
-			slices.Sort(names)
-			fmt.Fprintf(stderr, "gc stop: stop not confirmed: session(s) %s still running after the controller stopped; run gc stop again, or gc stop --force\n", strings.Join(names, ", ")) //nolint:errcheck // best-effort stderr
+	deadline := time.Now().Add(stopVerifyListTimeout)
+	for {
+		done := make(chan *listed, 1)
+		go func() {
+			l := &listed{}
+			l.names, l.complete = listRunningForStop(sp, &l.report)
+			done <- l
+		}()
+		var l *listed
+		select {
+		case l = <-done:
+		case <-time.After(time.Until(deadline)):
+			fmt.Fprintf(stderr, "gc stop: stop not confirmed: the runtime did not answer a listing within %s after the controller stopped (a wedged runtime server?), so sessions may still be running; resolve it and run gc stop again\n", stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
 			return false
 		}
-		return true
-	case <-time.After(stopVerifyListTimeout):
-		fmt.Fprintf(stderr, "gc stop: stop not confirmed: the runtime did not answer a listing within %s after the controller stopped (a wedged runtime server?), so sessions may still be running; resolve it and run gc stop again\n", stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
+		if l.complete && len(l.names) == 0 {
+			return true
+		}
+		if time.Until(deadline) > stopVerifyPollInterval {
+			<-time.After(stopVerifyPollInterval)
+			continue
+		}
+		_, _ = io.Copy(stderr, &l.report)
+		if !l.complete {
+			fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete after the controller stopped, so sessions may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+			return false
+		}
+		names := slices.Clone(l.names)
+		slices.Sort(names)
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: session(s) %s still running %s after the controller stopped; resolve the runtime and run gc stop again\n", strings.Join(names, ", "), stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
 		return false
 	}
 }

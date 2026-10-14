@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,14 +38,44 @@ func (failingListProvider) ListRunning(string) ([]string, error) {
 	return nil, errors.New("tmux: server not responding")
 }
 
+// lingeringListProvider keeps listing its sessions for the first linger
+// listings after they stopped, as a deleted k8s pod lists Running through
+// its grace period.
+type lingeringListProvider struct {
+	*runtime.Fake
+	names  []string
+	linger *atomic.Int32
+}
+
+func (p lingeringListProvider) ListRunning(prefix string) ([]string, error) {
+	if p.linger.Add(-1) >= 0 {
+		return p.names, nil
+	}
+	return p.Fake.ListRunning(prefix)
+}
+
+func lingering(t *testing.T, listings int32, names ...string) lingeringListProvider {
+	t.Helper()
+	var n atomic.Int32
+	n.Store(listings)
+	return lingeringListProvider{Fake: runningFake(t), names: names, linger: &n}
+}
+
+// sharedListProvider lists sessions of other cities too (k8s's namespace).
+type sharedListProvider struct{ *runtime.Fake }
+
+func (sharedListProvider) ListRunningShared() bool { return true }
+
 // stopProbeProvider points the stop probe at sp, and bounds the confirming
-// listing at timeout.
+// listings at timeout, polled every timeout/10.
 func stopProbeProvider(t *testing.T, sp runtime.Provider, timeout time.Duration) {
 	t.Helper()
-	oldProbe, oldTimeout := sessionProviderForStopProbe, stopVerifyListTimeout
+	oldProbe, oldTimeout, oldPoll := sessionProviderForStopProbe, stopVerifyListTimeout, stopVerifyPollInterval
 	sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
-	stopVerifyListTimeout = timeout
-	t.Cleanup(func() { sessionProviderForStopProbe, stopVerifyListTimeout = oldProbe, oldTimeout })
+	stopVerifyListTimeout, stopVerifyPollInterval = timeout, timeout/10
+	t.Cleanup(func() {
+		sessionProviderForStopProbe, stopVerifyListTimeout, stopVerifyPollInterval = oldProbe, oldTimeout, oldPoll
+	})
 }
 
 func runningFake(t *testing.T, names ...string) *runtime.Fake {
@@ -59,9 +90,12 @@ func runningFake(t *testing.T, names ...string) *runtime.Fake {
 }
 
 // Kills a controller-handled stop confirmed without looking: a session still
-// listed, an incomplete listing, or a listing that never answers fails it,
-// each reported; an empty runtime confirms it; a runtime that does not
-// attest its listing proves nothing, as before.
+// listed at the deadline, an incomplete listing, or a listing that never
+// answers fails it, each reported; an empty runtime confirms it, as does one
+// whose stopped sessions leave the listing within the deadline (#7844
+// review: a deleted k8s pod lists Running for its grace period); a runtime
+// that does not attest its listing, or shares it with other cities, proves
+// nothing, as before.
 func TestConfirmControllerStopForStop(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
@@ -74,7 +108,10 @@ func TestConfirmControllerStopForStop(t *testing.T) {
 		says string
 	}{
 		{"nothing running", runningFake(t), true, ""},
-		{"a session survives", runningFake(t, "worker-2", "worker-1"), false, "session(s) worker-1, worker-2 still running after the controller stopped"},
+		{"a session survives", runningFake(t, "worker-2", "worker-1"), false, "session(s) worker-1, worker-2 still running 50ms after the controller stopped"},
+		{"a stopped session lingers in the listing", lingering(t, 3, "worker-1"), true, ""},
+		{"a session lingers past the deadline", lingering(t, 1000, "worker-1"), false, "worker-1 still running"},
+		{"a listing shared with other cities", sharedListProvider{runningFake(t, "other-city-worker")}, true, ""},
 		{"the listing fails", failingListProvider{runningFake(t)}, false, "the runtime inventory was incomplete"},
 		{"the listing never answers", wedgedListProvider{runningFake(t, "worker-1"), release}, false, "did not answer a listing within 50ms"},
 		{"an unattested listing", unattested, true, ""},
