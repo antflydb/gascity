@@ -6,9 +6,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rogpeppe/go-internal/testscript"
 
 	"github.com/gastownhall/gascity/internal/fsyncprobe"
 )
@@ -87,6 +90,46 @@ func TestDoltStateFsyncProbeRequiresDirAndTimeout(t *testing.T) {
 		if _, _, code := runFsyncProbeCmd(t, args...); code == 0 {
 			t.Fatalf("exit = 0 for %v, want a usage failure", args)
 		}
+	}
+}
+
+// TestDoltStateFsyncProbeUsesTheRealProbe pins the production wiring of the
+// seam: every other test here swaps fsyncProbeFunc, so only this one notices
+// the default being replaced by something that is not fsyncprobe.Probe.
+func TestDoltStateFsyncProbeUsesTheRealProbe(t *testing.T) {
+	got := reflect.ValueOf(fsyncProbeFunc).Pointer()
+	want := reflect.ValueOf(fsyncprobe.Probe).Pointer()
+	if got != want {
+		t.Fatalf("fsyncProbeFunc is not fsyncprobe.Probe (%#x != %#x)", got, want)
+	}
+}
+
+// TestDoltStateFsyncProbeRealChain runs the hidden commands end to end: the
+// probe re-execs this test binary as the detached worker (testscript names it
+// gc) and reads the result back over fd 3.
+func TestDoltStateFsyncProbeRealChain(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "dolt-state-fsync-probe.txtar")))
+}
+
+func TestDoltStateFsyncProbeRejectsNonPositiveTimeout(t *testing.T) {
+	called := false
+	prev := fsyncProbeFunc
+	fsyncProbeFunc = func(string, time.Duration) fsyncprobe.Result {
+		called = true
+		return fsyncprobe.Result{Status: fsyncprobe.StatusFinished}
+	}
+	t.Cleanup(func() { fsyncProbeFunc = prev })
+	for _, ms := range []string{"0", "-1", "-5000"} {
+		stdout, _, code := runFsyncProbeCmd(t, "--dir", t.TempDir(), "--timeout-ms", ms)
+		if code == 0 {
+			t.Fatalf("--timeout-ms %s: exit = 0, want non-zero", ms)
+		}
+		if got := parseDoltStateOutput(t, stdout); got["status"] != "error" || got["error"] == "" {
+			t.Fatalf("--timeout-ms %s: output = %q, want status=error with an error line", ms, stdout)
+		}
+	}
+	if called {
+		t.Fatal("the probe ran with a non-positive bound")
 	}
 }
 
@@ -357,13 +400,58 @@ func TestGcBeadsBdRecoverFsyncWarnThresholdFromEnv(t *testing.T) {
 		out, err := f.recover(t, false, "GC_DOLT_FSYNC_WARN_MS=3000", "FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=2500")
 		assertRecoverProceeded(t, f, out, err)
 	})
-	for _, bad := range []string{"", "abc", "0", "-5", "1.5"} {
+	t.Run("leading zeros are decimal", func(t *testing.T) {
+		// 0500 parses as octal and 0900 not at all if passed on as written.
+		for env, want := range map[string]string{"0500": "500", "0900": "900", "00020": "20"} {
+			f := newFsyncGuardFixture(t, true)
+			_, _ = f.recover(t, false, "GC_DOLT_FSYNC_WARN_MS="+env, "FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=1")
+			if !strings.Contains(f.calls(t), "--timeout-ms "+want+"\n") {
+				t.Fatalf("GC_DOLT_FSYNC_WARN_MS=%s: probe bound is not %s; calls:\n%s", env, want, f.calls(t))
+			}
+		}
+	})
+	for _, bad := range []string{"", "abc", "0", "00", "-5", "1.5"} {
 		t.Run("invalid value "+bad+" falls back to 1000", func(t *testing.T) {
 			f := newFsyncGuardFixture(t, true)
 			out, err := f.recover(t, false, "GC_DOLT_FSYNC_WARN_MS="+bad, "FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=1500")
 			assertSkippedForStall(t, f, out, err)
 			if !strings.Contains(f.calls(t), "--timeout-ms 1000") {
 				t.Fatalf("fallback bound is not 1000; calls:\n%s", f.calls(t))
+			}
+		})
+	}
+}
+
+// TestFsyncStallErrorThresholdFromEnv covers GC_DOLT_FSYNC_ERROR_MS, the
+// doctor-side threshold the helper owns next to the guard's. The recover guard
+// does not read it, so the helper is sourced and asked directly.
+func TestFsyncStallErrorThresholdFromEnv(t *testing.T) {
+	materializeBuiltinPacksForTest(t, t.TempDir())
+	target, err := bundledGcBeadsBdScriptTarget()
+	if err != nil {
+		t.Fatalf("resolving bundled gc-beads-bd.sh: %v", err)
+	}
+	helper := filepath.Join(filepath.Dir(target), "dolt-fsync-stall.sh")
+
+	cases := map[string]string{
+		"":     "5000",
+		"abc":  "5000",
+		"0":    "5000",
+		"00":   "5000",
+		"-5":   "5000",
+		"1.5":  "5000",
+		"7000": "7000",
+		"0900": "900",
+	}
+	for env, want := range cases {
+		t.Run("value "+env, func(t *testing.T) {
+			out, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv("GC_DOLT_FSYNC_ERROR_MS="+env),
+				"sh", "-c", `. "$1" && fsync_stall_error_ms`, "sh", helper)
+			if err != nil {
+				t.Fatalf("fsync_stall_error_ms: %v\n%s", err, stderr)
+			}
+			if got := strings.TrimSpace(out); got != want {
+				t.Fatalf("GC_DOLT_FSYNC_ERROR_MS=%q: got %q, want %q", env, got, want)
 			}
 		})
 	}

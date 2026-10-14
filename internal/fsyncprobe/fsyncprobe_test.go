@@ -200,6 +200,12 @@ func TestWorkerCommandIsDetached(t *testing.T) {
 	t.Cleanup(func() { _ = result.Close() })
 	cmd := workerCommand("/path/to/gc", "/data/dir", result)
 
+	// exec numbers ExtraFiles from fd 3, and the worker opens ResultFD by
+	// number: the two must be the same descriptor.
+	if ResultFD != 3 {
+		t.Fatalf("ResultFD = %d, want 3 (the first ExtraFiles slot)", ResultFD)
+	}
+
 	want := []string{"/path/to/gc", "dolt-state", "fsync-probe-worker", "--dir", "/data/dir"}
 	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("Args = %v, want %v", cmd.Args, want)
