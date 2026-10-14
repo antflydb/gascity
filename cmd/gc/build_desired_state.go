@@ -6994,18 +6994,14 @@ func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Sto
 		deferRouteRepair(bead, needsRouteRepair)
 		return
 	}
-	attempted, _ := r.budget.write(store, func() error {
-		return r.write(bead, store, current, route, needsRouteRepair, clearFallback)
-	})
-	if !attempted {
-		deferRouteRepair(bead, needsRouteRepair)
-	}
+	r.write(bead, store, current, route, needsRouteRepair, clearFallback)
 }
 
-// write is persist's store write, and the in-memory mirror of what it wrote.
-// It reports the store error it already handled, so the budget can see the
-// attempt failed.
-func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) error {
+// write is persist's store write, drawn on the build's repair write budget, and
+// the in-memory mirror of what it wrote. A write the budget refuses is deferred
+// like a failed one. The budget call lives here so the projection, which never
+// reaches write, never reaches the budget's clock either.
+func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
 	metadata := make(map[string]string, 2)
 	if needsRouteRepair {
 		metadata[beadmeta.RoutedToMetadataKey] = route
@@ -7016,15 +7012,21 @@ func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store
 		// another recovery path already repaired the route itself.
 		metadata[beadmeta.ControlDispatcherFallbackMetadataKey] = ""
 	}
-	if err := store.Update(bead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+	attempted, err := r.budget.write(store, func() error {
+		return store.Update(bead.ID, beads.UpdateOpts{Metadata: metadata})
+	})
+	if !attempted {
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	if err != nil {
 		if r.stderr != nil {
 			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s route %q -> %q: %v\n", bead.ID, current, route, err) //nolint:errcheck
 		}
 		deferRouteRepair(bead, needsRouteRepair)
-		return err
+		return
 	}
 	applyRouteRepairInMemory(bead, route, needsRouteRepair, clearFallback)
-	return nil
 }
 
 // applyRouteRepairInMemory mirrors a persisted route repair onto the in-memory
