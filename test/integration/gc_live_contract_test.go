@@ -1397,8 +1397,10 @@ func runLiveContractReadSweep(t *testing.T, baseURL string, v *apicontract.Spec,
 	}
 	for _, probe := range probes {
 		t.Run("GET "+probe.pathTemplate, func(t *testing.T) {
+			// A sweep that skips an endpoint proves nothing about it: every
+			// GET the spec declares needs a fixture that makes it answer 200.
 			if probe.skipReason != "" {
-				t.Skip(probe.skipReason)
+				t.Fatalf("no fixture for this endpoint (%s); the live contract must exercise it, not skip it", probe.skipReason)
 			}
 			liveContractRequest(t, baseURL, v, http.MethodGet, probe.path, nil, http.StatusOK)
 		})
