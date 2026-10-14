@@ -818,3 +818,77 @@ func TestDispatchAllQueuedNudgesBoundsABusyACPDelivery(t *testing.T) {
 		return err == nil && len(pending) == 0 && len(inFlight) == 0
 	}, "both nudges delivered and acked after the agent freed")
 }
+
+// acpTestTarget is a queued nudge for worker and its open ACP session bead,
+// with sp running worker-session idle long enough to deliver.
+func acpTestTarget(t *testing.T, sp runtime.Provider, fake *runtime.Fake) (string, beads.Store, *sessionBeadSnapshot) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	nudges := openNudgeBeadStore(dir)
+	if err := enqueueQueuedNudgeWithStore(dir, nudges, newQueuedNudge("worker", "a nudge", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	if err := sp.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	fake.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+	created, err := nudges.Create(beads.Bead{
+		Title: "Session: worker", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "template": "worker", "transport": "acp"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, nudges.Store, newSessionBeadSnapshot([]beads.Bead{created})
+}
+
+// panickingNudgeFake panics in Nudge, as a provider bug would.
+type panickingNudgeFake struct{ *runtime.Fake }
+
+func (f panickingNudgeFake) Nudge(string, []runtime.ContentBlock) error { panic("acp nudge bug") }
+
+// Kills a panic in the off-pass ACP delivery ending the process (#7816
+// review): safeTick no longer surrounds it, so the goroutine recovers it into
+// the pass's error and frees the target for a later delivery. The test binary
+// dying is the failure.
+func TestDispatchAllQueuedNudgesRecoversAPanickingACPDelivery(t *testing.T) {
+	sp := panickingNudgeFake{Fake: runtime.NewFake()}
+	dir, store, snapshot := acpTestTarget(t, sp, sp.Fake)
+	delivered, err := dispatchAllQueuedNudges(dir, &config.City{}, store, store, sp, snapshot, nil)
+	if delivered != 0 || err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("dispatch = (%d, %v), want none delivered and the recovered panic as its error", delivered, err)
+	}
+	if _, running := acpDeliveries.Load(dir + "\x00worker-session"); running {
+		t.Fatal("the panicked delivery still holds its target")
+	}
+}
+
+// exitingNudgeFake is an ACP agent that exits while a nudge waits for it,
+// which the ACP provider answers with nil (its best-effort contract).
+type exitingNudgeFake struct{ *runtime.Fake }
+
+func (f exitingNudgeFake) Nudge(name string, _ []runtime.ContentBlock) error {
+	return f.Stop(name)
+}
+
+// Kills a queued ACP nudge acked as delivered when its agent exits in the
+// wait (gc stop, gc session kill; #7816 review): the items reached no
+// incarnation, so they go back to pending, unclaimed, for the next one.
+func TestDispatchAllQueuedNudgesKeepsANudgeWhoseACPAgentExitedInTheWait(t *testing.T) {
+	sp := exitingNudgeFake{Fake: runtime.NewFake()}
+	dir, store, snapshot := acpTestTarget(t, sp, sp.Fake)
+	if delivered, err := dispatchAllQueuedNudges(dir, &config.City{}, store, store, sp, snapshot, nil); err != nil || delivered != 0 {
+		t.Fatalf("dispatch = (%d, %v), want none delivered", delivered, err)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue = pending %d, in flight %d, dead %d; want the nudge pending for the next incarnation", len(pending), len(inFlight), len(dead))
+	}
+}

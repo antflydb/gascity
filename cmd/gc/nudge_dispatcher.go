@@ -316,9 +316,20 @@ func deliverACPQueuedNudgesBounded(cityPath string, target nudgeTarget, deliver 
 	}
 	done := make(chan result, 1)
 	go func() {
-		defer acpDeliveries.Delete(key)
-		ok, err := deliver()
-		done <- result{ok, err}
+		// Off the pass, safeTick no longer recovers a panic here, and one
+		// would end the controller and, under a supervisor, every city. A
+		// recovered delivery's claimed items go back to pending when their
+		// lease expires (#7816 review). The target is freed before the
+		// result is sent, so a pass that reads it sees no delivery running.
+		var r result
+		defer func() {
+			if p := recover(); p != nil {
+				r = result{err: fmt.Errorf("acp delivery to %s panicked: %v", target.sessionName, p)}
+			}
+			acpDeliveries.Delete(key)
+			done <- r
+		}()
+		r.ok, r.err = deliver()
 	}()
 	select {
 	case r := <-done:
