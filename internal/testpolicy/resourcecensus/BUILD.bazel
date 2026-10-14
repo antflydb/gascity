@@ -6,6 +6,7 @@ go_library(
         "census.go",
         "hermetic.go",
         "medium.go",
+        "policy.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/testpolicy/resourcecensus",
     visibility = ["//:__subpackages__"],
