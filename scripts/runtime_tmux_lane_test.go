@@ -1,7 +1,6 @@
 package scripts_test
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,9 +20,12 @@ type laneFixtureFile struct {
 	body string // top-level declarations after the testing import
 }
 
+// writeLaneFixture writes files into a package that always has one untagged
+// non-test source file, so the package loads under any tag set.
 func writeLaneFixture(t *testing.T, files ...laneFixtureFile) string {
 	t.Helper()
 	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "fixture.go"), "package fixture\n")
 	for _, file := range files {
 		pkg := file.pkg
 		if pkg == "" {
@@ -94,6 +96,14 @@ func TestRuntimeTmuxPerFileDiscoveryOrdersFilesThenTests(t *testing.T) {
 	}
 	if all := discoverRuntimeTmuxTests(t, dir, "linux", true); !slices.Equal(flat, all) {
 		t.Fatalf("discoverRuntimeTmuxTests = %q, want the per-file view concatenated %q", all, flat)
+	}
+
+	var untaggedFlat []string
+	for _, file := range discoverRuntimeTmuxTestFiles(t, dir, canonicalRuntimeTmuxBuildContext("linux", false)) {
+		untaggedFlat = append(untaggedFlat, file.Tests...)
+	}
+	if all := discoverRuntimeTmuxTests(t, dir, "linux", false); !slices.Equal(untaggedFlat, all) {
+		t.Fatalf("untagged discoverRuntimeTmuxTests = %q, want the per-file view concatenated %q", all, untaggedFlat)
 	}
 }
 
@@ -310,8 +320,37 @@ func TestRuntimeTmuxLaneRecordMatchesTree(t *testing.T) {
 
 const runtimeTmuxLaneRecordRelativePath = "scripts/runtime-tmux-integration-files.manifest"
 
+// parseRuntimeTmuxLaneRecordText reads the lane record: one _test.go basename
+// per line in strictly ascending byte order, with blank and # lines skipped.
 func parseRuntimeTmuxLaneRecordText(content string) ([]string, error) {
-	return []string{content}, errors.New("not implemented")
+	var record []string
+	for lineNumber, rawLine := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		reason := ""
+		switch {
+		case line != rawLine || !isSafeLaneRecordName(line):
+			reason = `not a safe "_test.go" basename`
+		case len(record) > 0 && line == record[len(record)-1]:
+			reason = "duplicate"
+		case len(record) > 0 && line < record[len(record)-1]:
+			reason = "not in ascending byte order"
+		}
+		if reason != "" {
+			return nil, fmt.Errorf("invalid runtime-tmux lane record entry on line %d: %q (%s)", lineNumber+1, rawLine, reason)
+		}
+		record = append(record, line)
+	}
+	return record, nil
+}
+
+func isSafeLaneRecordName(name string) bool {
+	return len(name) > len("_test.go") &&
+		strings.HasSuffix(name, "_test.go") &&
+		filepath.Base(name) == name &&
+		!strings.ContainsAny(name, "/\\ \t")
 }
 
 func parseRuntimeTmuxLaneRecord(t *testing.T, path string) []string {
@@ -327,6 +366,58 @@ func parseRuntimeTmuxLaneRecord(t *testing.T, path string) []string {
 	return record
 }
 
+// runtimeTmuxLaneDrift compares the lane record with the test files the
+// integration and untagged builds see. Each file yields at most one failure and
+// failures are returned sorted by file name.
 func runtimeTmuxLaneDrift(integration, untagged []runtimeTmuxTestFile, record []string, recordPath string) []string {
-	return []string{fmt.Sprintf("not implemented: %d %d %d %s", len(integration), len(untagged), len(record), recordPath)}
+	integrationFiles := make(map[string]runtimeTmuxTestFile, len(integration))
+	for _, file := range integration {
+		integrationFiles[file.Name] = file
+	}
+	untaggedFiles := make(map[string]runtimeTmuxTestFile, len(untagged))
+	for _, file := range untagged {
+		untaggedFiles[file.Name] = file
+	}
+	recorded := make(map[string]struct{}, len(record))
+	for _, name := range record {
+		recorded[name] = struct{}{}
+	}
+
+	failures := make(map[string]string)
+	for _, file := range untagged {
+		if _, kept := integrationFiles[file.Name]; !kept && len(file.Tests) > 0 {
+			failures[file.Name] = fmt.Sprintf("%s is excluded when -tags integration is set; %d tests would vanish from the integration lane; the lane model needs the integration set to contain the default set", file.Name, len(file.Tests))
+		}
+	}
+	for _, file := range integration {
+		_, inDefault := untaggedFiles[file.Name]
+		_, isRecorded := recorded[file.Name]
+		if !inDefault && len(file.Tests) > 0 && !isRecorded {
+			failures[file.Name] = fmt.Sprintf("%s declares %d tests that compile only with -tags integration and is not in %s; add it in sorted position (if the file already existed, %d tests just left the default lane: confirm that is intended)", file.Name, len(file.Tests), recordPath, len(file.Tests))
+		}
+	}
+	for _, name := range record {
+		if _, done := failures[name]; done {
+			continue
+		}
+		defaultFile, inDefault := untaggedFiles[name]
+		integrationFile, inIntegration := integrationFiles[name]
+		switch {
+		case len(defaultFile.Tests) > 0 && inIntegration:
+			failures[name] = fmt.Sprintf("%s is in %s but compiles without the integration tag; %d tests move into the default lane; remove it from %s", name, recordPath, len(defaultFile.Tests), recordPath)
+		case inDefault || len(integrationFile.Tests) == 0:
+			failures[name] = fmt.Sprintf("%s is in %s but has no integration-only tests (file gone, tests gone, or excluded)", name, recordPath)
+		}
+	}
+
+	names := make([]string, 0, len(failures))
+	for name := range failures {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	drift := make([]string, 0, len(names))
+	for _, name := range names {
+		drift = append(drift, failures[name])
+	}
+	return drift
 }

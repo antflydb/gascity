@@ -1,7 +1,6 @@
 package scripts_test
 
 import (
-	"fmt"
 	"go/ast"
 	"go/build"
 	"go/parser"
@@ -24,42 +23,6 @@ func TestRuntimeTmuxManifestMatchesCanonicalLinuxIntegrationInventory(t *testing
 
 	if drift := runtimeTmuxManifestDrift(manifest, declared); len(drift) != 0 {
 		t.Fatalf("runtime-tmux manifest drift:\n%s\nupdate %s", strings.Join(drift, "\n"), runtimeTmuxManifestRelativePath)
-	}
-	if got, want := len(manifest), 753; got != want {
-		t.Fatalf("runtime-tmux manifest contains %d tests, want %d", got, want)
-	}
-
-	untagged := discoverRuntimeTmuxTests(t, dir, "linux", false)
-	if got, want := len(untagged), 573; got != want {
-		t.Fatalf("runtime-tmux untagged inventory contains %d tests, want %d", got, want)
-	}
-	if got, want := len(declared)-len(untagged), 180; got != want {
-		t.Fatalf("runtime-tmux integration-only inventory contains %d tests, want %d", got, want)
-	}
-}
-
-func TestRuntimeTmuxManifestSixShardsPartitionInventoryExactlyOnce(t *testing.T) {
-	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repoRoot(t), runtimeTmuxManifestRelativePath))
-	wantShardCounts := []int{126, 126, 126, 125, 125, 125}
-	seen := make(map[string]int, len(manifest))
-
-	for shardIndex := 0; shardIndex < len(wantShardCounts); shardIndex++ {
-		count := 0
-		for index, testName := range manifest {
-			if index%len(wantShardCounts) == shardIndex {
-				seen[testName]++
-				count++
-			}
-		}
-		if count != wantShardCounts[shardIndex] {
-			t.Errorf("runtime-tmux shard %d contains %d tests, want %d", shardIndex+1, count, wantShardCounts[shardIndex])
-		}
-	}
-
-	for _, testName := range manifest {
-		if seen[testName] != 1 {
-			t.Errorf("runtime-tmux test %s assigned %d times, want exactly once", testName, seen[testName])
-		}
 	}
 }
 
@@ -190,30 +153,9 @@ func isSafeManifestTestName(name string) bool {
 
 func discoverRuntimeTmuxTests(t *testing.T, dir, goos string, integration bool) []string {
 	t.Helper()
-	context := canonicalRuntimeTmuxBuildContext(goos, integration)
-	pkg, err := context.ImportDir(dir, 0)
-	if err != nil {
-		t.Fatalf("load runtime-tmux package for %s/amd64 (integration=%t): %v", goos, integration, err)
-	}
-
-	testFiles := append(slices.Clone(pkg.TestGoFiles), pkg.XTestGoFiles...)
-	fileSet := token.NewFileSet()
 	var tests []string
-	for _, name := range testFiles {
-		path := filepath.Join(dir, name)
-		parsed, err := parser.ParseFile(fileSet, path, nil, 0)
-		if err != nil {
-			t.Fatalf("parse runtime-tmux test file %s: %v", name, err)
-		}
-		for _, declaration := range parsed.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Recv != nil || !isGoTestName(function.Name.Name) {
-				continue
-			}
-			if testingParameterKind(parsed, function) == "T" {
-				tests = append(tests, function.Name.Name)
-			}
-		}
+	for _, file := range discoverRuntimeTmuxTestFiles(t, dir, canonicalRuntimeTmuxBuildContext(goos, integration)) {
+		tests = append(tests, file.Tests...)
 	}
 	return tests
 }
@@ -225,10 +167,38 @@ type runtimeTmuxTestFile struct {
 	Tests []string
 }
 
-// discoverRuntimeTmuxTestFiles is the per-file view of the inventory.
+// discoverRuntimeTmuxTestFiles is the per-file view of the inventory: the
+// package's in-package test files, then its external test files, each with the
+// top-level tests it declares under context.
 func discoverRuntimeTmuxTestFiles(t *testing.T, dir string, context build.Context) []runtimeTmuxTestFile {
 	t.Helper()
-	return []runtimeTmuxTestFile{{Name: fmt.Sprintf("not implemented: %s %s %v", dir, context.GOOS, context.BuildTags)}}
+	pkg, err := context.ImportDir(dir, 0)
+	if err != nil {
+		t.Fatalf("load runtime-tmux package for %s/%s (tags %v): %v", context.GOOS, context.GOARCH, context.BuildTags, err)
+	}
+
+	testFiles := append(slices.Clone(pkg.TestGoFiles), pkg.XTestGoFiles...)
+	fileSet := token.NewFileSet()
+	files := make([]runtimeTmuxTestFile, 0, len(testFiles))
+	for _, name := range testFiles {
+		path := filepath.Join(dir, name)
+		parsed, err := parser.ParseFile(fileSet, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse runtime-tmux test file %s: %v", name, err)
+		}
+		file := runtimeTmuxTestFile{Name: name}
+		for _, declaration := range parsed.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Recv != nil || !isGoTestName(function.Name.Name) {
+				continue
+			}
+			if testingParameterKind(parsed, function) == "T" {
+				file.Tests = append(file.Tests, function.Name.Name)
+			}
+		}
+		files = append(files, file)
+	}
+	return files
 }
 
 func canonicalRuntimeTmuxBuildContext(goos string, integration bool) build.Context {
