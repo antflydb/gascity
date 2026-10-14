@@ -101,8 +101,8 @@ func beadClosedAt(b beads.Bead) time.Time {
 }
 
 // sessionHasFreshInProgressClaim reports whether this session currently
-// holds ANY assigned work bead — anywhere its topology can reach, via one
-// fresh, uncached read — with status == in_progress. ga-pvjbx3 Q1: the
+// holds ANY assigned work bead — anywhere its topology can reach — with
+// status == in_progress, on a read of the legs made now. ga-pvjbx3 Q1: the
 // fresh-cycle guard's old self-claim check compared the anchor
 // (ComputeAwakeSet's assignedAnchor, which discards every candidate but one
 // — exact match to the stamped bead, else first-in-order fallback) against
@@ -110,19 +110,22 @@ func beadClosedAt(b beads.Bead) time.Time {
 // can be two different, unrelated beads. The correct check is anchor-agnostic
 // existence, not anchor equality: does this session hold ANY live
 // in_progress claim at all, regardless of which bead the anchor separately
-// resolved to. Delegates to the existing progress-stall-recycle existence
-// check, which already sweeps the unrestricted store+rig topology
-// (assignedWorkSweepPlan, not the agent-scoped
-// assignedWorkPlanForSessionInfo) and already excludes mail and session
-// beads. It does not exclude a blocked bead, which workBeadHasAwakeDemand
-// does, so this population is a superset of awake demand: an extra claim can
-// only retain the session, never kill it.
+// resolved to. It asks the progress-stall-recycle existence check, which
+// sweeps the unrestricted store+rig topology and already excludes mail and
+// session beads. It does not exclude a blocked bead, which
+// workBeadHasAwakeDemand does, so this population is a superset of awake
+// demand: an extra claim can only retain the session, never kill it.
+//
+// The question gates a kill, so it is asked of sw.fresh, never of the tick's
+// own read: that read re-checks a cached hit live but never re-lists a miss,
+// and drops a row it read as open before the live re-check, so a claim made
+// (or an open bead claimed) after the tick read the legs is invisible to it.
 //
 // An error means the scan could not read a store, never "no claim" — the
 // existence probe fails closed on a leg that went dark — and the caller must
 // retain the session rather than read it as an absent claim.
 func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, error) {
-	return sessionHasInProgressAssignedWorkForConfig(sw, info)
+	return sessionHasInProgressAssignedWorkForConfig(sw.fresh(releaseScope(info, sw.Legs().cfg)), info)
 }
 
 // freshAnchorBeadTerminal fetches the fresh-cycle guard's anchor bead
