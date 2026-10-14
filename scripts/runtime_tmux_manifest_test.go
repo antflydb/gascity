@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/parser"
@@ -215,6 +216,19 @@ func discoverRuntimeTmuxTests(t *testing.T, dir, goos string, integration bool) 
 		}
 	}
 	return tests
+}
+
+// runtimeTmuxTestFile is one test file of the package and its ordered
+// top-level test names; Tests is empty for a file that declares none.
+type runtimeTmuxTestFile struct {
+	Name  string
+	Tests []string
+}
+
+// discoverRuntimeTmuxTestFiles is the per-file view of the inventory.
+func discoverRuntimeTmuxTestFiles(t *testing.T, dir string, context build.Context) []runtimeTmuxTestFile {
+	t.Helper()
+	return []runtimeTmuxTestFile{{Name: fmt.Sprintf("not implemented: %s %s %v", dir, context.GOOS, context.BuildTags)}}
 }
 
 func canonicalRuntimeTmuxBuildContext(goos string, integration bool) build.Context {
