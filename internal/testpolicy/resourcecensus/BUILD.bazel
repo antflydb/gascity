@@ -19,6 +19,7 @@ go_test(
     name = "resourcecensus_test",
     srcs = [
         "census_test.go",
+        "counts_test.go",
         "hermetic_test.go",
         "medium_test.go",
         "testenv_import_test.go",
