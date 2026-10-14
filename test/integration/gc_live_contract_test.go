@@ -947,19 +947,19 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *a
 func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, rigName, rootBeadID, runID string) {
 	t.Helper()
 	scopedName := "real-world-app-contract-" + runID + ":rig:" + rigName
-	orderRun := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
-		"description": "Order history fixture created by TestGCLiveContract_BeadsAndEvents",
+	// The generic bead API never makes an order run record: only order dispatch
+	// does. A POST naming one is refused at its label, and nothing is written.
+	refused := liveContractRequest(t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "Forged order run refused by the generic bead API",
 		"labels":      []string{"order-run:" + scopedName, "real-world-app-contract"},
-		"metadata": map[string]string{
-			"convergence.gate_stdout": "hello from live contract",
-		},
-		"rig":   rigName,
-		"title": "real-world app contract order history " + runID,
-		"type":  "task",
-	}, http.StatusCreated)
-	defer liveContractJSON[struct {
-		Status string `json:"status"`
-	}](t, baseURL, v, http.MethodDelete, cityBase+"/bead/"+url.PathEscape(orderRun.ID), nil, http.StatusOK)
+		"rig":         rigName,
+		"title":       "real-world app contract forged order run " + runID,
+		"type":        "task",
+	}, http.StatusUnprocessableEntity)
+	if !strings.Contains(string(refused), "body.labels[0]") {
+		t.Fatalf("forged order run refusal = %s, want it located at body.labels[0]", string(refused))
+	}
+	orderRun := beads.Bead{}
 
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders", nil, http.StatusOK)
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/check", nil, http.StatusOK)
