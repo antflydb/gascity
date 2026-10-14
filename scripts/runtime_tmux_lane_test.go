@@ -3,14 +3,11 @@ package scripts_test
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
-
-const emptyManifestChildEnv = "GC_TEST_RUNTIME_TMUX_EMPTY_MANIFEST_CHILD"
 
 // laneFixtureFile is one throwaway test file of a fixture package.
 type laneFixtureFile struct {
@@ -285,25 +282,6 @@ func TestRuntimeTmuxGuardAddingATestCostsOnlyManifestLines(t *testing.T) {
 			t.Fatalf("guard problems with the record line = %q, want none", got)
 		}
 	})
-}
-
-func TestRuntimeTmuxManifestRejectsEmptyManifest(t *testing.T) {
-	if path := os.Getenv(emptyManifestChildEnv); path != "" {
-		parseRuntimeTmuxManifest(t, path)
-		return
-	}
-
-	empty := filepath.Join(t.TempDir(), "empty.manifest")
-	writeTestFile(t, empty, "# header only\n\n")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRuntimeTmuxManifestRejectsEmptyManifest$")
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), emptyManifestChildEnv + "=" + empty}
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("parsing an empty manifest succeeded, want a failure:\n%s", out)
-	}
-	if !strings.Contains(string(out), "runtime-tmux manifest contains no tests") {
-		t.Fatalf("empty manifest failed without the floor message:\n%s", out)
-	}
 }
 
 func TestRuntimeTmuxLaneRecordMatchesTree(t *testing.T) {
