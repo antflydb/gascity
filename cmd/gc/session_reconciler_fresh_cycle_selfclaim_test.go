@@ -15,6 +15,7 @@ package main
 // (ga-2weagw), which covers the previous-bead deferral rows.
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -215,5 +216,87 @@ func TestFreshCycleRepro_OpenPreviousBeadNotOwnedBySessionCycles(t *testing.T) {
 
 			assertCycled(t, env, session, "ga-prev is open but not assigned to this session, so its eventual close is unrelated to this session's work (row A)")
 		})
+	}
+}
+
+// reconcileFreshCycleReproWithSeatWork is reconcileFreshCycleRepro over the
+// SeatWork the caller minted, so a test can read the tick's work first and
+// move the store on afterwards, the way a claim lands mid-tick.
+func reconcileFreshCycleReproWithSeatWork(env *restartRequestTestEnv, sw *SeatWork, sessions, assignedWork []beads.Bead, rigStores map[string]beads.Store) {
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
+	_ = reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), env.city, snap.OpenForReconcile(), snap, env.desiredState, configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+		sw, nil, assignedWork, rigStores, nil, env.dt, nil, poolDesired, nil, nil, false, nil, "", nil,
+		env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+}
+
+// The Q1 claim scan must read the store now, not the tick's read of it. The
+// tick reads every leg once (SeatWork.load); a hit on that read is re-checked
+// live, but a miss is never re-listed, and a row read as open is dropped from
+// an in_progress question before the live re-check. So a claim made after the
+// tick's read, or an assigned bead that went open to in_progress after it, is
+// invisible to a scan over the tick's read, and the guard kills a session that
+// holds that claim. Both shapes run on a single store (the claim lives in the
+// city store) and on split stores (it lives in the rig store).
+func TestFreshCycleRepro_ClaimAfterTickReadRetainsSession(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		for _, laterClaim := range []string{"new claim", "open then in_progress"} {
+			name := "single store"
+			if split {
+				name = "split stores"
+			}
+			t.Run(name+"/"+laterClaim, func(t *testing.T) {
+				env, session, sessionName := freshCycleReproEnv(t, map[string]string{
+					"awake_started_at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+				})
+				work := env.store
+				var rigs map[string]beads.Store
+				if split {
+					rig := reproMemStore()
+					work, rigs = rig, map[string]beads.Store{"gascity": rig}
+				} else {
+					env.store.(*beads.MemStore).HonorExplicitIDs = true
+				}
+				reproCreate(t, work, beads.Bead{ID: "ga-prev", Title: "previous step", Type: "task", Status: "in_progress", Assignee: "witness"})
+				reproCloseForReal(t, work, "ga-prev")
+				env.setSessionMetadata(&session, map[string]string{sessionpkg.CurrentBeadIDKey: "ga-prev"})
+				// The anchor lives only in the assigned-work snapshot, as in the
+				// Q3 tests: the guard cycles only onto an in_progress anchor.
+				anchor := beads.Bead{ID: "ga-anchor", Title: "routed next bead", Type: "task", Status: "in_progress", Assignee: "witness"}
+				if laterClaim == "open then in_progress" {
+					reproCreate(t, work, beads.Bead{ID: "ga-claimed", Title: "assigned, claimed later", Type: "task", Status: "open", Assignee: "witness"})
+				}
+
+				sw := testSeatWork(env.city, env.cfg, env.store, rigs)
+				sw.once.Do(sw.load) // the tick's one read of the legs
+				if laterClaim == "new claim" {
+					reproCreate(t, work, beads.Bead{ID: "ga-claimed", Title: "claimed after the tick's read", Type: "task", Status: "in_progress", Assignee: "witness"})
+				} else {
+					inProgress := "in_progress"
+					if err := work.Update("ga-claimed", beads.UpdateOpts{Status: &inProgress}); err != nil {
+						t.Fatalf("claiming ga-claimed: %v", err)
+					}
+				}
+				for _, leg := range sw.read {
+					for _, b := range leg.byAssignee["witness"] {
+						if b.ID == "ga-claimed" && b.Status == "in_progress" {
+							t.Fatalf("the tick's read already holds the claim; the fixture does not stage a stale read")
+						}
+					}
+				}
+
+				reconcileFreshCycleReproWithSeatWork(env, sw, []beads.Bead{session}, []beads.Bead{anchor}, rigs)
+
+				assertNotCycled(t, env, session, sessionName, "ga-claimed was claimed after the tick read the legs; the claim scan must read the store now")
+			})
+		}
 	}
 }
