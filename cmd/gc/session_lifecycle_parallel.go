@@ -717,13 +717,8 @@ type asyncPreparedStart struct {
 	// release gives back the start's async slot. It does no store I/O, so the
 	// start goroutine can run it whatever state the store is in.
 	release func()
-	// dropLease releases the runtime lease the start holds, nil when it holds
-	// none. Releasing a lease that carries a row record reads and writes the
-	// store, so it is kept apart from release and run through
-	// commitAsyncStartBounded.
-	dropLease func()
-	done      func()
-	tracker   *asyncStartTracker // counts the start's goroutine; nil counts nothing
+	done    func()
+	tracker *asyncStartTracker // counts the start's goroutine; nil counts nothing
 }
 
 type stopTarget struct {
@@ -2143,7 +2138,6 @@ func enqueuePreparedStartWaveForCity(
 	for i, reserved := range prepared {
 		item := clonePreparedStartForAsync(reserved.item)
 		release := reserved.release
-		dropLease := reserved.dropLease
 		now := time.Now()
 		results[i] = startResult{
 			prepared: item,
@@ -2163,36 +2157,31 @@ func enqueuePreparedStartWaveForCity(
 				}
 			}
 			defer releaseStart()
-			// The lease is dropped before the slot is given back, as one release
-			// did, until the commit takes it over.
-			var leaseOnce sync.Once
-			dropStartLease := func() {
-				if dropLease != nil {
-					leaseOnce.Do(dropLease)
-				}
-			}
+			// The start holds the item's runtime lease (nil when it holds none)
+			// until the commit phase takes it over; a panic before then
+			// abandons it, a flock-only drop that makes no store call.
+			lease := item.candidate.lease
 			leaseHandedOff := false
 			defer func() {
 				if !leaseHandedOff {
-					dropStartLease()
+					lease.Abandon()
 				}
 			}()
 			watched, unwatch := watchStartLease(ctx, item)
 			result := runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
-			unwatch()
 			// Resolve before the commit so a stale, refused, or panicking
 			// commit cannot lose the endpoint verdict.
 			result = resolveStartCapacity(result, rec, stderr)
 			// Bounded: a commit that wedges on the store or the runtime must not
 			// hold the slot (SESSION-RUNTIME-017). Resolving the endpoint
-			// verdict above stays outside the bound. The commit wrapper drops
-			// the lease: before it returns when the commit finished, and never
-			// on this goroutine when the commit was abandoned.
+			// verdict above stays outside the bound. The lease and the watch
+			// move to the commit: it releases the lease when it returns, and
+			// the wait abandons it only if the commit never claimed it.
 			leaseHandedOff = true
-			commitAsyncStartBounded(ctx, cityPath, result, sp, store, clk, rec, wave, stdout, stderr, trace, dropStartLease)
-			// The commit is done or abandoned: the lease is dropped or on its way
-			// out, so give the slot back before the follow-up and the pass it
-			// wakes finds the name free.
+			commitAsyncStartBounded(ctx, cityPath, result, sp, store, clk, rec, wave, stdout, stderr, trace, lease, unwatch)
+			// The commit is done or abandoned: the lease is released, or its
+			// flock abandoned, or held by the commit that is still running, so
+			// give the slot back before the follow-up.
 			releaseStart()
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -4643,7 +4632,6 @@ func executePlannedStartsTraced(
 				}
 				var release func()
 				var slotRelease func()
-				var leaseDrop func()
 				var done func()
 				if startOpts.async {
 					var tracking bool
@@ -4683,7 +4671,6 @@ func executePlannedStartsTraced(
 					}
 					candidate.lease, leased = lease, true
 					leases = append(leases, dropLease)
-					leaseDrop = dropLease
 					if slot := release; slot != nil {
 						release = func() { dropLease(); slot() }
 					} else {
@@ -4804,7 +4791,7 @@ func executePlannedStartsTraced(
 					probed[endpoint] = true
 				}
 				if startOpts.async {
-					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: slotRelease, dropLease: leaseDrop, done: done, tracker: startOpts.asyncTracker})
+					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: slotRelease, done: done, tracker: startOpts.asyncTracker})
 				} else {
 					prepared = append(prepared, *item)
 				}
