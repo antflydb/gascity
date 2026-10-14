@@ -15,8 +15,8 @@ import (
 
 // integrationPackagesShards: //test:integration_packages' test targets and
 // each one's shard_count (1 when unsharded), i.e. the integration-packages
-// lane's test actions, one per target shard. aquery-verified (77 TestRunner
-// actions) at 3834a030b8; recompute with
+// lane's test actions, one per target shard. aquery-verified (78 TestRunner
+// actions) at 02f4e11509; recompute with
 //
 //	T=$(bazel query 'tests(//test:integration_packages)' | paste -sd+ | sed 's/+/ + /g')
 //	bazel aquery --define=gotags=integration "mnemonic(\"TestRunner\", $T)" --output=text |
@@ -49,6 +49,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/storebinding/beadsworkspace:beadsworkspace_test": 1,
 	"//test/containerhost:containerhost_test":                    1,
 	"//test/dashport:dashport_test":                              1,
+	"//test/dolttest:dolttest_test":                              1,
 	"//cmd/gc:gc_bd_runtime_custom_types_heal_test":              1,
 	"//cmd/gc:gc_managed_beads_native_cli_test":                  1,
 	"//cmd/gc:gc_managed_bd_rig_hard_kill_test":                  1,
