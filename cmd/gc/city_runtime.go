@@ -4092,6 +4092,10 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
+	// This tick reconciles between main ticks, so it observes the host-resume
+	// detector itself: a resume it is the first pass to follow must floor its
+	// own activity reads.
+	cr.observeResume()
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
 	}
@@ -4208,6 +4212,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withActivityFloor(cr.activityFloor()),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

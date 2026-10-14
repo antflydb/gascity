@@ -89,6 +89,9 @@ func (l *externalReadsLane) nudges(ctx context.Context, env externalReadsEnv) {
 	if ctx.Err() != nil {
 		return
 	}
+	// The zero floor is deliberate: the external-reads lane does not yet carry the
+	// controller's host-resume floor, so this quiet check measures raw stamps
+	// until the lane is plumbed (tracked by ga-wo27vyc).
 	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, activityFloor{}, l.events, l.requestExecutionStalled(env), l.stderr)
 }
 
