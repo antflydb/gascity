@@ -103,9 +103,10 @@ func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake tmux args: %v", err)
 	}
-	// The environment, then the marker's user-option mirror (C7a-2b).
+	// The environment, then the marker's user-option mirror (C7a-2b), whose
+	// set-option -t is a target-pane: only "=worker:" names the session exactly.
 	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n" +
-		"-u\n-L\n" + socket + "\nset-option\n-t\n=worker\n-u\n@GC_RESTART_REQUESTED\n"
+		"-u\n-L\n" + socket + "\nset-option\n-t\n=worker:\n-u\n@GC_RESTART_REQUESTED\n"
 	if string(got) != want {
 		t.Fatalf("tmux args = %q, want %q", got, want)
 	}

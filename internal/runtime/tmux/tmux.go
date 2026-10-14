@@ -1533,11 +1533,18 @@ type inventoryFirstPane struct {
 func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error) {
 	entries := make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
-	for _, line := range strings.Split(out, "\n") {
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
 		if line == "" {
 			continue
 		}
 		fields := strings.Split(line, "\t")
+		// The executor trims its output, which takes the last line's trailing
+		// field with it when the restart marker is unset: on that line only,
+		// eight fields are the nine with an empty marker.
+		if len(fields) == 8 && i == len(lines)-1 {
+			fields = append(fields, "")
+		}
 		if len(fields) != 9 || fields[0] == "" {
 			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
 		}

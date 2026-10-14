@@ -150,6 +150,16 @@ func TestTmuxRuntimeInventory_MalformedLineIsError(t *testing.T) {
 			t.Errorf("RuntimeInventory with line %q = %#v, want an error", bad, got)
 		}
 	}
+	// Only the last line can lose its blank marker to the executor's trim; a
+	// line one field short before it is malformed.
+	short := "s\t$1\t1700000001\t0\t0.1\t0\t101\t1700000100"
+	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
+		short,
+		"s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100\t",
+	)})
+	if err == nil {
+		t.Errorf("RuntimeInventory with line %q before the last = %#v, want an error", short, got)
+	}
 }
 
 // Kills: a declaration lost behind the seam-backed provider. The tmux
@@ -531,6 +541,22 @@ func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}") {
 		t.Fatalf("format %q does not read the marker's option", runtimeInventoryFormat)
 	}
+
+	// The real executor trims its output, so a blank marker on the last line
+	// arrives without its trailing field: that line is still read, unset.
+	got, err = runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
+		"asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1700000050",
+		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100",
+	)})
+	if err != nil {
+		t.Fatalf("RuntimeInventory with the trimmed last line: %v", err)
+	}
+	if !got["asked"].RestartRequested || got["quiet"].RestartRequested {
+		t.Fatalf("trimmed: RestartRequested asked=%t quiet=%t, want only asked", got["asked"].RestartRequested, got["quiet"].RestartRequested)
+	}
+	if got["quiet"].Incarnation != "$2:1700000002:201" || !got["quiet"].ActivityKnown {
+		t.Fatalf("trimmed: quiet = %#v, want its incarnation and activity read", got["quiet"])
+	}
 }
 
 // Kills a restart marker the batched read cannot see (C7a-2b): SetMeta and
@@ -555,7 +581,9 @@ func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 			options = append(options, strings.Join(call, " "))
 		}
 	}
-	if len(options) != 2 || !strings.Contains(options[0], "@GC_RESTART_REQUESTED 1700000050") || !strings.Contains(options[1], "-u @GC_RESTART_REQUESTED") {
-		t.Fatalf("option writes %q, want the marker set then unset, and nothing else", options)
+	// set-option's -t is a target-pane: only "=s:" names session s exactly
+	// (tmux 3.7 refuses "=s" as "no such session"; 3.4 prefix-matches it).
+	if len(options) != 2 || !strings.Contains(options[0], "set-option -t =s: @GC_RESTART_REQUESTED 1700000050") || !strings.Contains(options[1], "set-option -t =s: -u @GC_RESTART_REQUESTED") {
+		t.Fatalf("option writes %q, want the marker set then unset on exact target =s:, and nothing else", options)
 	}
 }

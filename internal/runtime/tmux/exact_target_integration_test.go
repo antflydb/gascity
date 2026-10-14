@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"syscall"
@@ -88,5 +89,39 @@ func TestExactTargetsNeverReachPrefixMatchedSessionRealTmux(t *testing.T) {
 	}
 	if val, err := p.GetMeta(live, "GC_EXACT_PROBE"); err != nil || val != "" {
 		t.Errorf("GetMeta(%s, marked removed) = (%q, %v), want (\"\", nil)", live, val, err)
+	}
+
+	// The restart marker is mirrored to the session user option the batched
+	// inventory reads. With no marker set the option renders empty as the
+	// last field, which the executor's trim strips from the last line.
+	inventory, err := p.RuntimeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeInventory with no restart marker set: %v", err)
+	}
+	if entry, ok := inventory[live]; !ok || entry.RestartRequested {
+		t.Errorf("RuntimeInventory()[%s] = (%#v, %t), want a present entry with no restart marker", live, entry, ok)
+	}
+	// The marker write is a set-option, whose -t is a target-pane: tmux 3.7
+	// refuses "=name" there as "no such session", so on a live session the
+	// write must use the exact pane form and succeed.
+	if err := p.SetMeta(live, "GC_RESTART_REQUESTED", "1700000050"); err != nil {
+		t.Fatalf("SetMeta(%s, GC_RESTART_REQUESTED) = %v, want nil", live, err)
+	}
+	inventory, err = p.RuntimeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeInventory after setting the restart marker: %v", err)
+	}
+	if !inventory[live].RestartRequested {
+		t.Errorf("RuntimeInventory()[%s].RestartRequested = false after SetMeta, want true", live)
+	}
+	if err := p.RemoveMeta(live, "GC_RESTART_REQUESTED"); err != nil {
+		t.Fatalf("RemoveMeta(%s, GC_RESTART_REQUESTED) = %v, want nil", live, err)
+	}
+	inventory, err = p.RuntimeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeInventory after clearing the restart marker: %v", err)
+	}
+	if inventory[live].RestartRequested {
+		t.Errorf("RuntimeInventory()[%s].RestartRequested = true after RemoveMeta, want false", live)
 	}
 }

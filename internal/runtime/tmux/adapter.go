@@ -813,7 +813,9 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 // restartRequestedOption is GC_RESTART_REQUESTED's mirror as a session user
 // option, which the batched inventory reads in its one list-panes
 // (#{@GC_RESTART_REQUESTED}, CONTRACT v5.10q C7a-2b). The environment stays
-// the copy GetMeta reads.
+// the copy GetMeta reads. set-option's -t is a target-pane, so the mirror is
+// written through paneTarget: only "=name:" names the session exactly there
+// ("=name" is refused as "no such session").
 const restartRequestedOption = "@GC_RESTART_REQUESTED"
 
 // SetMeta stores a key-value pair in the named session's tmux environment,
@@ -822,7 +824,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	if err := p.tm.SetEnvironment(name, key, value); err != nil || key != "GC_RESTART_REQUESTED" {
 		return err
 	}
-	_, err := p.tm.run("set-option", "-t", sessionTarget(name), restartRequestedOption, value)
+	_, err := p.tm.run("set-option", "-t", paneTarget(name), restartRequestedOption, value)
 	return err
 }
 
@@ -1028,7 +1030,7 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	if err := p.tm.RemoveEnvironment(name, key); err != nil || key != "GC_RESTART_REQUESTED" {
 		return err
 	}
-	_, err := p.tm.run("set-option", "-t", sessionTarget(name), "-u", restartRequestedOption)
+	_, err := p.tm.run("set-option", "-t", paneTarget(name), "-u", restartRequestedOption)
 	return err
 }
 
