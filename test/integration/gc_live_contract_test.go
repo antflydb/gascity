@@ -274,7 +274,7 @@ description = "Read and complete {{issue}}."
 		"vars":       map[string]string{"issue": rootBead.ID},
 	}, http.StatusOK)
 	exerciseLiveContractFormulasAndWorkflows(t, baseURL, validator, cityBase, formulaName, targetAgent, rigName, rootBead.ID, runID)
-	exerciseLiveContractOrders(t, baseURL, validator, cityBase, rigName, rootBead.ID, runID)
+	exerciseLiveContractOrders(t, baseURL, validator, bin, env, cityDir, cityBase, rigName, rootBead.ID, runID)
 
 	lifecycleBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Lifecycle fixture created by TestGCLiveContract_BeadsAndEvents",
@@ -434,7 +434,7 @@ description = "Read and complete {{issue}}."
 		Rig      string `json:"rig"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/mail", map[string]string{
 		"rig":     rigName,
-		"from":    "real-world-app-contract",
+		"from":    "human",
 		"to":      sessionID,
 		"subject": "real-world app contract mail " + runID,
 		"body":    "Exercise the typed mail API contract.",
@@ -944,7 +944,7 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *a
 	}](t, baseURL, v, http.MethodDelete, cityBase+"/convoy/"+url.PathEscape(convoy.ID), nil, http.StatusOK)
 }
 
-func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, rigName, rootBeadID, runID string) {
+func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spec, bin string, env []string, cityDir, cityBase, rigName, rootBeadID, runID string) {
 	t.Helper()
 	scopedName := "real-world-app-contract-" + runID + ":rig:" + rigName
 	// The generic bead API never makes an order run record: only order dispatch
@@ -959,7 +959,23 @@ func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spe
 	if !strings.Contains(string(refused), "body.labels[0]") {
 		t.Fatalf("forged order run refusal = %s, want it located at body.labels[0]", string(refused))
 	}
-	orderRun := beads.Bead{}
+
+	// The run record is a store-level write, the way an operator seeds one with
+	// bd: the order tracking bead dispatch would have left, carrying the output
+	// the history detail serves.
+	created, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "--rig", rigName, "create", "--silent",
+		"--title", "order:"+scopedName,
+		"--labels", "order-run:"+scopedName+",order-tracking,real-world-app-contract",
+		"--metadata", `{"convergence.gate_stdout":"hello from live contract"}`)
+	if err != nil {
+		t.Fatalf("seed order run record: %v\n%s", err, created)
+	}
+	orderRunID := strings.TrimSpace(created)
+	defer func() {
+		if out, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "--rig", rigName, "delete", "--force", orderRunID); err != nil {
+			t.Errorf("delete order run record %s: %v\n%s", orderRunID, err, out)
+		}
+	}()
 
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders", nil, http.StatusOK)
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/check", nil, http.StatusOK)
@@ -971,8 +987,8 @@ func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spe
 			HasOutput bool   `json:"has_output"`
 		} `json:"entries"`
 	}](t, baseURL, v, http.MethodGet, cityBase+"/orders/history?scoped_name="+url.QueryEscape(scopedName)+"&limit=20", nil, http.StatusOK)
-	if len(history.Entries) == 0 || history.Entries[0].BeadID != orderRun.ID {
-		t.Fatalf("order history = %+v, want entry for %q", history, orderRun.ID)
+	if len(history.Entries) == 0 || history.Entries[0].BeadID != orderRunID {
+		t.Fatalf("order history = %+v, want entry for %q", history, orderRunID)
 	}
 	detailPath := cityBase + "/order/history/" + url.PathEscape(history.Entries[0].BeadID)
 	if history.Entries[0].StoreRef != "" {
@@ -982,8 +998,8 @@ func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spe
 		BeadID string `json:"bead_id"`
 		Output string `json:"output"`
 	}](t, baseURL, v, http.MethodGet, detailPath, nil, http.StatusOK)
-	if detail.BeadID != orderRun.ID || !strings.Contains(detail.Output, "hello from live contract") {
-		t.Fatalf("order history detail = %+v, want output for %q", detail, orderRun.ID)
+	if detail.BeadID != orderRunID || !strings.Contains(detail.Output, "hello from live contract") {
+		t.Fatalf("order history detail = %+v, want output for %q", detail, orderRunID)
 	}
 }
 
