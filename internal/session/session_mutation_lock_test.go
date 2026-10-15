@@ -116,7 +116,12 @@ func TestWithSessionMutationLockContextBusyAtDeadline(t *testing.T) {
 		if refs, _ := sessionMutationLockRefs(id); refs != 2 {
 			t.Fatalf("refs while the acquirer waits = %d, want 2 (holder + waiter)", refs)
 		}
-		err := <-result
+		var err error
+		select {
+		case err = <-result:
+		case <-time.After(2 * lockWait):
+			t.Fatal("acquire still waiting after twice the wait; ctx does not bound it")
+		}
 		if !errors.Is(err, ErrSessionMutationBusy) || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("error = %v, want ErrSessionMutationBusy wrapping context.DeadlineExceeded", err)
 		}
