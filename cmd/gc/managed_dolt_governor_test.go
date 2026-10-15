@@ -230,6 +230,8 @@ func TestManagedDoltGovernorHoldSurvivesLivePort(t *testing.T) {
 	recoverManagedBDCommand = func(string) error { calls++; return nil }
 	t.Cleanup(func() { recoverManagedBDCommand = prev })
 
+	// Only the hold may refuse the recover: forget the ladder's cooldown stamp.
+	lastBeadsProviderRecover.Delete(normalizePathForCompare(cityPath))
 	clock.Advance(10 * time.Second)
 	if err := governedManagedRecover(cityPath); err != nil || calls != 0 {
 		t.Fatalf("recover inside the hold: err=%v calls=%d, want nil and 0 stub calls", err, calls)
@@ -240,7 +242,7 @@ func TestManagedDoltGovernorHoldSurvivesLivePort(t *testing.T) {
 	}
 }
 
-// 4. A cancelled waiter returns promptly while the flight completes, and a
+// 4. A canceled waiter returns promptly while the flight completes, and a
 // flight ended by its own context sets no hold.
 func TestManagedDoltGovernorWaiterCancelLeavesFlightRunning(t *testing.T) {
 	gate := filepath.Join(t.TempDir(), "recover-gate")
@@ -258,10 +260,10 @@ func TestManagedDoltGovernorWaiterCancelLeavesFlightRunning(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancelled waiter error = %v, want context.Canceled", err)
+			t.Fatalf("canceled waiter error = %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("cancelled waiter did not return while the flight was still running")
+		t.Fatal("canceled waiter did not return while the flight was still running")
 	}
 	openGate(t, gate)
 	waitForGovernorOp(t, opsFile, "recover-done")
@@ -272,7 +274,7 @@ func TestManagedDoltGovernorShutdownEndedFlightSetsNoHold(t *testing.T) {
 	stubGovernorClock(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	unregister := registerControllerCity(cityPath, ctx)
+	unregister := registerControllerCity(ctx, cityPath)
 	t.Cleanup(unregister)
 	cancel() // controller shutdown: the flight's own context is already done
 	flight := startGovernedManagedDoltFlight(ctx, cityPath, func(context.Context) error {
@@ -316,14 +318,14 @@ func TestManagedDoltGovernorDedupesAndJoinsRetryPathRecover(t *testing.T) {
 	origRunner, origRecover := beadsExecCommandRunnerWithEnv, recoverManagedBDCommand
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv, recoverManagedBDCommand = origRunner, origRecover })
 
+	var attemptsMu sync.Mutex
+	attempts := map[string]int{}
 	beadsExecCommandRunnerWithEnv = func(map[string]string) beads.CommandRunner {
-		var mu sync.Mutex
-		attempt := 0
 		return func(dir, _ string, _ ...string) ([]byte, error) {
-			mu.Lock()
-			attempt++
-			n := attempt
-			mu.Unlock()
+			attemptsMu.Lock()
+			attempts[dir]++
+			n := attempts[dir]
+			attemptsMu.Unlock()
 			events.add(fmt.Sprintf("run %s #%d", filepath.Base(dir), n))
 			if n == 1 {
 				started <- struct{}{}
@@ -499,7 +501,7 @@ func TestManagedDoltGovernorControllerWaitWindow(t *testing.T) {
 
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
-	unregister := registerControllerCity(cityPath, runCtx)
+	unregister := registerControllerCity(runCtx, cityPath)
 	defer unregister()
 
 	// First caller starts the flight and waits out the window.
@@ -556,7 +558,7 @@ func TestManagedDoltGovernorWindowExpiryIsNotContextError(t *testing.T) {
 
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
-	t.Cleanup(registerControllerCity(cityPath, runCtx))
+	t.Cleanup(registerControllerCity(runCtx, cityPath))
 
 	// A flight that started long ago and is still running.
 	flight := startGovernedManagedDoltFlight(runCtx, cityPath, func(context.Context) error {
