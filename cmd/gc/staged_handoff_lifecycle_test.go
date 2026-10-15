@@ -210,9 +210,9 @@ func TestNonRestartingHandoffModesRemainOrdinaryMail(t *testing.T) {
 		},
 		{
 			name: "remote target",
-			run: func(_ *testing.T, store beads.Store, stdout, stderr *bytes.Buffer) int {
-				return doHandoffRemote(store, store, events.Discard, runtime.NewFake(), "remote", "remote", "worker",
-					[]string{"context cycle"}, stdout, stderr)
+			run: func(t *testing.T, store beads.Store, stdout, stderr *bytes.Buffer) int {
+				return doHandoffRemoteWithForce(t.TempDir(), store, store, events.Discard, runtime.NewFake(), "remote", "remote", "worker",
+					[]string{"context cycle"}, false, stdout, stderr)
 			},
 		},
 		{
@@ -423,7 +423,7 @@ func assertHandoffProvisionalRecord(t *testing.T, message beads.Bead, instanceTo
 // handoff on it yet.
 func newHandoffReconcileSession(t *testing.T, instanceToken string) (*reconcilerTestEnv, beads.Bead) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "worker", StartCommand: "test-cmd"}},
