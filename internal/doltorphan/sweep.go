@@ -30,7 +30,8 @@ const DefaultMinAge = 60 * time.Minute
 
 // maxMarkerDepth bounds how deep the Dolt store search descends below a
 // candidate directory: a store root may sit at most two levels below the
-// top-level child (top/a/b), so its .dolt/noms is the third level down.
+// top-level child (top/a/b), so its .dolt is the third level down and its
+// .dolt/noms the fourth.
 const maxMarkerDepth = 3
 
 // sentinelFileName, when present directly inside a top-level candidate
@@ -99,12 +100,12 @@ type candidate struct {
 // containers: mtime older than MinAge, a Dolt store within maxMarkerDepth
 // levels, and not currently held open by any live process per lsof (checked
 // against the top-level child, since that's as deep as lsofHeldChildren can
-// see). Candidate selection intentionally does not
-// filter on directory name — the signals above are what establish
-// abandonment, not any particular naming convention, so this catches leaks
-// "regardless of creation source" (ga-ntbpyb.2 acceptance criterion 2)
-// including directories named by Go's t.TempDir() rather than the
-// bare-mktemp "tmp.*" pattern the heuristic was first observed against.
+// see). Candidate selection intentionally does not filter on directory name —
+// the signals above are what establish abandonment, not any particular naming
+// convention, so this catches leaks "regardless of creation source"
+// (ga-ntbpyb.2 acceptance criterion 2) including directories named by Go's
+// t.TempDir() rather than the bare-mktemp "tmp.*" pattern the heuristic was
+// first observed against.
 //
 // A top-level child containing sentinelFileName or noReapMarkerName (any file
 // type, like the reaper's own -e test) is exempted entirely, regardless of
@@ -203,19 +204,26 @@ func hasSentinel(dir string) bool {
 
 // findDoltStoreDir searches within depth levels of dir (dir's direct children
 // are depth 1) for a Dolt store and, if found, returns its root: the directory
-// whose .dolt/noms is a directory. A .dolt without noms (a sql-server's
-// bookkeeping, Dolt's global config) is not a store, and .dolt is never
-// descended into. This root is the removal target: deleting only it, rather
-// than the top-level candidate dir, keeps a container's unrelated siblings
-// intact when it holds other payload alongside an abandoned Dolt copy nested
-// deeper within it.
+// whose .dolt/noms is a directory. That is the test Dolt itself applies to
+// decide a directory holds a database. A .dolt without noms (the bookkeeping a
+// dolt sql-server --data-dir leaves, Dolt's global config, an empty or
+// incomplete .dolt) is not a store marker, so its directory is never a removal
+// target on that account. A probe error also counts as "not a store", because
+// the sweep errs toward keeping what it cannot verify. .dolt is a probe
+// target and is never descended into.
+//
+// The returned root is the removal target: deleting only it, rather than the
+// top-level candidate dir, keeps a container's unrelated siblings intact when
+// it holds other payload alongside an abandoned Dolt copy nested deeper within
+// it. A store that is removed goes whole, including any files beside its .dolt.
 //
 // A subtree can hold stores at different depths, so a store in a nested
 // subdirectory is always preferred over dir itself: every subdirectory is
 // explored before falling back to dir, so an ancestor never becomes the target
 // while a descendant store exists. When stores sit in separate sibling
-// subtrees, the first one found in lexical order is returned; the rest are
-// removed on later passes.
+// subtrees, the first one found in lexical order is returned and the rest go
+// on later passes, one per pass: removing a store refreshes its container's
+// mtime, so the next sibling goes only after another MinAge.
 func findDoltStoreDir(dir string, depth int) (string, bool) {
 	if depth <= 0 {
 		return "", false
