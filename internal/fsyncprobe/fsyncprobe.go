@@ -118,7 +118,9 @@ func workerCommand(exe, dir string, result *os.File) *exec.Cmd {
 
 // probe hands start the write end of a result pipe and reads the worker's
 // Result from the read end under timeout. The write end is closed here once
-// start returns, so only the worker holds it open.
+// start returns, so only the worker holds it open. The bound covers the wait
+// for the result, not start itself: a spawn that blocks (a stalled fork or
+// exec) delays the return past timeout.
 func probe(dir string, timeout time.Duration, start func(result *os.File) error) Result {
 	if err := requireDir(dir); err != nil {
 		return errorResult(err)

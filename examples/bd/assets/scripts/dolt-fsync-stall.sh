@@ -21,7 +21,16 @@
 #                          (default 1000). Empty, non-numeric or non-positive
 #                          values fall back to the default.
 #   GC_DOLT_FSYNC_ERROR_MS the `gc doctor` error threshold (default 5000, same
-#                          fallback rules); it plays no part in this guard.
+#                          fallback rules; fsync_stall_error_ms); it plays no
+#                          part in this guard.
+#
+# The probe worker is detached on purpose: a thread stuck in an uninterruptible
+# fsync (D state) cannot be killed, so the bound is enforced by abandoning it
+# and the worker may outlive the call until the kernel returns. A probe that
+# is merely starved of CPU past the bound reports `unfinished` too, so a heavily
+# loaded host can defer a recovery that was not blocked on storage; the
+# deferral is retried by the next recover, and `gc dolt restart --force`
+# overrides the restart refusal.
 #
 # Fails open: when the probe cannot run or its output cannot be read (GC_BIN
 # or DATA_DIR unset, the helper exits non-zero or reports status=error, the
@@ -32,16 +41,33 @@
 # `gc dolt restart --force` skips the refusal for an operator who still needs a
 # restart; see docs/troubleshooting/dolt-storage-stalls.md.
 
+# fsync_stall_env_ms prints the positive decimal integer in the environment
+# variable named $1, or the default $2 when it is empty, non-numeric or zero.
+# Leading zeros are dropped: Go's flag parser reads 0500 as octal and rejects
+# 0900, and the value is passed on as --timeout-ms.
 fsync_stall_env_ms() {
     _fs_value=$(eval "printf '%s' \"\${$1:-}\"")
     case "$_fs_value" in
         ''|*[!0-9]*) printf '%s\n' "$2"; return 0 ;;
     esac
-    if [ "$_fs_value" -le 0 ]; then
+    while :; do
+        case "$_fs_value" in
+            0?*) _fs_value=${_fs_value#0} ;;
+            *) break ;;
+        esac
+    done
+    if [ "$_fs_value" = "0" ]; then
         printf '%s\n' "$2"
         return 0
     fi
     printf '%s\n' "$_fs_value"
+}
+
+# fsync_stall_error_ms prints the `gc doctor` error threshold, 5000 unless
+# GC_DOLT_FSYNC_ERROR_MS is a positive integer. The recover guard does not
+# read it; the doctor check that does is tracked in ga-dnqmzh.
+fsync_stall_error_ms() {
+    fsync_stall_env_ms GC_DOLT_FSYNC_ERROR_MS 5000
 }
 
 fsync_stall_gc_bin() {
