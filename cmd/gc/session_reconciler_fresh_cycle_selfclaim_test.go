@@ -300,3 +300,35 @@ func TestFreshCycleRepro_ClaimAfterTickReadRetainsSession(t *testing.T) {
 		}
 	}
 }
+
+// ga-pvjbx3 Q2 over a primed CachingStore (deploy gate ga-1rax433). The
+// controller's rig legs are CachingStores, and CachingStore.Get answers a
+// primed, undirtied row without touching the backing store. A close made by
+// another process (`bd close`) reaches the backing store alone, so the cache
+// still reports the anchor in_progress. The Q2 recheck must read through the
+// cache to the backing row, or it reports a closed anchor as live and the
+// session is cycled onto work that no longer exists.
+func TestFreshAnchorBeadTerminal_BypassesPrimedCacheOnExternalClose(t *testing.T) {
+	backing := reproMemStore()
+	reproCreate(t, backing, beads.Bead{ID: "ga-anchor", Title: "anchor", Type: "task", Status: "in_progress", Assignee: "witness"})
+	cached := beads.NewCachingStore(backing, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatalf("priming the cache: %v", err)
+	}
+	if before, err := cached.Get("ga-anchor"); err != nil || before.Status != "in_progress" {
+		t.Fatalf("precondition: the primed cache must report the anchor in_progress, got %+v (err %v)", before, err)
+	}
+	reproCloseForReal(t, backing, "ga-anchor") // another process closes it; the cache is not told
+
+	control, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, backing, nil), "ga-anchor")
+	if err != nil || !control {
+		t.Fatalf("uncached control: terminal = %v, err = %v; want terminal", control, err)
+	}
+	terminal, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, cached, nil), "ga-anchor")
+	if err != nil {
+		t.Fatalf("primed cache: %v", err)
+	}
+	if !terminal {
+		t.Fatal("the Q2 recheck read the primed cache row and reported a closed anchor non-terminal; the uncached control reports it terminal")
+	}
+}
