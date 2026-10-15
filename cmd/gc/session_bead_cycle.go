@@ -50,12 +50,20 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // residency topology — rather than a single fixed store — and reports
 // whether it is still open (non-terminal, via convoycore.IsTerminalStatus),
 // who it is assigned to right now, and, when terminal, the time it closed.
-// Resolving over the topology (byIDBeadForTopology) rather than one store is
-// what lets this answer for a rig-scoped id: every ga-* work bead lives in a
-// rig store, and a lookup against the city/session store alone always misses
-// it. One store round trip answers all three questions, so the fresh-cycle
+// Resolving over the topology (byIDOwnerRowForTopology) rather than one store
+// is what lets this answer for a rig-scoped id: every ga-* work bead lives in
+// a rig store, and a lookup against the city/session store alone always
+// misses it. One store read answers all three questions, so the fresh-cycle
 // guard in session_reconciler.go does not need a second lookup to get the
 // close time or the live assignee after checking status.
+//
+// The topology only names which store owns the row. The row is then read from
+// that store with its cache layers peeled (uncachedBeadStore), as
+// freshAnchorBeadTerminal does: a rig leg is a CachingStore whose Get answers
+// a primed, undirtied row without a backing read, and a handoff or close made
+// by another process (`bd update --assignee`, `bd close`) reaches the backing
+// store alone. A cached row would report the old assignee and keep row A
+// deferring on a bead this session no longer owns.
 //
 // assignee is the live, trimmed assignee. ga-pvjbx3 Q3: the guard defers on an
 // open previous bead only while this session still owns it, and a bead that
@@ -71,7 +79,11 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // second, since BdStore truncates it to seconds. closedAt is the zero Time
 // only when the bead is open.
 func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, assignee string, closedAt time.Time, err error) {
-	b, err := byIDBeadForTopology(topo, id)
+	owner, err := byIDOwnerRowForTopology(topo, id)
+	if err != nil {
+		return false, "", time.Time{}, err
+	}
+	b, err := uncachedBeadStore(owner.Store).Get(id)
 	if err != nil {
 		return false, "", time.Time{}, err
 	}
