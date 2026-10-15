@@ -242,12 +242,18 @@ func TestManagedDoltGovernorHoldSurvivesLivePort(t *testing.T) {
 	}
 }
 
-// 4. A canceled waiter returns promptly while the flight completes, and a
-// flight ended by its own context sets no hold.
-func TestManagedDoltGovernorWaiterCancelLeavesFlightRunning(t *testing.T) {
+// 4. A joiner whose context ends returns promptly and leaves the flight running.
+func TestManagedDoltGovernorJoinerCancelLeavesFlightRunning(t *testing.T) {
 	gate := filepath.Join(t.TempDir(), "recover-gate")
 	cityPath, opsFile := governorCity(t, "", gate)
 	stubGovernorClock(t)
+
+	starterDone := make(chan struct{})
+	go func() {
+		defer close(starterDone)
+		_, _ = bdRuntimeEnvWithErrorRecoveryContext(context.Background(), cityPath, true)
+	}()
+	waitForGovernorOp(t, opsFile, "recover")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -255,18 +261,24 @@ func TestManagedDoltGovernorWaiterCancelLeavesFlightRunning(t *testing.T) {
 		_, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
 		done <- err
 	}()
-	waitForGovernorOp(t, opsFile, "recover")
+	time.Sleep(200 * time.Millisecond) // the joiner is waiting on the flight
 	cancel()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("canceled waiter error = %v, want context.Canceled", err)
+			t.Fatalf("canceled joiner error = %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("canceled waiter did not return while the flight was still running")
+		t.Fatal("canceled joiner did not return while the flight was still running")
+	}
+	select {
+	case <-starterDone:
+		t.Fatal("a joiner's cancellation ended the flight")
+	default:
 	}
 	openGate(t, gate)
 	waitForGovernorOp(t, opsFile, "recover-done")
+	<-starterDone
 }
 
 func TestManagedDoltGovernorShutdownEndedFlightSetsNoHold(t *testing.T) {

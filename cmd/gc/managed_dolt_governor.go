@@ -148,7 +148,8 @@ func awaitGovernedManagedDoltFlight(ctx context.Context, cityPath string, flight
 // call made from inside a flight, or by the holder of the city's provider slot,
 // runs directly; otherwise it is refused while the city is held, else joins or
 // starts the city's flight and waits for it as awaitGovernedManagedDoltFlight
-// does. The flight outlives a caller whose ctx ends.
+// does. A recovery runs under its starter's context, as before, so the starter
+// ending it cancels it; a joiner whose ctx ends leaves it running.
 func runGovernedManagedDoltEntry(ctx context.Context, cityPath string, run func(context.Context) error) error {
 	if ctx.Value(managedDoltFlightMarker{normalizePathForCompare(cityPath)}) != nil || holdsProviderSemaphore(ctx, cityPath) {
 		return run(ctx)
@@ -156,7 +157,7 @@ func runGovernedManagedDoltEntry(ctx context.Context, cityPath string, run func(
 	if err := managedDoltHoldError(cityPath); err != nil {
 		return err
 	}
-	flight := startGovernedManagedDoltFlight(context.WithoutCancel(ctx), cityPath, run)
+	flight := startGovernedManagedDoltFlight(ctx, cityPath, run)
 	return awaitGovernedManagedDoltFlight(ctx, cityPath, flight)
 }
 
