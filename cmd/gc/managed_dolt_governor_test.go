@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -101,8 +102,8 @@ func governorCity(t *testing.T, healthGate, recoverGate string) (cityPath, opsFi
 	t.Helper()
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
-	_ = os.Unsetenv("GC_DOLT_HOST")
-	_ = os.Unsetenv("GC_DOLT_PORT")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
 	cityPath = t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile = governorFakes(t, cityPath, healthGate, recoverGate)
@@ -121,16 +122,45 @@ func readGovernorOps(t *testing.T, opsFile string) []string {
 
 func waitForGovernorOp(t *testing.T, opsFile, op string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	ok := pollGovernor(func() bool {
 		for _, got := range readGovernorOps(t, opsFile) {
 			if got == op {
-				return
+				return true
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		return false
+	})
+	if !ok {
+		t.Fatalf("provider op %q never ran; ops = %v", op, readGovernorOps(t, opsFile))
 	}
-	t.Fatalf("provider op %q never ran; ops = %v", op, readGovernorOps(t, opsFile))
+}
+
+// pollGovernor reports whether cond became true within ten seconds.
+func pollGovernor(cond func() bool) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(10 * time.Second)
+	for !cond() {
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			return cond()
+		}
+	}
+	return true
+}
+
+// waitForGovernorWaiters blocks until n goroutines are parked waiting on the
+// city's flight, so a test knows its callers have all reached it.
+func waitForGovernorWaiters(t *testing.T, n int) {
+	t.Helper()
+	count := func() int {
+		buf := make([]byte, 1<<20)
+		return strings.Count(string(buf[:runtime.Stack(buf, true)]), "(*managedDoltFlight).wait(")
+	}
+	if !pollGovernor(func() bool { return count() >= n }) {
+		t.Fatalf("%d goroutines waiting on the flight, want %d", count(), n)
+	}
 }
 
 func openGate(t *testing.T, gate string) {
@@ -168,7 +198,7 @@ func TestManagedDoltGovernorSharesOneFlightAcrossConcurrentEnvBuilds(t *testing.
 		}()
 	}
 	waitForGovernorOp(t, opsFile, "health")
-	time.Sleep(300 * time.Millisecond) // let the other builds reach the flight
+	waitForGovernorWaiters(t, builds)
 	openGate(t, gate)
 	wg.Wait()
 
@@ -261,7 +291,7 @@ func TestManagedDoltGovernorJoinerCancelLeavesFlightRunning(t *testing.T) {
 		_, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
 		done <- err
 	}()
-	time.Sleep(200 * time.Millisecond) // the joiner is waiting on the flight
+	waitForGovernorWaiters(t, 2) // the starter and the joiner
 	cancel()
 	select {
 	case err := <-done:
@@ -368,7 +398,7 @@ func TestManagedDoltGovernorDedupesAndJoinsRetryPathRecover(t *testing.T) {
 	}
 	<-started
 	<-started
-	time.Sleep(200 * time.Millisecond) // both callers are now at the recover
+	waitForGovernorWaiters(t, 2) // both callers are now at the recover
 	close(release)
 	wg.Wait()
 
