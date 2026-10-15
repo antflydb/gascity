@@ -1556,6 +1556,70 @@ func TestGitProbeLatchTripsOnce(t *testing.T) {
 	}
 }
 
+// newAgentBuildParams is the production constructor: it must wire the probe
+// latch, and the latch must survive the by-value copies the build makes. Built
+// through the constructor, not a literal, so a constructor that forgets the
+// latch fails here.
+func TestNewAgentBuildParamsWiresTheProbeLatch(t *testing.T) {
+	gitLog := installBlockingGitForTemplate(t)
+	bp := newAgentBuildParams("bright-lights", t.TempDir(), &config.City{}, nil, testBeaconTime, nil, io.Discard)
+	if bp.gitLatch == nil {
+		t.Fatal("newAgentBuildParams left gitLatch nil: the build would pay one deadline per agent")
+	}
+	bp.gitProbeDeadline = 100 * time.Millisecond
+	cp := *bp
+
+	if got := bp.defaultBranch("", t.TempDir()); got != "" {
+		t.Fatalf("first defaultBranch = %q, want empty on a missed deadline", got)
+	}
+	if got := cp.defaultBranch("", t.TempDir()); got != "" {
+		t.Fatalf("copy defaultBranch = %q, want empty while latched", got)
+	}
+	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
+		t.Fatalf("git invocations = %d, want 1 shared across the constructor's copies", n)
+	}
+}
+
+// A tripped latch skips only the git probe. The rig's recorded value and the
+// unset-dir "main" are answers that need no git, so they must still be given
+// after the latch trips, with no new spawn.
+func TestBuildParamsDefaultBranchTrippedLatchKeepsRecordedAndEmptyDirAnswers(t *testing.T) {
+	gitLog := installBlockingGitForTemplate(t)
+	bp, _ := newProbeTestParams(t)
+	bp.rigs = []config.Rig{{Name: "api", DefaultBranch: "release"}}
+
+	if got := bp.defaultBranch("", t.TempDir()); got != "" {
+		t.Fatalf("tripping defaultBranch = %q, want empty", got)
+	}
+	if !bp.gitLatch.tripped() {
+		t.Fatal("latch not tripped by a missed deadline")
+	}
+	if got := bp.defaultBranch("api", t.TempDir()); got != "release" {
+		t.Fatalf("recorded rig value after trip = %q, want release", got)
+	}
+	if got := bp.defaultBranch("", ""); got != "main" {
+		t.Fatalf("empty dir after trip = %q, want main", got)
+	}
+	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
+		t.Fatalf("git invocations = %d, want 1 (only the tripping probe)", n)
+	}
+}
+
+// Build params can carry no stderr writer; the first latch trip must still
+// return empty rather than panic on the warning.
+func TestBuildParamsDefaultBranchMissedDeadlineWithNilStderrDoesNotPanic(t *testing.T) {
+	installBlockingGitForTemplate(t)
+	bp, _ := newProbeTestParams(t)
+	bp.stderr = nil
+
+	if got := bp.defaultBranch("", t.TempDir()); got != "" {
+		t.Fatalf("defaultBranch = %q, want empty on a missed deadline", got)
+	}
+	if !bp.gitLatch.tripped() {
+		t.Fatal("latch not tripped by a missed deadline")
+	}
+}
+
 // The loop-level contract: a prompt-template agent whose git never answers
 // still resolves, with an empty DefaultBranch and no error.
 func TestResolveTemplateBlockedGitRendersEmptyDefaultBranch(t *testing.T) {
