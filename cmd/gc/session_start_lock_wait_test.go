@@ -397,10 +397,7 @@ func TestExecutePlannedStarts_HolderReleasingWithinTheBoundStartsTheSessionInThe
 	synctest.Test(t, func(t *testing.T) {
 		e := newBusyStartEnv(t)
 		release := holdSessionMutationLock(t, e.s.info.ID)
-		go func() {
-			time.Sleep(testGateWaitBound / 2)
-			release()
-		}()
+		time.AfterFunc(testGateWaitBound/2, release)
 
 		res := runStartPass(e.capacityEnv, func() {}, e.s, e.h1, e.h2)
 
