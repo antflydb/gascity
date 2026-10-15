@@ -12,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -400,8 +402,28 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // newest first within a store. Cached reads use a targeted ListQuery with
 // Limit=1 per identity and store, stopping at the first match; live reads go
 // through findLiveActiveBeadInStores.
+//
+// Suspended rigs (cacheColdRigNames) are not searched, matching the status
+// work counts: their stores have no cache, so each read would run bd, and a
+// session list runs this lookup for every identity of every active session.
+// Rigs are dropped before sortedRigNames deduplicates shared stores, so a store
+// a running rig shares with a suspended one is still searched.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
+	if cfg := s.state.Config(); cfg != nil {
+		// As in status, an unreadable suspension state leaves each rig to its
+		// suspended_on_start default.
+		citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+		if cold := cacheColdRigNames(cfg, citySt); len(cold) > 0 {
+			warm := make(map[string]beads.Store, len(stores))
+			for name, store := range stores {
+				if !cold[name] {
+					warm[name] = store
+				}
+			}
+			stores = warm
+		}
+	}
 	var rigNames []string
 	if rig != "" {
 		if _, ok := stores[rig]; ok {

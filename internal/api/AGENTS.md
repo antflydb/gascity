@@ -90,6 +90,12 @@ concrete session's work wins over a template fallback. Stop reading stores once
 the first identity (the session id, when known) has a match, and keep a store's
 partial rows instead of dropping the store.
 
+Neither the fresh nor the cached lookup reads a suspended rig's store
+(`cacheColdRigNames`, the rigs `/status` leaves out of its work counts). The
+controller never primes that store's cache, so each read of it runs bd, and a
+session list repeats the lookup for every identity of every active session
+(ga-xs9r93f).
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves

@@ -222,19 +222,15 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var ac agentCounts
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
-	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
-	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
-	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
-	// the same set as suspendedRigs, which grows below to include rigs merely
-	// inferred suspended because every one of their agents is — those keep a
+	// cacheColdRigs (cacheColdRigNames) are the rigs whose stores status leaves
+	// unread (statusWorkCounts). It is deliberately not the same set as
+	// suspendedRigs, which grows below to include rigs merely inferred
+	// suspended because every one of their agents is — those keep a
 	// refreshing cache and must still be asked for ready work.
-	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
-			suspendedRigs[r.Name] = true
-			cacheColdRigs[r.Name] = true
-		}
+	cacheColdRigs := cacheColdRigNames(cfg, citySt)
+	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
+	for name := range cacheColdRigs {
+		suspendedRigs[name] = true
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
@@ -683,6 +679,21 @@ type statusWorkResult struct {
 	wc       workCounts
 	readyIDs []string
 	errs     []string
+}
+
+// cacheColdRigNames returns the rigs suspended by EFFECTIVE state — the runtime
+// suspension state over each rig's suspended_on_start default. It mirrors the
+// controller's per-rig cache refresh gate (rigStoreBackgroundRefresh): such a
+// rig's store is never primed, so every read of it runs bd, and a bd read
+// restarts the rig's retired proxy and Dolt. API readers leave these rigs out.
+func cacheColdRigNames(cfg *config.City, citySt suspensionstate.State) map[string]bool {
+	cold := make(map[string]bool, len(cfg.Rigs))
+	for _, r := range cfg.Rigs {
+		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
+			cold[r.Name] = true
+		}
+	}
+	return cold
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores

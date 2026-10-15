@@ -361,6 +361,7 @@ go_test(
         "handler_session_submit_test.go",
         "handler_sessions_client_writes_test.go",
         "handler_sessions_closed_state_test.go",
+        "handler_sessions_suspended_rig_test.go",
         "handler_sessions_test.go",
         "handler_sling_cli_parity_test.go",
         "handler_sling_graph_binding_test.go",
