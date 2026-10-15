@@ -88,8 +88,16 @@ fi
 
 # Restarting a Dolt that is blocked on a stalled fsync cannot fix storage and
 # adds recovery fsync load to it. The data directory follows runtime.sh:
-# GC_DOLT_DATA_DIR first, else the city's beads store.
+# GC_DOLT_DATA_DIR first, else the city's beads store when it exists, else the
+# pack state directory's dolt-data.
 DATA_DIR="${GC_DOLT_DATA_DIR:-$GC_CITY_PATH/.beads/dolt}"
+if [ -z "${GC_DOLT_DATA_DIR:-}" ] && [ ! -d "$DATA_DIR" ]; then
+  if [ -d "$PACK_STATE_DIR" ] || [ ! -d "$GC_CITY_PATH/.gc/dolt-data" ]; then
+    DATA_DIR="$PACK_STATE_DIR/dolt-data"
+  else
+    DATA_DIR="$GC_CITY_PATH/.gc/dolt-data"
+  fi
+fi
 if recovery_should_skip_due_to_fsync_stall; then
   if [ "$force_restart" != "true" ]; then
     echo "gc dolt restart: Dolt's data directory fsync is stalled; refusing restart because it adds recovery fsync load to storage that is already stalled" >&2
