@@ -332,3 +332,81 @@ func TestFreshAnchorBeadTerminal_BypassesPrimedCacheOnExternalClose(t *testing.T
 		t.Fatal("the Q2 recheck read the primed cache row and reported a closed anchor non-terminal; the uncached control reports it terminal")
 	}
 }
+
+// ga-pvjbx3 Q3 over a primed CachingStore (deploy gate ga-2wc69nx, criterion
+// 2). The previous-bead read has the same exposure as Q2's: a rig leg is a
+// CachingStore whose Get answers a primed, undirtied row without a backing
+// read, and a handoff made by another process (`bd update --assignee`)
+// reaches the backing store alone. The helper must report the live assignee,
+// or row A keeps deferring on a bead the session no longer owns.
+func TestPrevAssignedBeadStatus_BypassesPrimedCacheOnExternalHandoff(t *testing.T) {
+	backing := reproMemStore()
+	reproCreate(t, backing, beads.Bead{ID: "ga-prev", Title: "previous", Type: "task", Status: "open", Assignee: "witness"})
+	cached := beads.NewCachingStore(backing, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatalf("priming the cache: %v", err)
+	}
+	if before, err := cached.Get("ga-prev"); err != nil || before.Assignee != "witness" {
+		t.Fatalf("precondition: the primed cache must report the previous bead assigned to witness, got %+v (err %v)", before, err)
+	}
+	handedOff := "reviewer"
+	if err := backing.Update("ga-prev", beads.UpdateOpts{Assignee: &handedOff}); err != nil { // another process hands it off; the cache is not told
+		t.Fatalf("handing ga-prev off: %v", err)
+	}
+
+	open, control, _, err := prevAssignedBeadStatus(residencyTopologyForCity("", nil, backing, nil), "ga-prev")
+	if err != nil || !open || control != handedOff {
+		t.Fatalf("uncached control: open = %v, assignee = %q, err = %v; want open and assigned to %q", open, control, err, handedOff)
+	}
+	open, assignee, _, err := prevAssignedBeadStatus(residencyTopologyForCity("", nil, cached, nil), "ga-prev")
+	if err != nil {
+		t.Fatalf("primed cache: %v", err)
+	}
+	if !open {
+		t.Fatal("the primed-cache read reported the still-open previous bead as terminal")
+	}
+	if assignee != control {
+		t.Fatalf("the Q3 read took assignee %q from the primed cache row after an external handoff; the live backing assignee is %q", assignee, control)
+	}
+}
+
+// The reconciler half of the primed-cache handoff: the previous bead was
+// handed to another agent behind the cache's back, so row A must not defer
+// and the guard must fall through to the cycle, exactly as it does against an
+// uncached store (the control).
+func TestFreshCycleRepro_ExternalHandoffThroughPrimedCacheDoesNotDefer(t *testing.T) {
+	for _, useCache := range []bool{false, true} {
+		name := "uncached control"
+		if useCache {
+			name = "primed cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, session, _ := freshCycleReproEnv(t, map[string]string{
+				sessionpkg.CurrentBeadIDKey: "ga-prev",
+				"awake_started_at":          time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+			})
+			backing := reproMemStore()
+			reproCreate(t, backing, beads.Bead{ID: "ga-prev", Title: "previous", Type: "task", Status: "open", Assignee: "witness"})
+			var rig beads.Store = backing
+			if useCache {
+				cached := beads.NewCachingStore(backing, nil)
+				if err := cached.PrimeActive(); err != nil {
+					t.Fatalf("priming the cache: %v", err)
+				}
+				if before, err := cached.Get("ga-prev"); err != nil || before.Assignee != "witness" {
+					t.Fatalf("precondition: the primed cache must report ga-prev assigned to witness, got %+v (err %v)", before, err)
+				}
+				rig = cached
+			}
+			handedOff := "reviewer"
+			if err := backing.Update("ga-prev", beads.UpdateOpts{Assignee: &handedOff}); err != nil {
+				t.Fatalf("handing ga-prev off: %v", err)
+			}
+			anchor := beads.Bead{ID: "ga-new", Title: "routed next", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+			reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
+
+			assertCycled(t, env, session, "ga-prev was handed to another agent by a process the cache never saw, so the live assignee is no longer this session and row A must not defer")
+		})
+	}
+}
