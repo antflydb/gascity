@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -50,6 +52,8 @@ func FindRuntimesBySessionIDBounded(ctx context.Context, sc ProcessTableScanner,
 		defer func() {
 			if r := recover(); r != nil {
 				res = scanResult{err: fmt.Errorf("scan for %q panicked: %v: %w", sessionID, r, ErrProcessTableScanUnavailable)}
+				slog.Error("runtime: bounded process-table scan panicked",
+					slog.String("key", key), slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
 			}
 			// Release the key before delivering, so a caller that scans again
 			// the moment it has an answer is never told its own finished scan
