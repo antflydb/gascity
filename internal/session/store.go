@@ -77,9 +77,9 @@ const startCommitMaxAttempts = 3
 // beads.ErrConditionalWriteUnsupported at call time, return an error.
 //
 // ctx bounds only the wait for the session mutation lock (see
-// WithSessionMutationLockContext), never the work done under it. When the lock is
-// still held at ctx's end the call returns an error matching
-// ErrSessionMutationBusy, with nothing read or written.
+// WithSessionMutationLockContext), never the work done under it. When the
+// lock is still held at ctx's end the call returns an error matching
+// ErrSessionMutationBusy, with no session row read or written.
 func (s *Store) CommitStartedIfCurrent(ctx context.Context, expected Info, patch MetadataPatch) (bool, error) {
 	return s.CommitStartedIfCurrentUnder(ctx, expected, patch, nil)
 }
@@ -159,9 +159,9 @@ func (s *Store) CommitStartedIfCurrentUnder(ctx context.Context, expected Info, 
 // provider; retired-session cleanup belongs after this critical section.
 //
 // ctx bounds only the wait for the session mutation lock (see
-// WithSessionMutationLockContext), never the work done under it. When the lock is
-// still held at ctx's end the call returns an error matching
-// ErrSessionMutationBusy, with nothing read or written.
+// WithSessionMutationLockContext), never the work done under it. When the
+// lock is still held at ctx's end the call returns an error matching
+// ErrSessionMutationBusy, with no session row read or written.
 func (s *Store) WithPendingCreateRollback(ctx context.Context, expected Info, fn func() error) (bool, error) {
 	applied := false
 	err := WithSessionMutationLockContext(ctx, expected.ID, func() error {
@@ -986,9 +986,9 @@ var errPendingCreateRollbackSuperseded = errors.New("pending create is no longer
 //     transaction.
 //
 // ctx bounds only the wait for the session mutation lock (see
-// WithSessionMutationLockContext), never the work done under it. When the lock is
-// still held at ctx's end the call returns an error matching
-// ErrSessionMutationBusy, with nothing read or written.
+// WithSessionMutationLockContext), never the work done under it. When the
+// lock is still held at ctx's end the call returns an error matching
+// ErrSessionMutationBusy, with no session row read or written.
 func (s *Store) RollbackPendingCreateAtomically(ctx context.Context, expected Info, closePatch, postClosePatch MetadataPatch) (closed, postClosed bool, err error) {
 	return s.RollbackPendingCreateAtomicallyUnder(ctx, expected, closePatch, postClosePatch, nil)
 }

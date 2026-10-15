@@ -60,8 +60,8 @@ evidence from tests, source, an issue, or a commit.
   context's error). A busy result means `fn` never ran and never will, so the
   caller may retry the whole operation. The context bounds only the wait, not
   `fn`. `CommitStartedIfCurrent`, `WithPendingCreateRollback`,
-  `RollbackPendingCreateAtomically` and their `...Under` variants take it as
-  their first parameter. A `Manager` or `Store` method that takes a lock-bounding
+  `RollbackPendingCreateAtomically` (and the `...Under` variants of the first
+  and third) take it as their first parameter. A `Manager` or `Store` method that takes a lock-bounding
   `ctx` puts it first and says in its doc comment what it bounds; do not add a
   parallel `...Ctx` variant.
 - `testing/synctest.Wait` does not consider `sync.Mutex.Lock` durably blocked.
