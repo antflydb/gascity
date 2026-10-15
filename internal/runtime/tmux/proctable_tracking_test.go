@@ -117,3 +117,23 @@ func TestFindRuntimesBySessionIDWithNoRootsAsksTmuxNothing(t *testing.T) {
 		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", fe.calls)
 	}
 }
+
+func TestFindRuntimesBySessionIDWithNoRootsStillReturnsScanError(t *testing.T) {
+	proctable.SetScanRootForTesting(t, filepath.Join(t.TempDir(), "no-such-proc"))
+	fe := &fakeExecutor{}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
+
+	found, err := p.FindRuntimesBySessionID("gc-no-such-session")
+
+	if err == nil {
+		t.Fatal("FindRuntimesBySessionID = nil error, want the whole-scan failure returned together with no roots")
+	}
+	if len(found) != 0 {
+		t.Fatalf("found = %+v, want none", found)
+	}
+	if len(fe.calls) != 0 {
+		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", fe.calls)
+	}
+}

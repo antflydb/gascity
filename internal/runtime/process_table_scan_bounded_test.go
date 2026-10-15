@@ -233,3 +233,31 @@ func TestProcessTableScanUnavailableWrapsRuntimeUnavailable(t *testing.T) {
 		t.Fatal("ErrProcessTableScanUnavailable must wrap ErrRuntimeUnavailable")
 	}
 }
+
+// panickingScanner's scan panics.
+type panickingScanner struct{}
+
+func (panickingScanner) FindRuntimesBySessionID(string) ([]LiveRuntime, error) {
+	panic("reviewer probe: scanner blew up")
+}
+
+func (panickingScanner) TerminateRuntime(LiveRuntime) error { return nil }
+
+func TestBoundedScanPanicIsUnavailableAndReleasesKey(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		got, err := FindRuntimesBySessionIDBounded(context.Background(), panickingScanner{}, "k-panic", "sid", scanBudget)
+		if !errors.Is(err, ErrProcessTableScanUnavailable) || !errors.Is(err, ErrRuntimeUnavailable) {
+			t.Fatalf("err = %v, want unavailable", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("roots = %+v, want none", got)
+		}
+		synctest.Wait()
+
+		fresh := &immediateScanner{result: []LiveRuntime{{SessionID: "sid", PID: 31}}}
+		got, err = FindRuntimesBySessionIDBounded(context.Background(), fresh, "k-panic", "sid", scanBudget)
+		if err != nil || len(got) != 1 || got[0].PID != 31 {
+			t.Fatalf("after the panic = (%+v, %v), want a fresh scan's answer: the panicked scan must release its key", got, err)
+		}
+	})
+}

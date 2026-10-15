@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -334,5 +335,114 @@ func TestKillExistingOrphansStopsBetweenTerminationsWhenContextDone(t *testing.T
 	}
 	if n := sp.terms.Load(); n != 1 {
 		t.Fatalf("TerminateRuntime calls = %d, want 1: the second root must not be terminated after the context is done", n)
+	}
+}
+
+func TestSameCityDifferentSessionHasItsOwnLatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newWedgedScanProvider(t)
+		defer sp.unwedge()
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+		mgr.orphanScanBudget = orphanScanBudgetForTest
+		assertDeferredByUnfinishedScan(t, sp, mgr.killExistingOrphans(context.Background(), "sid-first"))
+
+		// sid-first's scan is still wedged. A different session in the SAME city
+		// must get its own scan: the latch is per (city, session id), not per city.
+		sp.wedge.Store(false)
+		if err := mgr.killExistingOrphans(context.Background(), "sid-second"); err != nil {
+			t.Fatalf("second session in the same city = %v, want its own scan, unaffected by the first session's wedged scan", err)
+		}
+		if n := sp.finds.Load(); n != 2 {
+			t.Fatalf("scans started = %d, want 2 (one per session)", n)
+		}
+
+		sp.unwedge()
+		synctest.Wait()
+	})
+}
+
+func TestOrphanScanBudgetFieldIsHonored(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newWedgedScanProvider(t)
+		defer sp.unwedge()
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+		const budget = 2 * time.Second
+		mgr.orphanScanBudget = budget
+
+		start := time.Now()
+		err := mgr.killExistingOrphans(context.Background(), "sid-field")
+
+		if elapsed := time.Since(start); elapsed != budget {
+			t.Fatalf("returned after %s, want the manager's configured budget %s", elapsed, budget)
+		}
+		assertDeferredByUnfinishedScan(t, sp, err)
+
+		sp.unwedge()
+		synctest.Wait()
+	})
+}
+
+// deathThenWedgeProvider fails its first Start with a startup death (so the
+// stale-key retry runs) and from then on wedges the process-table scan.
+type deathThenWedgeProvider struct {
+	*wedgedScanProvider
+	armed atomic.Bool
+}
+
+func (p *deathThenWedgeProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.armed.CompareAndSwap(true, false) {
+		p.starts.Add(1)
+		p.wedge.Store(true)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+	}
+	return p.wedgedScanProvider.Start(ctx, name, cfg)
+}
+
+func TestStaleKeyRetryDefersWhenOrphanScanNeverFinishes(t *testing.T) {
+	wp := newWedgedScanProvider(t)
+	defer wp.unwedge()
+	wp.wedge.Store(false)
+	sp := &deathThenWedgeProvider{wedgedScanProvider: wp}
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, sp, WithCityPath(wp.city))
+	mgr.orphanScanBudget = 100 * time.Millisecond
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	wp.finds.Store(0)
+	wp.terms.Store(0)
+	wp.starts.Store(0)
+	sp.armed.Store(true)
+
+	resumeCmd := "claude --dangerously --resume " + sessionKey
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: info.WorkDir})
+
+	if err == nil {
+		t.Fatal("Send succeeded although the stale-key retry's orphan scan never finished")
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, runtime.ErrProcessTableScanUnavailable) {
+		t.Fatalf("err = %v, want it to wrap ErrRuntimeUnavailable and ErrProcessTableScanUnavailable through the retry's wrap site", err)
+	}
+	if n := wp.terms.Load(); n != 0 {
+		t.Fatalf("TerminateRuntime calls = %d, want 0", n)
+	}
+	if n := wp.starts.Load(); n != 1 {
+		t.Fatalf("Start calls = %d, want 1 (the dying first start only; the retry is deferred)", n)
 	}
 }

@@ -517,3 +517,81 @@ func TestExecutePreparedStartWaveDefersUnfinishedOrphanScan(t *testing.T) {
 		})
 	}
 }
+
+// ctxStartErrProvider fails Start with whatever build returns for the start's
+// own context.
+type ctxStartErrProvider struct {
+	*runtime.Fake
+	build func(context.Context) error
+}
+
+func (p *ctxStartErrProvider) Start(ctx context.Context, _ string, _ runtime.Config) error {
+	return p.build(ctx)
+}
+
+func TestDefersUnfinishedOrphanScanWhenStartDeadlineEndsIt(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
+	bead, err := store.Create(beads.Bead{
+		ID: "gc-worker", Title: "worker", Type: sessionBeadType,
+		Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name":  "worker",
+			"template":      "worker",
+			"state":         "asleep",
+			"last_woke_at":  clk.Now().Format(time.RFC3339),
+			"wake_attempts": "2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	// The start's own deadline is SHORTER than the scan budget, so the wait ends
+	// on the start context's deadline, not the scan's budget.
+	sp := &ctxStartErrProvider{Fake: runtime.NewFake(), build: func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+		return fmt.Errorf("starting session: pre-start orphan cleanup: %w: %w", runtime.ErrRuntimeUnavailable, context.DeadlineExceeded)
+	}}
+	cityPath := t.TempDir()
+	lease, release, err := tryRuntimeLease(nil, cityPath, "worker", "", 0)
+	if err != nil {
+		t.Fatalf("taking the candidate's flock: %v", err)
+	}
+	defer release()
+
+	results := executePreparedStartWaveForCity(
+		context.Background(),
+		[]preparedStart{{
+			candidate: startCandidate{
+				info:  sessiontest.SeedBead(t, bead),
+				tp:    TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"},
+				lease: lease,
+			},
+			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
+		}},
+		cityPath,
+		sp,
+		store,
+		nil,
+		50*time.Millisecond, 1,
+	)
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	result := results[0]
+	if result.err != nil || result.outcome != TraceOutcomeDeferred || result.rollbackPending || result.rateLimitScreen {
+		t.Fatalf("result = %#v, want deferred without error, rollback, or rate-limit screening", result)
+	}
+	if commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("deferred result counted as committed wake")
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Status != "open" || got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("session after deferral = %#v, want open state and unchanged failure budget", got)
+	}
+}
