@@ -990,3 +990,39 @@ func TestSweep_StoreBeyondTheSearchWindowIsLeftAlone(t *testing.T) {
 
 	requireSweepLeftTreeAlone(t, result, top, before)
 }
+
+// TestSweep_DoltDirIsNeverDescendedInto pins that a .dolt directory is a probe
+// target and never a place to search for stores. A real store carries a nested
+// <db>/.dolt/stats/.dolt/noms, so exploring .dolt would remove that
+// Dolt-internal sub-store, partially gutting the store, instead of the store
+// itself. A no-noms .dolt is no store, and a store tucked inside it is not
+// reachable either.
+func TestSweep_DoltDirIsNeverDescendedInto(t *testing.T) {
+	t.Run("a store with a nested Dolt-internal store goes whole", func(t *testing.T) {
+		root := t.TempDir()
+		top := filepath.Join(root, "top")
+		mkdirs(t, filepath.Join(top, ".dolt", "noms"), filepath.Join(top, ".dolt", "stats", ".dolt", "noms"))
+		writeFile(t, filepath.Join(top, "payload.txt"))
+		ageTree(t, top)
+
+		result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+		if len(result.Errors) != 0 || !slices.Equal(result.Removed, []string{top}) {
+			t.Fatalf("Removed = %v, errors = %v, want [%s]", result.Removed, result.Errors, top)
+		}
+		requireNotExist(t, top)
+	})
+
+	t.Run("a store inside a no-noms .dolt is not a target", func(t *testing.T) {
+		root := t.TempDir()
+		top := filepath.Join(root, "top")
+		mkdirs(t, filepath.Join(top, ".dolt", "inner", ".dolt", "noms"))
+		writeFile(t, filepath.Join(top, "payload.txt"))
+		ageTree(t, top)
+		before := snapshot(t, top)
+
+		result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+		requireSweepLeftTreeAlone(t, result, top, before)
+	})
+}
