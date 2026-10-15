@@ -129,8 +129,15 @@ func managedDoltHoldError(cityPath string) error {
 // waits for the flight's end. Either way ctx ending returns its error, and the
 // flight keeps running.
 func awaitGovernedManagedDoltFlight(ctx context.Context, cityPath string, flight *managedDoltFlight) error {
+	_, controller := controllerCityContext(cityPath)
+	return awaitManagedDoltFlight(ctx, flight, controller)
+}
+
+// awaitManagedDoltFlight is awaitGovernedManagedDoltFlight with the window
+// choice made by the caller.
+func awaitManagedDoltFlight(ctx context.Context, flight *managedDoltFlight, windowed bool) error {
 	waitCtx := ctx
-	if _, controller := controllerCityContext(cityPath); controller {
+	if windowed {
 		var cancel context.CancelFunc
 		waitCtx, cancel = context.WithDeadline(ctx, flight.started.Add(managedDoltFlightWindow))
 		defer cancel()
@@ -151,6 +158,13 @@ func awaitGovernedManagedDoltFlight(ctx context.Context, cityPath string, flight
 // does. A recovery runs under its starter's context, as before, so the starter
 // ending it cancels it; a joiner whose ctx ends leaves it running.
 func runGovernedManagedDoltEntry(ctx context.Context, cityPath string, run func(context.Context) error) error {
+	_, controller := controllerCityContext(cityPath)
+	return runWindowedManagedDoltEntry(ctx, cityPath, controller, run)
+}
+
+// runWindowedManagedDoltEntry is runGovernedManagedDoltEntry with the wait
+// window chosen by the caller.
+func runWindowedManagedDoltEntry(ctx context.Context, cityPath string, windowed bool, run func(context.Context) error) error {
 	if ctx.Value(managedDoltFlightMarker{normalizePathForCompare(cityPath)}) != nil || holdsProviderSemaphore(ctx, cityPath) {
 		return run(ctx)
 	}
@@ -158,7 +172,7 @@ func runGovernedManagedDoltEntry(ctx context.Context, cityPath string, run func(
 		return err
 	}
 	flight := startGovernedManagedDoltFlight(ctx, cityPath, run)
-	return awaitGovernedManagedDoltFlight(ctx, cityPath, flight)
+	return awaitManagedDoltFlight(ctx, flight, windowed)
 }
 
 // governedManagedDoltHealth is the env-build entry: the provider health ladder
@@ -172,13 +186,15 @@ func governedManagedDoltHealth(ctx context.Context, cityPath string) error {
 // governedManagedRecover is the bd retry-path entry: one recover under the
 // city's provider slot. It is refused, reporting nil so the caller carries on
 // to its retry, while the city is held, while the legacy recover cooldown is
-// running, or when a joined flight outlives the controller wait window. It
-// returns an error only when a recover that ran, or that it joined, failed.
+// running, or when a joined flight outlives managedDoltFlightWindow. The wait
+// is always windowed: this entry carries no context, so it cannot tell that it
+// runs inside the flight it would join. It returns an error only when a recover
+// that ran, or that it joined, failed.
 func governedManagedRecover(cityPath string) error {
 	if _, running := managedDoltFlightStartedAt(cityPath); !running && managedRecoverCoolingDown(cityPath) {
 		return nil
 	}
-	err := runGovernedManagedDoltEntry(context.Background(), cityPath, func(flightCtx context.Context) error {
+	err := runWindowedManagedDoltEntry(context.Background(), cityPath, true, func(flightCtx context.Context) error {
 		lastBeadsProviderRecover.Store(normalizePathForCompare(cityPath), providerRecoverNow())
 		release, err := acquireProviderSemaphoreForOpContext(flightCtx, cityPath, "recover")
 		if err != nil {

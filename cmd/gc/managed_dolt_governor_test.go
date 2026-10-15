@@ -623,3 +623,35 @@ func TestManagedDoltGovernorReentrantEntryRunsDirectly(t *testing.T) {
 		t.Fatalf("flight error = %v", flight.err)
 	}
 }
+
+// 13. The retry-path recover never waits on a flight past the window, whatever
+// the caller's class: it cannot tell it runs inside that flight.
+func TestManagedDoltGovernorRetryRecoverJoinIsWindowed(t *testing.T) {
+	cityPath := t.TempDir()
+	resetManagedDoltGovernor(t, cityPath)
+	stubGovernorClock(t)
+
+	calls := 0
+	prev := recoverManagedBDCommand
+	recoverManagedBDCommand = func(string) error { calls++; return nil }
+	t.Cleanup(func() { recoverManagedBDCommand = prev })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	flight := startGovernedManagedDoltFlight(context.Background(), cityPath, func(context.Context) error {
+		<-release
+		return nil
+	})
+	flight.started = time.Now().Add(-managedDoltFlightWindow - time.Second)
+
+	done := make(chan error, 1)
+	go func() { done <- governedManagedRecover(cityPath) }()
+	select {
+	case err := <-done:
+		if err != nil || calls != 0 {
+			t.Fatalf("governedManagedRecover past the window: err=%v calls=%d, want nil and 0", err, calls)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry-path recover waited on a flight past the window")
+	}
+}
