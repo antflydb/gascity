@@ -137,8 +137,20 @@ func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, e
 // is no work left to reassign onto. An error (including a bead no leg holds)
 // is "could not tell", and the caller then proceeds to the cycle: Q1 has
 // already established that the session holds no claim a kill could cost.
+//
+// The topology only names which store owns the anchor. The row is then read
+// from that store with its cache layers peeled (uncachedBeadStore), and the
+// row the owner probe may already have read is discarded: a rig leg is a
+// CachingStore whose Get answers a primed, undirtied row without a backing
+// read, and a close made by another process (`bd close`) reaches the backing
+// store alone. Reading through the cache would report that closed anchor as
+// live and cycle the session onto work that no longer exists.
 func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, error) {
-	anchor, err := byIDBeadForTopology(topo, anchorID)
+	owner, err := byIDOwnerRowForTopology(topo, anchorID)
+	if err != nil {
+		return false, err
+	}
+	anchor, err := uncachedBeadStore(owner.Store).Get(anchorID)
 	if err != nil {
 		return false, err
 	}
