@@ -173,16 +173,24 @@ func TestWithSessionMutationLockContextAbandonedWaiterNeverRuns(t *testing.T) {
 	})
 }
 
+// doneCtxAcquireIterations repeats the done-context acquire because the
+// select that follows the try-first send picks at random among ready cases:
+// without the try-first send a done context loses about half the time, so a
+// single shot would let a mutant that drops it survive.
+const doneCtxAcquireIterations = 64
+
 func TestWithSessionMutationLockContextDoneContextStillAcquiresFreeLock(t *testing.T) {
 	const id = "lock-done-ctx"
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	ran := false
-	if err := WithSessionMutationLockContext(ctx, id, func() error { ran = true; return nil }); err != nil || !ran {
-		t.Fatalf("done ctx on a free lock = %v, ran=%v; want it to acquire (ctx bounds only the wait)", err, ran)
-	}
-	if _, present := sessionMutationLockRefs(id); present {
-		t.Fatal("lock entry survived the acquire")
+	for i := 0; i < doneCtxAcquireIterations; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		ran := false
+		if err := WithSessionMutationLockContext(ctx, id, func() error { ran = true; return nil }); err != nil || !ran {
+			t.Fatalf("iteration %d: done ctx on a free lock = %v, ran=%v; want it to acquire (ctx bounds only the wait)", i, err, ran)
+		}
+		if _, present := sessionMutationLockRefs(id); present {
+			t.Fatalf("iteration %d: lock entry survived the acquire", i)
+		}
 	}
 }
 
