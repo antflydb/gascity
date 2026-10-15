@@ -19,14 +19,13 @@ import (
 // The wire strings the busy skips write. The tests pin them as literals so a
 // rename is a deliberate, visible change.
 const (
-	testReasonSessionLockBusy      = TraceReasonCode("session_lock_busy")
-	testReasonRollbackLockBusy     = TraceReasonCode("pending_create_rollback_lock_busy")
-	testReasonRecoveryLockBusy     = TraceReasonCode("pending_create_recovery_lock_busy")
-	testOutcomeSkippedSessionBusy  = "outcome=skipped_session_busy"
-	testLogResidualLockBusy        = "skipped: session mutation lock busy"
-	testGateWaitBound              = 250 * time.Millisecond
-	testPassHangBound              = 10 * time.Second
-	testStartPassElapsedUpperBound = time.Second
+	testReasonSessionLockBusy     = TraceReasonCode("session_lock_busy")
+	testReasonRollbackLockBusy    = TraceReasonCode("pending_create_rollback_lock_busy")
+	testReasonRecoveryLockBusy    = TraceReasonCode("pending_create_recovery_lock_busy")
+	testOutcomeSkippedSessionBusy = "outcome=skipped_session_busy"
+	testLogResidualLockBusy       = "skipped: session mutation lock busy"
+	testGateWaitBound             = 250 * time.Millisecond
+	testPassHangBound             = 10 * time.Second
 )
 
 // holdSessionMutationLock takes session id's mutation lock on its own
@@ -123,7 +122,8 @@ func (e *capacityEnv) traceReasons(site TraceSiteCode, reason TraceReasonCode, o
 	return n
 }
 
-// Kills: a start whose session mutation lock is held by another goroutine
+// Kills: a lock wait that is not exactly the tick bound (none at all, or too
+// long), a start whose session mutation lock is held by another goroutine
 // blocking the tick, or spending a limiter slot, a capacity ticket, a wake
 // failure, a breaker restart or a store write before it gives up.
 func TestExecutePlannedStarts_BusySessionLockSkipsAtTheGate(t *testing.T) {
@@ -135,11 +135,8 @@ func TestExecutePlannedStarts_BusySessionLockSkipsAtTheGate(t *testing.T) {
 
 		res := runStartPass(e.capacityEnv, release, e.s, e.h1, e.h2)
 
-		if !res.finished {
-			t.Fatalf("the pass was still blocked on the held session lock after %v; want it to give up after about %v", res.elapsed, testGateWaitBound)
-		}
-		if res.elapsed >= testStartPassElapsedUpperBound {
-			t.Fatalf("the pass took %v on the bubble clock, want about one lock wait (%v)", res.elapsed, testGateWaitBound)
+		if !res.finished || res.elapsed != testGateWaitBound {
+			t.Fatalf("finished=%v elapsed=%v, want the pass to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
 		}
 		if res.value != 2 {
 			t.Fatalf("woken = %d, want 2: the two sessions behind the busy one start in the same pass", res.value)
@@ -236,8 +233,8 @@ func TestExecutePlannedStarts_LockTakenBetweenGateAndPrepareIsASkippedStart(t *t
 			}
 		}, e.s, e.h1)
 
-		if !res.finished {
-			t.Fatalf("the pass was still blocked on the lock taken after the gate (%v); want prepare's acquire bounded too", res.elapsed)
+		if !res.finished || res.elapsed != testGateWaitBound {
+			t.Fatalf("finished=%v elapsed=%v, want prepare's acquire to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
 		}
 		if hook.release == nil {
 			t.Fatal("the test hook never took the lock: the seam moved")
@@ -292,11 +289,8 @@ func TestReconcileSessionBeads_BusySessionLockDefersPendingCreateRollback(t *tes
 
 		res := runBounded(release, func() int { return e.reconcileTraced(before) })
 
-		if !res.finished {
-			t.Fatalf("the reconcile tick was still blocked on the held session lock after %v; want the rollback to give up after about %v", res.elapsed, testGateWaitBound)
-		}
-		if res.elapsed >= testStartPassElapsedUpperBound {
-			t.Fatalf("the tick took %v on the bubble clock, want about one lock wait (%v)", res.elapsed, testGateWaitBound)
+		if !res.finished || res.elapsed != testGateWaitBound {
+			t.Fatalf("finished=%v elapsed=%v, want the rollback to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
 		}
 		after := e.bead(t, c.info.ID)
 		if !maps.Equal(after.Metadata, before.Metadata) || after.Status != before.Status {
@@ -363,8 +357,8 @@ func TestRecoverRunningPendingCreate_BusySessionLockIsAnUnappliedRecovery(t *tes
 			return outcome{ok, batch}
 		})
 
-		if !res.finished {
-			t.Fatalf("recovery was still blocked on the held session lock after %v; want it to give up after about %v", res.elapsed, testGateWaitBound)
+		if !res.finished || res.elapsed != testGateWaitBound {
+			t.Fatalf("finished=%v elapsed=%v, want recovery to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
 		}
 		if res.value.ok || res.value.batch != nil {
 			t.Fatalf("recovery = (%v, %v), want (false, nil) when the commit could not be attempted", res.value.ok, res.value.batch)
@@ -392,6 +386,143 @@ func TestRecoverRunningPendingCreate_BusySessionLockIsAnUnappliedRecovery(t *tes
 		}
 		if got := mustGetBead(t, store, bead.ID); got.Metadata["pending_create_claim"] != "" {
 			t.Fatalf("pending_create_claim = %q after the retry, want cleared", got.Metadata["pending_create_claim"])
+		}
+	})
+}
+
+// Kills: a lock wait too short to ride out a holder that lets go inside the
+// bound (a pure try-lock): the session loses its start for the pass, and the
+// pass ends at the release instead of at the bound.
+func TestExecutePlannedStarts_HolderReleasingWithinTheBoundStartsTheSessionInThePass(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newBusyStartEnv(t)
+		release := holdSessionMutationLock(t, e.s.info.ID)
+		go func() {
+			time.Sleep(testGateWaitBound / 2)
+			release()
+		}()
+
+		res := runStartPass(e.capacityEnv, func() {}, e.s, e.h1, e.h2)
+
+		if !res.finished || res.elapsed != testGateWaitBound/2 {
+			t.Fatalf("finished=%v elapsed=%v, want the pass to proceed once the holder let go at %v", res.finished, res.elapsed, testGateWaitBound/2)
+		}
+		if res.value != 3 || e.sp.CountCalls("Start", e.s.name()) != 1 {
+			t.Fatalf("woken = %d, Start calls for the once-busy session = %d; want all three started in this pass", res.value, e.sp.CountCalls("Start", e.s.name()))
+		}
+		if strings.Contains(e.log.String(), testOutcomeSkippedSessionBusy) {
+			t.Fatalf("stderr = %q, want no busy skip when the lock came free inside the bound", e.log.String())
+		}
+	})
+}
+
+// Kills: a busy loss at prepare that leaves the capacity ticket held (the next
+// session in the pass is denied the half-open probe the busy session was
+// holding) or that clears the session's in-flight marker, as a failed pre-wake
+// would. Needs a half-open endpoint, because a closed breaker admits whether or
+// not the ticket was released, and a seeded last_woke_at, because an absent one
+// compares equal before and after.
+func TestExecutePlannedStarts_LockTakenBetweenGateAndPrepareReleasesTheProbeAndKeepsTheMarker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newBusyStartEnv(t)
+		const seeded = "2026-10-13T00:00:00Z"
+		if err := e.store.SetMetadata(e.s.info.ID, "last_woke_at", seeded); err != nil {
+			t.Fatal(err)
+		}
+		hook := &takeLockOnFirstGet{Store: e.store, t: t, id: e.s.info.ID}
+		e.store = hook
+		e.openEndpoint(t)
+		e.makeProbeDue()
+		hook.armed = true
+
+		res := runStartPass(e.capacityEnv, func() {
+			if hook.release != nil {
+				hook.release()
+			}
+		}, e.s, e.h1)
+
+		if !res.finished || hook.release == nil {
+			t.Fatalf("finished=%v hookFired=%v", res.finished, hook.release != nil)
+		}
+		if n := e.sp.CountCalls("Start", e.s.name()); n != 0 {
+			t.Fatalf("Start calls for the busy session = %d, want 0", n)
+		}
+		if n := e.sp.CountCalls("Start", "h1"); n != 1 {
+			t.Fatalf("Start calls for h1 = %d, want it to take the probe the busy skip released, in the same pass", n)
+		}
+		if got := e.bead(t, e.s.info.ID).Metadata["last_woke_at"]; got != seeded {
+			t.Fatalf("last_woke_at = %q, want the seeded %q left alone by a busy skip", got, seeded)
+		}
+	})
+}
+
+// Kills: a busy pending-create rollback over a store with an atomic close (the
+// production arm) that does not recognize the busy result, or that still
+// cancels the session's pending waits for a bead it never closed. The plain
+// MemStore the other rollback test uses answers ErrConditionalWriteUnsupported
+// before the lock, so it never reaches this arm.
+func TestReconcileSessionBeads_BusySessionLockOverAtomicCloseStoreLeavesRowAndWaitsUntouched(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newCapacityEnv(t, false, "helper")
+		e.store = beads.NewAtomicCloseMemStore()
+		c := e.session(t, "helper", "", map[string]string{
+			"session_name":              "helper",
+			"session_name_explicit":     "true",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": pendingCreateStartedAtNow(e.clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second))),
+			"template":                  "helper",
+			"state":                     "creating",
+			"generation":                "1",
+			"continuation_epoch":        "1",
+			"instance_token":            "test-token",
+		})
+		wait, err := e.store.Create(beads.Bead{
+			Title:    "wait",
+			Type:     waitBeadType,
+			Labels:   []string{waitBeadLabel, "session:" + c.info.ID},
+			Metadata: map[string]string{"session_id": c.info.ID, "state": waitStatePending},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := e.bead(t, c.info.ID)
+		release := holdSessionMutationLock(t, c.info.ID)
+
+		res := runBounded(release, func() int { return e.reconcileTraced(before) })
+
+		if !res.finished || res.elapsed != testGateWaitBound {
+			t.Fatalf("finished=%v elapsed=%v, want the rollback to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
+		}
+		after := e.bead(t, c.info.ID)
+		if !maps.Equal(after.Metadata, before.Metadata) || after.Status != before.Status {
+			t.Fatalf("a busy rollback changed the store:\nbefore %s %v\nafter  %s %v", before.Status, before.Metadata, after.Status, after.Metadata)
+		}
+		if w := e.bead(t, wait.ID); w.Status == "closed" || w.Metadata["state"] != waitStatePending {
+			t.Fatalf("wait after a busy rollback = %s/%s, want it left open and pending", w.Status, w.Metadata["state"])
+		}
+		log := e.log.String()
+		if !strings.Contains(log, "session mutation lock busy") || strings.Contains(log, "session beads:") || strings.Contains(log, "snapshot superseded") {
+			t.Fatalf("stderr = %q, want the busy line and no store-failure or superseded report", log)
+		}
+		skipped := 0
+		for _, r := range e.records(TraceSiteReconcilerPendingCreate) {
+			if r.ReasonCode == testReasonRollbackLockBusy && r.OutcomeCode == TraceOutcomeSkipped && r.SessionName == "helper" {
+				skipped++
+			}
+		}
+		if skipped != 1 {
+			t.Fatalf("skipped %q trace decisions = %d, want 1", testReasonRollbackLockBusy, skipped)
+		}
+		release()
+
+		if res := runBounded(func() {}, func() int { return e.reconcileTraced(e.bead(t, c.info.ID)) }); !res.finished {
+			t.Fatal("the retry tick did not finish")
+		}
+		if got := e.bead(t, c.info.ID); got.Status != "closed" {
+			t.Fatalf("status after the lock was free = %q, want the rollback applied", got.Status)
+		}
+		if w := e.bead(t, wait.ID); w.Status != "closed" || w.Metadata["state"] != waitStateCanceled {
+			t.Fatalf("wait after the applied rollback = %s/%s, want closed/canceled (positive control)", w.Status, w.Metadata["state"])
 		}
 	})
 }
