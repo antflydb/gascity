@@ -481,6 +481,14 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// `gc ready` does not answer. No-op on a single-store city and for a custom
 	// work_query, where both forms are the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	// A split city's generated query asks `gc ready` several questions in
+	// sequence; ask the runner to answer them all from one ready session
+	// (ready_session.go). The request rides each store's own env — the env the
+	// query runs with — so any runner that ends in shellWorkQueryWithEnv honors
+	// it, whatever env it projects on the way.
+	if hookUsesReadySession(&a, topo) {
+		stores = withReadySessionRequest(stores)
+	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -1134,10 +1142,22 @@ var hookWorkQueryTimeout = 150 * time.Second
 // the child inherits the parent process environment. Times out after a
 // short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
+//
+// When env asks for a ready session (readySessionRequestEnv), the query runs
+// under `gc internal ready-session` instead of a bare sh, so its `gc ready`
+// calls share one opened leg set. The wrapper is this very gc executable, so
+// the subcommand exists whatever gc the query's PATH finds, started under the
+// name "gc"; errors still name the query, not the wrapper.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	if hookClaimEnvValue(env, readySessionRequestEnv) == "1" {
+		if exe, err := os.Executable(); err == nil {
+			cmd = exec.CommandContext(ctx, exe, "internal", "ready-session", "--", "sh", "-c", command)
+			cmd.Args[0] = "gc"
+		}
+	}
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if dir != "" {

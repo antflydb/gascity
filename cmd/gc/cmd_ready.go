@@ -281,39 +281,55 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// Under `gc hook` a split city's work query runs inside one ready session,
+	// which already holds this city's opened legs (ready_session.go).
+	if code, served := readyThroughSession(cityPath, opts, stdout, stderr); served {
+		return code
+	}
+	legs, err := openReadyLegs(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	rigStores, err := readyRigLegStores(cfg, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	legs, err := readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
-	if err != nil {
-		// A refused city: the plan carries the refusal that names the remedy, and
-		// a work-only answer here is a short array indistinguishable from "no
-		// work" for every work query this reader backs.
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	items, err := readyBeadsForOpts(legs, opts)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := writeJSON(stdout, items); err != nil {
+	if err := writeReadyAnswer(stdout, legs, opts); err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
+}
+
+// openReadyLegs loads the city's config and opens every leg `gc ready`
+// federates: the city store, the serving rigs' stores and the relocated
+// binding. It is the whole cost of a `gc ready` before its first read, and a
+// ready session pays it once for every question its work query asks.
+func openReadyLegs(cityPath string, stderr io.Writer) ([]readyLeg, error) {
+	defer beginInvocationConfigMemo()()
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		return nil, err
+	}
+	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil {
+		return nil, err
+	}
+	rigStores, err := readyRigLegStores(cfg, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	// A refused city fails the plan here: the plan carries the refusal that
+	// names the remedy, and a work-only answer would be a short array
+	// indistinguishable from "no work" for every work query this reader backs.
+	return readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
+}
+
+// writeReadyAnswer reads the legs for opts and writes the answer: the JSON
+// array the generated work queries decode.
+func writeReadyAnswer(w io.Writer, legs []readyLeg, opts readyOpts) error {
+	items, err := readyBeadsForOpts(legs, opts)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, items)
 }
 
 // readyBeadsForOpts is the whole reader as a pure function of the legs and the
