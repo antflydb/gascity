@@ -61,19 +61,22 @@ func (s *ctxWaitStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	return n, err
 }
 
+// ctxWaitSessionID is the session whose waits every test in this file seeds and cancels.
+const ctxWaitSessionID = "gc-session"
+
 // seedCtxWaits creates pending open waits and terminal-state open waits for
-// sessionID, each with a distinct nudge ID, and returns the store.
-func seedCtxWaits(t *testing.T, sessionID string, pending, terminal int) *ctxWaitStore {
+// ctxWaitSessionID, each with a distinct nudge ID, and returns the store.
+func seedCtxWaits(t *testing.T, pending, terminal int) *ctxWaitStore {
 	t.Helper()
 	store := &ctxWaitStore{MemStore: beads.NewMemStore()}
 	create := func(i int, state string) {
 		t.Helper()
-		if _, err := store.MemStore.Create(beads.Bead{
+		if _, err := store.Create(beads.Bead{
 			Title:  fmt.Sprintf("wait-%s-%d", state, i),
 			Type:   WaitBeadType,
-			Labels: []string{WaitBeadLabel, "session:" + sessionID},
+			Labels: []string{WaitBeadLabel, "session:" + ctxWaitSessionID},
 			Metadata: map[string]string{
-				"session_id": sessionID,
+				"session_id": ctxWaitSessionID,
 				"state":      state,
 				"nudge_id":   fmt.Sprintf("nudge-%s-%d", state, i),
 			},
@@ -90,10 +93,10 @@ func seedCtxWaits(t *testing.T, sessionID string, pending, terminal int) *ctxWai
 	return store
 }
 
-// countOpenWaits returns how many of sessionID's wait beads are still open.
-func countOpenWaits(t *testing.T, store beads.Store, sessionID string) int {
+// countOpenWaits returns how many of ctxWaitSessionID's wait beads are still open.
+func countOpenWaits(t *testing.T, store beads.Store) int {
 	t.Helper()
-	waits, err := store.List(beads.ListQuery{Label: "session:" + sessionID, IncludeClosed: true})
+	waits, err := store.List(beads.ListQuery{Label: "session:" + ctxWaitSessionID, IncludeClosed: true})
 	if err != nil {
 		t.Fatalf("list waits: %v", err)
 	}
@@ -129,9 +132,9 @@ func equalStrings(a, b []string) bool {
 // CloseAll for the cancellable ids and one for the terminal ids per lookup
 // batch, however many waits the batch holds.
 func TestCancelWaitsBackgroundCtxKeepsOneCloseAllPerIDClass(t *testing.T) {
-	const sessionID = "gc-session"
+	const sessionID = ctxWaitSessionID
 	pending, terminal := 2*waitCancelChunk+1, 3
-	store := seedCtxWaits(t, sessionID, pending, terminal)
+	store := seedCtxWaits(t, pending, terminal)
 
 	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(context.Background(), sessionID, time.Now().UTC())
 	if err != nil {
@@ -155,7 +158,7 @@ func TestCancelWaitsBackgroundCtxKeepsOneCloseAllPerIDClass(t *testing.T) {
 	if got := len(store.closeAllIDs[1]); got != terminal {
 		t.Fatalf("second CloseAll carried %d ids, want all %d terminal waits", got, terminal)
 	}
-	if got := countOpenWaits(t, store, sessionID); got != 0 {
+	if got := countOpenWaits(t, store); got != 0 {
 		t.Fatalf("%d waits still open, want 0", got)
 	}
 }
@@ -165,10 +168,10 @@ func TestCancelWaitsBackgroundCtxKeepsOneCloseAllPerIDClass(t *testing.T) {
 // and cap flag as the Background path, in CloseAll calls of at most
 // waitCancelChunk ids.
 func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
-	const sessionID = "gc-session"
+	const sessionID = ctxWaitSessionID
 	pending, terminal := 2*waitCancelChunk+1, 3
 
-	base := seedCtxWaits(t, sessionID, pending, terminal)
+	base := seedCtxWaits(t, pending, terminal)
 	wantIDs, wantCapped, err := waitStoreOver(base).CancelWaits(context.Background(), sessionID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("Background CancelWaits: %v", err)
@@ -176,7 +179,7 @@ func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	store := seedCtxWaits(t, sessionID, pending, terminal)
+	store := seedCtxWaits(t, pending, terminal)
 	gotIDs, gotCapped, err := waitStoreOver(store).CancelWaits(ctx, sessionID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("cancellable CancelWaits: %v", err)
@@ -200,7 +203,7 @@ func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
 	if closed != pending+terminal {
 		t.Fatalf("CloseAll calls closed %d ids in total, want %d", closed, pending+terminal)
 	}
-	if got := countOpenWaits(t, store, sessionID); got != 0 {
+	if got := countOpenWaits(t, store); got != 0 {
 		t.Fatalf("%d waits still open, want 0", got)
 	}
 }
@@ -209,8 +212,8 @@ func TestCancelWaitsCancellableCtxChunksCloseAll(t *testing.T) {
 // already done lets no store call through, closes nothing and reports the
 // context's error.
 func TestCancelWaitsPreCancelledCtxMakesNoStoreCalls(t *testing.T) {
-	const sessionID = "gc-session"
-	store := seedCtxWaits(t, sessionID, 5, 2)
+	const sessionID = ctxWaitSessionID
+	store := seedCtxWaits(t, 5, 2)
 	callsAfterSeed := store.calls
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -222,7 +225,7 @@ func TestCancelWaitsPreCancelledCtxMakesNoStoreCalls(t *testing.T) {
 	if got := store.calls - callsAfterSeed; got != 0 {
 		t.Fatalf("store calls with a pre-canceled ctx = %d, want 0", got)
 	}
-	if got := countOpenWaits(t, store.MemStore, sessionID); got != 7 {
+	if got := countOpenWaits(t, store.MemStore); got != 7 {
 		t.Fatalf("open waits = %d, want 7 untouched", got)
 	}
 }
@@ -232,9 +235,9 @@ func TestCancelWaitsPreCancelledCtxMakesNoStoreCalls(t *testing.T) {
 // issues no later chunk, wraps the context error, and still returns the nudge
 // ID of every wait it had collected, including those in chunks it did not close.
 func TestCancelWaitsCancelInsideCloseAllLeavesLaterChunksOpen(t *testing.T) {
-	const sessionID = "gc-session"
+	const sessionID = ctxWaitSessionID
 	pending := 2*waitCancelChunk + 1
-	store := seedCtxWaits(t, sessionID, pending, 0)
+	store := seedCtxWaits(t, pending, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store.afterCloseAll = func(ordinal int) {
@@ -248,9 +251,9 @@ func TestCancelWaitsCancelInsideCloseAllLeavesLaterChunksOpen(t *testing.T) {
 		t.Fatalf("err = %v, want errors.Is context.Canceled", err)
 	}
 	if got := len(store.closeAllIDs); got != 2 {
-		t.Fatalf("CloseAll calls = %d, want 2: none after the cancelling call", got)
+		t.Fatalf("CloseAll calls = %d, want 2: none after the canceling call", got)
 	}
-	if got := countOpenWaits(t, store, sessionID); got != pending-2*waitCancelChunk {
+	if got := countOpenWaits(t, store); got != pending-2*waitCancelChunk {
 		t.Fatalf("open waits = %d, want %d left in the unclosed chunk", got, pending-2*waitCancelChunk)
 	}
 	if len(nudgeIDs) != pending {
