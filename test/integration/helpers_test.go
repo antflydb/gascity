@@ -546,3 +546,70 @@ func extractBeadID(t *testing.T, output string) string {
 	}
 	return id
 }
+
+func TestIsBDProxiedPortCollisionInitFailure(t *testing.T) {
+	const (
+		pingOut    = "Error: failed to open uow provider: uow: ping db: dial tcp 127.0.0.1:42021: connect: connection refused"
+		timeoutOut = "Error: failed to open uow provider: uow: get proxy endpoint: timeout waiting for proxy to become ready on its OS-assigned port"
+		portLine   = "Starting server with Config HP=\"127.0.0.1:37773\"\nPort 37773 already in use.\nError: database server exited\n"
+	)
+	cases := []struct {
+		name      string
+		out       string
+		serverLog string // empty means no server.log at all
+		want      bool
+	}{
+		{name: "ping failure with dolt port line", out: pingOut, serverLog: portLine, want: true},
+		{name: "proxy timeout with dolt port line", out: timeoutOut, serverLog: portLine, want: true},
+		{name: "ping failure without dolt port line", out: pingOut, serverLog: "Server closing listener\n", want: false},
+		{name: "ping failure without server.log", out: pingOut, want: false},
+		{name: "unrelated failure with dolt port line", out: "Error: database not found", serverLog: portLine, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if tc.serverLog != "" {
+				doltDir := filepath.Join(cityDir, ".beads", "dolt")
+				if err := os.MkdirAll(doltDir, 0o755); err != nil {
+					t.Fatalf("mkdir .beads/dolt: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(doltDir, "server.log"), []byte(tc.serverLog), 0o644); err != nil {
+					t.Fatalf("write server.log: %v", err)
+				}
+			}
+			if got := isBDProxiedPortCollisionInitFailure(cityDir, tc.out); got != tc.want {
+				t.Errorf("isBDProxiedPortCollisionInitFailure() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResetBDProxiedScopeRemovesOnlyBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	for _, dir := range []string{filepath.Join(cityDir, ".beads", "dolt"), filepath.Join(cityDir, ".gc")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join(cityDir, ".beads", "dolt", "config.yaml"): "listener:\n    port: 37773\n",
+		filepath.Join(cityDir, ".gc", "intent.json"):            "{}",
+		filepath.Join(cityDir, "city.toml"):                     "[workspace]\n",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	if err := resetBDProxiedScope(cityDir); err != nil {
+		t.Fatalf("resetBDProxiedScope() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf(".beads still present after reset (stat err = %v)", err)
+	}
+	for _, path := range []string{filepath.Join(cityDir, ".gc", "intent.json"), filepath.Join(cityDir, "city.toml")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s removed by reset: %v", path, err)
+		}
+	}
+}
