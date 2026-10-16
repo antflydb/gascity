@@ -63,6 +63,28 @@ func (s *slowCleanupStore) wait() {
 	}
 }
 
+// cleanupErrorStore injects an ordinary error in one cleanup store operation.
+type cleanupErrorStore struct {
+	beads.Store
+	closeAllErr error
+	listLabel   string
+	listErr     error
+}
+
+func (s *cleanupErrorStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if s.closeAllErr != nil {
+		return 0, s.closeAllErr
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+func (s *cleanupErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.listErr != nil && query.Label == s.listLabel {
+		return nil, s.listErr
+	}
+	return s.Store.List(query)
+}
+
 // seedRetiredSessionCleanupState gives a session bead from
 // setupSessionWithExtmsgMembership extra participants (each in the same group,
 // so each has its own removal) and waitCount pending waits, and returns the
@@ -243,6 +265,78 @@ func TestCancelStateAssignedToRetiredSessionBeadHealthyStoreIsNotCutOff(t *testi
 		}
 		if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
 			t.Fatalf("open memberships = %d, want 0", got)
+		}
+	})
+}
+
+// TestCancelStateAssignedToRetiredSessionBeadOrdinaryWaitErrorIsNotCutOff pins
+// that canceling the waits context after an ordinary CloseAll error does not
+// reclassify that error as a deadline cut-off.
+func TestCancelStateAssignedToRetiredSessionBeadOrdinaryWaitErrorIsNotCutOff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		sessionBead, _, _ := seedRetiredSessionCleanupState(t, store, 0, 1)
+		storeErr := fmt.Errorf("wait store unavailable")
+		failing := &cleanupErrorStore{Store: store, closeAllErr: storeErr}
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(failing, sessionBead.ID, time.Now(), &stderr)
+
+		log := stderr.String()
+		want := fmt.Sprintf("canceling waits for retired session %s: %v", sessionBead.ID, storeErr)
+		if !strings.Contains(log, want) || strings.Contains(log, "cut off") {
+			t.Fatalf("stderr = %q, want ordinary wait error %q and no cut-off line", log, want)
+		}
+	})
+}
+
+// TestCancelStateAssignedToRetiredSessionBeadOrdinaryParticipantErrorIsNotCutOff
+// pins that an ordinary residual-participant listing error keeps the external
+// message bindings error line while the extmsg context is still live.
+func TestCancelStateAssignedToRetiredSessionBeadOrdinaryParticipantErrorIsNotCutOff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		sessionBead, _, _ := seedRetiredSessionCleanupState(t, store, 0, 1)
+		storeErr := fmt.Errorf("participant store unavailable")
+		failing := &cleanupErrorStore{
+			Store:     store,
+			listLabel: "extmsg:group:participant:session:v1:" + sessionBead.ID,
+			listErr:   storeErr,
+		}
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(failing, sessionBead.ID, time.Now(), &stderr)
+
+		log := stderr.String()
+		want := fmt.Sprintf("closing external message bindings for retired session %s:", sessionBead.ID)
+		if !strings.Contains(log, want) || !strings.Contains(log, storeErr.Error()) || strings.Contains(log, "cut off") {
+			t.Fatalf("stderr = %q, want ordinary bindings error %q with %q and no cut-off line", log, want, storeErr)
+		}
+	})
+}
+
+// TestCancelStateAssignedToRetiredSessionBeadSuccessfulWaitOvershootIsNotCutOff
+// pins that a final CloseAll which succeeds after its deadline closes every
+// wait and logs no cut-off, since no further store call was left to truncate.
+func TestCancelStateAssignedToRetiredSessionBeadSuccessfulWaitOvershootIsNotCutOff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const waitCount = 3
+		store := beads.NewMemStore()
+		sessionBead, _, _ := seedRetiredSessionCleanupState(t, store, 0, waitCount)
+		slow := &slowCleanupStore{Store: store, closeAllPerID: 4 * time.Second}
+
+		var stderr bytes.Buffer
+		start := time.Now()
+		cancelStateAssignedToRetiredSessionBead(slow, sessionBead.ID, start, &stderr)
+
+		if elapsed := time.Since(start); elapsed <= retiredSessionCleanupLegBudget {
+			t.Fatalf("cleanup took %s of store time, want a successful CloseAll past its %s budget", elapsed, retiredSessionCleanupLegBudget)
+		}
+		if log := stderr.String(); log != "" {
+			t.Fatalf("stderr = %q, want no error or cut-off line after successful wait cleanup", log)
+		}
+		if closed, open := countClosedAndOpenWaits(t, store, sessionBead.ID); closed != waitCount || open != 0 {
+			t.Fatalf("waits closed/open = %d/%d, want %d/0", closed, open, waitCount)
 		}
 	})
 }
