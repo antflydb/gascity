@@ -1,6 +1,7 @@
 package t3bridge
 
 import (
+	"context"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -22,6 +23,8 @@ var (
 	_ runtime.TurnInterruptCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.KeyedNudgeProvider              = (*seamBackedProvider)(nil)
 	_ runtime.SessionBindingProvider          = (*seamBackedProvider)(nil)
+	_ runtime.TurnFenceProvider               = (*seamBackedProvider)(nil)
+	_ runtime.TurnObservationProvider         = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -79,4 +82,31 @@ func (s *seamBackedProvider) NudgeKeyed(name string, content []runtime.ContentBl
 // SessionBinding reports the T3 thread and project bound to name.
 func (s *seamBackedProvider) SessionBinding(name string) (runtime.SessionBinding, error) {
 	return s.raw.SessionBinding(name)
+}
+
+// ObserveTurn passes through to the raw bridge.
+func (s *seamBackedProvider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	return s.raw.ObserveTurn(ctx, name)
+}
+
+// InterruptTurn passes through to the raw bridge.
+func (s *seamBackedProvider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	return s.raw.InterruptTurn(ctx, name, turnID)
+}
+
+// WaitTurnEnded passes through to the raw bridge.
+func (s *seamBackedProvider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	return s.raw.WaitTurnEnded(ctx, name, turnID, timeout)
+}
+
+// TurnCapabilities implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnCapabilities(name string) runtime.TurnCapabilities {
+	return s.raw.TurnCapabilities(name)
+}
+
+// TurnHistory implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnHistory(ctx context.Context, name string) (runtime.TurnHistory, error) {
+	return s.raw.TurnHistory(ctx, name)
 }
