@@ -980,6 +980,23 @@ func TestDefaultBranchCtx_DeadlineReturnsErrorNotMain(t *testing.T) {
 	}
 }
 
+// runCtx itself appends ctx.Err() to a failed run: a git killed by a missed
+// deadline surfaces as errors.Is(err, context.DeadlineExceeded), not only as
+// the exec "signal: killed" exit error.
+func TestRunCtx_MissedDeadlineWrapsContextDeadlineExceeded(t *testing.T) {
+	installBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	out, err := New(t.TempDir()).runCtx(ctx, "status")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCtx err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if out != "" {
+		t.Fatalf("runCtx out = %q, want empty on a failed run", out)
+	}
+}
+
 // A ctx that is already done spawns no git process at all.
 func TestDefaultBranchCtx_DoneContextSpawnsNothing(t *testing.T) {
 	logPath := installBlockingGit(t)

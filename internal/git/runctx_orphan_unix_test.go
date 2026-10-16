@@ -4,6 +4,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -99,8 +100,8 @@ func TestRunCtx_DeadlineBoundsWaitForPipeHoldingOrphanElapsed(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("runCtx = nil error after cancel, want the ctx error")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runCtx err = %v, want errors.Is(context.Canceled)", err)
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatalf("runCtx still waiting %s after cancel: a deadline-carrying ctx must bound the wait for a pipe holder", time.Since(start))
