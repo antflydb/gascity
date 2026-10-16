@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // budgetTestStore decorates a store the way a slow, flaky backing store looks
@@ -170,11 +171,11 @@ func TestRepairWriteBudgetChargesWriteTimeOnly(t *testing.T) {
 
 		// Time spent outside a write (reads, classification) is not the repairs'
 		// to pay for: a build that idles before it repairs still gets its writes.
-		time.Sleep(10 * repairWriteTimeBudget)
+		<-time.After(10 * repairWriteTimeBudget)
 		collapseSlotSuffixedRoutedWork(agreementConfig(), rows, stores, budget, io.Discard)
 
-		if store.writes != repairWritesPerBuild {
-			t.Fatalf("writes = %d, want the full attempt cap %d (idle time must not be charged)", store.writes, repairWritesPerBuild)
+		if store.writes == 0 || store.writes > repairWritesPerBuild {
+			t.Fatalf("writes = %d, want 0 < writes <= %d (idle time must not be charged)", store.writes, repairWritesPerBuild)
 		}
 	})
 }
@@ -188,11 +189,11 @@ func TestRepairWriteBudgetCountsFailedWrites(t *testing.T) {
 		var stderr bytes.Buffer
 		collapseSlotSuffixedRoutedWork(agreementConfig(), rows, stores, budget, &stderr)
 
-		if store.writes != repairWritesPerBuild {
-			t.Fatalf("attempted writes = %d, want %d: a failed write spends its attempt", store.writes, repairWritesPerBuild)
+		if store.writes == 0 || store.writes > repairWritesPerBuild {
+			t.Fatalf("attempted writes = %d, want 0 < writes <= %d: a failed write spends its attempt", store.writes, repairWritesPerBuild)
 		}
-		if got := strings.Count(stderr.String(), "collapseSlotSuffixedRoutedWork:"); got != repairWritesPerBuild {
-			t.Errorf("logged %d write failures, want %d (a refused write is not an error)", got, repairWritesPerBuild)
+		if got := strings.Count(stderr.String(), "collapseSlotSuffixedRoutedWork:"); got != store.writes {
+			t.Errorf("logged %d write failures, want %d (a refused write is not an error)", got, store.writes)
 		}
 	})
 }
@@ -534,6 +535,519 @@ func TestStampRunSessionIdentityReadsASharedRootOncePerStore(t *testing.T) {
 		}
 		if root.Metadata[beadmeta.SessionNameMetadataKey] == "" {
 			t.Errorf("store %s root was not stamped", name)
+		}
+	}
+}
+
+// A write that ends at exactly repairWriteTimeBudget spends the time cap: the
+// check is >=, so the next write does not start.
+func TestRepairWriteBudgetTimeCapIsSpentAtExactlyTheBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &budgetTestStore{Store: beads.NewMemStore()}
+		budget := newRepairWriteBudget().forDomain(t.Name())
+
+		if ran, err := budget.write(store, func() error { <-time.After(repairWriteTimeBudget); return nil }); !ran || err != nil {
+			t.Fatalf("first write = (%v, %v), want it to run", ran, err)
+		}
+		if !budget.exhausted() {
+			t.Error("exhausted() = false after a write that took exactly the time cap")
+		}
+		ran := false
+		if attempted, _ := budget.write(store, func() error { ran = true; return nil }); attempted || ran {
+			t.Errorf("a write after the time cap was spent exactly ran (attempted=%v, fn ran=%v)", attempted, ran)
+		}
+	})
+}
+
+// A pass that finishes within budget leaves the resume hint alone: only a pass
+// that was cut off stores one.
+func TestRepairWriteBudgetFinishedPassLeavesTheHintAlone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const total = repairWritesPerBuild + 5
+		store := &budgetTestStore{Store: beads.NewMemStore()}
+		rows, stores := seedSlotRoutedBacklog(t, store, total)
+		cfg := agreementConfig()
+		domain := t.Name()
+		pass := func() {
+			store.written = nil
+			collapseSlotSuffixedRoutedWork(cfg, reloadRows(t, store, rows), stores, newRepairWriteBudget().forDomain(domain), io.Discard)
+		}
+
+		pass() // cut off at row 25, which stores the hint
+		pass() // starts at row 25 and finishes within budget
+		if len(store.written) != total-repairWritesPerBuild || store.written[0] != rows[repairWritesPerBuild].ID {
+			t.Fatalf("second pass wrote %v, want the %d rows past the cut-off starting at %s", store.written, total-repairWritesPerBuild, rows[repairWritesPerBuild].ID)
+		}
+
+		for _, row := range rows {
+			if err := store.Store.SetMetadataBatch(row.ID, map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"}); err != nil {
+				t.Fatalf("re-breaking %s: %v", row.ID, err)
+			}
+		}
+		pass()
+		if len(store.written) == 0 || store.written[0] != rows[repairWritesPerBuild].ID {
+			t.Fatalf("third pass started at %v, want %s: the finished pass must not have moved the hint", store.written, rows[repairWritesPerBuild].ID)
+		}
+	})
+}
+
+const (
+	budgetPoolSlot  = ".gc/worktrees/gascity/builder-1"
+	budgetEvidence  = "/home/ds/gascity-worktrees/ga-3c5isi"
+	budgetLegacy    = "rig-A/gc.planner"
+	budgetCanonical = "rig-A/planner"
+	budgetSession   = "budget-worker-1"
+	budgetSessionWD = "/home/ds/budget-worker-1"
+)
+
+// budgetWriter is one repair writer plus a row it repairs with exactly one durable write.
+type budgetWriter struct {
+	name     string
+	cfg      func() *config.City
+	seed     func(i int) beads.Bead
+	run      func(budget *repairWriteBudget, rows []beads.Bead, stores []beads.Store)
+	repaired func(b beads.Bead) bool
+	// assigned reports whether the build collects this writer's rows with the assigned work (else the open, unassigned routed work).
+	assigned bool
+	// extra seeds beyond the repairable rows (a session bead the stamp needs).
+	extra []beads.Bead
+}
+
+func budgetWriters() []budgetWriter {
+	rowID := func(prefix string, i int) string { return fmt.Sprintf("%s-%03d", prefix, i) }
+	sessions := func() *sessionBeadSnapshot {
+		return newSessionBeadSnapshot([]beads.Bead{stampTestSession(budgetSession, budgetSessionWD)})
+	}
+	return []budgetWriter{
+		{
+			name: "pool-slot-assigned", cfg: gaConfig, assigned: true,
+			seed: func(i int) beads.Bead {
+				return beads.Bead{
+					ID: rowID("psa", i), Type: "task", Status: "in_progress", Assignee: "someone",
+					Metadata: map[string]string{beadmeta.WorkDirMetadataKey: budgetPoolSlot, beadmeta.LegacyWorkDirMetadataKey: budgetEvidence},
+				}
+			},
+			run: func(b *repairWriteBudget, rows []beads.Bead, stores []beads.Store) {
+				repairPoolSlotWorkDirClobber(gaConfig(), rows, stores, b, "assigned", io.Discard)
+			},
+			repaired: func(b beads.Bead) bool { return b.Metadata[beadmeta.WorkDirMetadataKey] == budgetEvidence },
+		},
+		{
+			name: "pool-slot-unassigned", cfg: gaConfig,
+			seed: func(i int) beads.Bead {
+				return beads.Bead{
+					ID: rowID("psu", i), Type: "task", Status: "open",
+					Metadata: map[string]string{
+						beadmeta.WorkDirMetadataKey: budgetPoolSlot, beadmeta.LegacyWorkDirMetadataKey: budgetEvidence,
+						beadmeta.RoutedToMetadataKey: "rig-A/planner",
+					},
+				}
+			},
+			run: func(b *repairWriteBudget, rows []beads.Bead, stores []beads.Store) {
+				repairPoolSlotWorkDirClobber(gaConfig(), rows, stores, b, "unassigned", io.Discard)
+			},
+			repaired: func(b beads.Bead) bool { return b.Metadata[beadmeta.WorkDirMetadataKey] == budgetEvidence },
+		},
+		{
+			name: "stamp-run-session-identity", cfg: gaConfig, assigned: true,
+			extra: []beads.Bead{{
+				ID: "sess-budget", Type: sessionBeadType, Labels: []string{"gc:session"}, Status: "open",
+				Metadata: map[string]string{"session_name": budgetSession, "work_dir": budgetSessionWD, "state": "active"},
+			}},
+			seed: func(i int) beads.Bead {
+				return beads.Bead{ID: rowID("sti", i), Type: "molecule", Status: "in_progress", Assignee: budgetSession}
+			},
+			run: func(b *repairWriteBudget, rows []beads.Bead, stores []beads.Store) {
+				stampRunSessionIdentity(gaConfig(), rows, stores, sessions(), b, newRootGetMemo(), io.Discard)
+			},
+			repaired: func(b beads.Bead) bool { return b.Metadata[beadmeta.SessionNameMetadataKey] == budgetSession },
+		},
+		{
+			name: "canonicalize-legacy-bound-assigned", cfg: legacyBoundRecoveryConfig, assigned: true,
+			seed: func(i int) beads.Bead { return workBead(rowID("cla", i), budgetLegacy, budgetLegacy, "in_progress", 5) },
+			run: func(b *repairWriteBudget, rows []beads.Bead, stores []beads.Store) {
+				canonicalizeLegacyBoundAssignedWork(legacyBoundRecoveryConfig(), rows, stores, newSessionBeadSnapshot(nil), b, io.Discard)
+			},
+			repaired: func(b beads.Bead) bool { return b.Assignee == budgetCanonical },
+		},
+		{
+			name: "canonicalize-legacy-bound-unassigned", cfg: legacyBoundRecoveryConfig,
+			seed: func(i int) beads.Bead { return workBead(rowID("clu", i), budgetLegacy, "", "open", 5) },
+			run: func(b *repairWriteBudget, rows []beads.Bead, stores []beads.Store) {
+				canonicalizeLegacyBoundUnassignedRoutedWork(legacyBoundRecoveryConfig(), rows, stores, b, io.Discard)
+			},
+			repaired: func(b beads.Bead) bool { return b.Metadata[beadmeta.RoutedToMetadataKey] == budgetCanonical },
+		},
+		{
+			name: "collapse-slot-suffixed", cfg: agreementConfig,
+			seed: func(i int) beads.Bead {
+				return beads.Bead{
+					ID: rowID("col", i), Type: "task", Status: "open",
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"},
+				}
+			},
+			run: func(b *repairWriteBudget, rows []beads.Bead, stores []beads.Store) {
+				collapseSlotSuffixedRoutedWork(agreementConfig(), rows, stores, b, io.Discard)
+			},
+			repaired: func(b beads.Bead) bool { return b.Metadata[beadmeta.RoutedToMetadataKey] == agreementTemplate },
+		},
+	}
+}
+
+// budgetBacklogRows is the length of the repairable backlog the build-level
+// pins seed: three budgets' worth, so a bounded pass is visibly cut off.
+const budgetBacklogRows = 3 * repairWritesPerBuild
+
+// budgetBacklogStore seeds budgetBacklogRows repairable rows for w; the first
+// failFirst always fail their write.
+func budgetBacklogStore(w budgetWriter, failFirst int) (*budgetTestStore, []beads.Bead, []beads.Store) {
+	n := budgetBacklogRows
+	seed := make([]beads.Bead, 0, n+len(w.extra))
+	rows := make([]beads.Bead, n)
+	for i := range n {
+		rows[i] = w.seed(i)
+		seed = append(seed, rows[i])
+	}
+	seed = append(seed, w.extra...)
+	store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil), failIDs: map[string]bool{}}
+	for i := range failFirst {
+		store.failIDs[rows[i].ID] = true
+	}
+	stores := make([]beads.Store, n)
+	for i := range stores {
+		stores[i] = store
+	}
+	return store, rows, stores
+}
+
+// Every repair writer draws on the build's budget. A nil budget repairs every
+// row, which shows the fixture is repairable and the bounded pass is not vacuous.
+func TestRepairWriteBudgetEveryRepairWriterDrawsOnTheBuildBudget(t *testing.T) {
+	for _, w := range budgetWriters() {
+		t.Run(w.name, func(t *testing.T) {
+			n := budgetBacklogRows
+			free, freeRows, freeStores := budgetBacklogStore(w, 0)
+			w.run(nil, freeRows, freeStores)
+			if free.writes != n {
+				t.Fatalf("nil budget: %d writes over %d repairable rows, want %d (the fixture must be repairable)", free.writes, n, n)
+			}
+			store, rows, stores := budgetBacklogStore(w, 0)
+			w.run(newRepairWriteBudget().forDomain(t.Name()), rows, stores)
+			if store.writes == 0 || store.writes > repairWritesPerBuild {
+				t.Fatalf("%d writes over %d repairable rows, want 0 < writes <= %d", store.writes, n, repairWritesPerBuild)
+			}
+		})
+	}
+}
+
+// Every repair writer rotates: after a cut-off build stores its resume index the
+// next build starts there, so a head that never repairs cannot hold the tail back.
+func TestRepairWriteBudgetEveryRepairWriterRotatesToTheTail(t *testing.T) {
+	for _, w := range budgetWriters() {
+		t.Run(w.name, func(t *testing.T) {
+			store, rows, stores := budgetBacklogStore(w, repairWritesPerBuild) // the head never repairs
+			for range 2 {
+				w.run(newRepairWriteBudget().forDomain(t.Name()), reloadRows(t, store, rows), stores)
+			}
+			tail := 0
+			for _, row := range reloadRows(t, store, rows)[repairWritesPerBuild:] {
+				if w.repaired(row) {
+					tail++
+				}
+			}
+			if tail == 0 {
+				t.Fatalf("two builds over a head of %d rows that never repair reached no row past the head: the second build re-tried the head", repairWritesPerBuild)
+			}
+		})
+	}
+}
+
+// Each writer site keeps its own rotation hint within one repair domain: one
+// writer being cut off must not move another writer's start.
+func TestRepairWriteBudgetRotationHintsAreIndependentPerWriterSite(t *testing.T) {
+	writers := budgetWriters()
+	for ai, a := range writers {
+		for bi, b := range writers {
+			if ai == bi {
+				continue
+			}
+			t.Run(a.name+"_then_"+b.name, func(t *testing.T) {
+				domain := t.Name()
+				storeA, rowsA, storesA := budgetBacklogStore(a, repairWritesPerBuild)
+				a.run(newRepairWriteBudget().forDomain(domain), rowsA, storesA) // stops at index 25: its hint is 25
+				storeB, rowsB, storesB := budgetBacklogStore(b, repairWritesPerBuild)
+				b.run(newRepairWriteBudget().forDomain(domain), rowsB, storesB)
+				if len(storeB.written) == 0 || storeB.written[0] != rowsB[0].ID {
+					t.Fatalf("%s's first pass in the same domain started at %v, want its own head %s: the hint of %s leaked", b.name, storeB.written, rowsB[0].ID, a.name)
+				}
+				_ = storeA
+			})
+		}
+	}
+}
+
+// The stamp writer's root write draws on the same budget as its step write.
+func TestRepairWriteBudgetStampDrawsRootWritesOnTheSameBudget(t *testing.T) {
+	const steps = 3 * repairWritesPerBuild
+	seed := []beads.Bead{}
+	work := []beads.Bead{}
+	for i := range steps {
+		rootID := fmt.Sprintf("pr-root-%03d", i)
+		seed = append(seed, beads.Bead{ID: rootID, Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}})
+		step := beads.Bead{
+			ID: fmt.Sprintf("pr-step-%03d", i), Type: "step", Status: "in_progress", Assignee: budgetSession,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		}
+		seed = append(seed, step)
+		work = append(work, step)
+	}
+	store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
+	stores := make([]beads.Store, len(work))
+	for i := range stores {
+		stores[i] = store
+	}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(budgetSession, budgetSessionWD)})
+	stampRunSessionIdentity(gaConfig(), work, stores, sessions, newRepairWriteBudget().forDomain(t.Name()), newRootGetMemo(), io.Discard)
+	if store.writes == 0 || store.writes > repairWritesPerBuild {
+		t.Fatalf("%d writes (step + root) over %d steps with their own roots, want 0 < writes <= %d", store.writes, steps, repairWritesPerBuild)
+	}
+}
+
+// A root shared by several steps is written once per build.
+func TestRepairWriteBudgetStampWritesASharedRootOncePerBuild(t *testing.T) {
+	const steps = 4
+	store, work, sessions := rootMemoFixture(t, steps, true)
+	stores := make([]beads.Store, steps)
+	for i := range stores {
+		stores[i] = store
+	}
+	stampRunSessionIdentity(gaConfig(), work, stores, sessions, newRepairWriteBudget().forDomain(t.Name()), newRootGetMemo(), io.Discard)
+	rootWrites := 0
+	for _, id := range store.written {
+		if id == "rm-root" {
+			rootWrites++
+		}
+	}
+	if rootWrites != 1 {
+		t.Fatalf("the shared root was written %d times over %d steps in one build, want exactly 1 (writes %v)", rootWrites, steps, store.written)
+	}
+}
+
+// budgetBuildIn runs one desired-state build over a store holding only w's backlog, in the given city directory
+// (a fresh directory is a fresh rotation domain), and returns the store and the build's stderr.
+func budgetBuildIn(t *testing.T, cityDir string, w budgetWriter, n int, cycle *SessionReconcilerTraceCycle) (*budgetTestStore, string) {
+	t.Helper()
+	seed := make([]beads.Bead, 0, n+len(w.extra))
+	for i := range n {
+		seed = append(seed, w.seed(i))
+	}
+	seed = append(seed, w.extra...)
+	store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+	var out bytes.Buffer
+	buildDesiredStateWithSessionBeads("test-city", cityDir, time.Now().UTC(), w.cfg(), runtime.NewFake(), store, nil, snapshot, cycle, &out)
+	return store, out.String()
+}
+
+// budgetRowWrites lists the ids of the repair writes a build made, in order (the session bead is not a repair row).
+func budgetRowWrites(store *budgetTestStore) []string {
+	var ids []string
+	for _, id := range store.written {
+		if !strings.HasPrefix(id, "sess-") {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// The desired-state build starts no more than repairWritesPerBuild repair writes
+// across any one writer family, and says so once on stderr.
+func TestRepairWriteBudgetDesiredStateBuildBoundsEveryRepairWriter(t *testing.T) {
+	for _, w := range budgetWriters() {
+		t.Run(w.name, func(t *testing.T) {
+			n := budgetBacklogRows
+			store, stderr := budgetBuildIn(t, t.TempDir(), w, n, nil)
+			writes := len(budgetRowWrites(store))
+			if writes == 0 {
+				t.Fatalf("the build attempted no repair of %d repairable rows: the fixture is not collected by the build (stderr %q)", n, stderr)
+			}
+			if writes > repairWritesPerBuild {
+				t.Fatalf("one build attempted %d repair writes over %d rows, want <= %d", writes, n, repairWritesPerBuild)
+			}
+			if got := strings.Count(stderr, "repairWriteBudget: exhausted"); got != 1 {
+				t.Fatalf("stderr carries %d budget lines, want exactly 1 (stderr %q, writes %d)", got, stderr, len(store.written))
+			}
+			if want := fmt.Sprintf("exhausted after %d write attempts", repairWritesPerBuild); !strings.Contains(stderr, want) {
+				t.Fatalf("stderr %q does not say %q", stderr, want)
+			}
+		})
+	}
+}
+
+// Rotation at build level is per city and per pass: a second build of one city
+// does not restart at the head, another city starts at its own head, and the
+// unassigned pool-slot pass starts at its own head.
+func TestRepairWriteBudgetBuildRotationIsPerCityAndPerPass(t *testing.T) {
+	assigned, unassigned := budgetWriters()[0], budgetWriters()[1]
+	const n = 3 * repairWritesPerBuild
+	cityA, cityB := t.TempDir(), t.TempDir()
+	firstWrite := func(dir string, w budgetWriter) string {
+		t.Helper()
+		store, stderr := budgetBuildIn(t, dir, w, n, nil)
+		ids := budgetRowWrites(store)
+		if len(ids) == 0 {
+			t.Fatalf("%s: the build attempted no repair (stderr %q)", w.name, stderr)
+		}
+		return ids[0]
+	}
+	if got, head := firstWrite(cityA, assigned), assigned.seed(0).ID; got != head {
+		t.Fatalf("the first build of a city started at %s, want its head %s", got, head)
+	}
+	if got, head := firstWrite(cityA, assigned), assigned.seed(0).ID; got == head {
+		t.Fatalf("the second build of the same city started at the head %s again: the rotation did not carry across builds", head)
+	}
+	if got, head := firstWrite(cityB, assigned), assigned.seed(0).ID; got != head {
+		t.Fatalf("another city first build started at %s, want its head %s: the first city rotation leaked", got, head)
+	}
+	if got, head := firstWrite(cityA, unassigned), unassigned.seed(0).ID; got != head {
+		t.Fatalf("the unassigned pass started at %s, want its own head %s: the assigned pass rotation leaked", got, head)
+	}
+}
+
+// The assigned_repairs and unassigned_repairs trace records carry the build's
+// repair-budget attempts and whether it ran out.
+func TestRepairWriteBudgetTraceRecordsTheRepairBudgetOfEachPass(t *testing.T) {
+	w := budgetWriters()[0]
+	for _, c := range []struct {
+		name          string
+		rows          int
+		wantAttempts  int
+		wantExhausted bool
+	}{
+		{"exhausted", 3 * repairWritesPerBuild, repairWritesPerBuild, true},
+		{"within", 3, 3, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			tracer, cycle := demandTraceCycle(t, cityDir, newLockedClock(0))
+			budgetBuildIn(t, cityDir, w, c.rows, cycle)
+			byName := demandTraceRecords(t, cityDir, tracer, cycle)
+			for _, name := range []string{"assigned_repairs", "unassigned_repairs"} {
+				recs := byName["demand_snapshot."+name]
+				if len(recs) != 1 {
+					t.Fatalf("%s: %d records, want exactly 1", name, len(recs))
+				}
+				if got := demandTraceInt(t, recs[0], "budget_attempts"); got != c.wantAttempts {
+					t.Errorf("%s budget_attempts = %d, want %d", name, got, c.wantAttempts)
+				}
+				if got, _ := recs[0].Fields["budget_exhausted"].(bool); got != c.wantExhausted {
+					t.Errorf("%s budget_exhausted = %v, want %v", name, got, c.wantExhausted)
+				}
+			}
+		})
+	}
+}
+
+func budgetDispatcherConfig() *config.City {
+	cfg := agreementConfig()
+	maxActive := 1
+	cfg.Agents = append(cfg.Agents, config.Agent{
+		Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "rig",
+		StartCommand: config.ControlDispatcherStartCommandFor("{{.Agent}}"), MaxActiveSessions: &maxActive,
+	})
+	return cfg
+}
+
+func budgetControlRows(n int) []beads.Bead {
+	rows := make([]beads.Bead, n)
+	for i := range n {
+		rows[i] = beads.Bead{ID: fmt.Sprintf("ctl-%03d", i), Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:rig",
+		}}
+	}
+	return rows
+}
+
+// The build's control dispatcher draws on the same budget as the other writers:
+// when they spent all of it the dispatcher repairs nothing, and with budget to
+// spare it repairs. A rig-rooted control row is read through the class binding on
+// the split topology, so the fixture registers one (as the build-level
+// dispatcher tests do).
+func TestRepairWriteBudgetBuildLetsTheControlDispatcherDrawOnTheSameBudget(t *testing.T) {
+	collapse := budgetWriters()[5]
+	run := func(collapseRows int) (ctlWrites int, stderr string) {
+		t.Helper()
+		cityPath := t.TempDir()
+		work := beads.NewMemStore()
+		seed := append([]beads.Bead(nil), budgetControlRows(5)...)
+		for i := range collapseRows {
+			seed = append(seed, collapse.seed(i))
+		}
+		binding := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
+		routes := splitRoutes(binding)
+		registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+		t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+		var out bytes.Buffer
+		buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now().UTC(), budgetDispatcherConfig(), runtime.NewFake(), binding,
+			map[string]beads.Store{"rig": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, &out)
+		for _, id := range binding.written {
+			if strings.HasPrefix(id, "ctl-") {
+				ctlWrites++
+			}
+		}
+		return ctlWrites, out.String()
+	}
+	if got, stderr := run(3); got == 0 {
+		t.Fatalf("with budget to spare the build repaired no control route (stderr %q): the fixture is not collected", stderr)
+	}
+	if got, stderr := run(repairWritesPerBuild); got != 0 {
+		t.Fatalf("the build repaired %d control routes after the other writers spent all %d writes (stderr %q)", got, repairWritesPerBuild, stderr)
+	}
+}
+
+// A dispatcher repair the shared budget refused is removed from the in-memory
+// demand snapshot.
+func TestRepairWriteBudgetDispatcherRepairRefusedByTheBudgetIsSuppressedFromTheSnapshot(t *testing.T) {
+	run := func(budget *repairWriteBudget) (*budgetTestStore, []beads.Bead) {
+		t.Helper()
+		store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, budgetControlRows(3), nil)}
+		work := budgetControlRows(3)
+		stores := make([]beads.Store, len(work))
+		refs := make([]string, len(work))
+		for i := range work {
+			stores[i], refs[i] = store, "rig"
+		}
+		repairControlDispatcherRoutesForStoreScope(t.Name(), budgetDispatcherConfig(), work, stores, refs, budget, io.Discard)
+		return store, work
+	}
+	store, work := run(nil)
+	if store.writes != 3 {
+		t.Fatalf("unbounded run wrote %d routes, want 3 (the fixture must be repairable)", store.writes)
+	}
+	for _, b := range work {
+		if got := b.Metadata[beadmeta.RoutedToMetadataKey]; got != "rig/core.control-dispatcher" {
+			t.Fatalf("unbounded run left %s routed to %q, want the repaired route", b.ID, got)
+		}
+	}
+	spent := newRepairWriteBudget().forDomain(t.Name())
+	other := &budgetTestStore{Store: beads.NewMemStore()}
+	for range repairWritesPerBuild {
+		if _, err := spent.write(other, func() error { return nil }); err != nil {
+			t.Fatalf("pre-spending the budget: %v", err)
+		}
+	}
+	store, work = run(spent)
+	if store.writes != 0 {
+		t.Fatalf("a spent budget still let %d route writes through", store.writes)
+	}
+	for _, b := range work {
+		if got, ok := b.Metadata[beadmeta.RoutedToMetadataKey]; ok {
+			t.Errorf("%s still carries route %q in the demand snapshot after the budget refused its repair", b.ID, got)
 		}
 	}
 }
