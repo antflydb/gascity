@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -260,4 +263,49 @@ func TestBoundedScanPanicIsUnavailableAndReleasesKey(t *testing.T) {
 			t.Fatalf("after the panic = (%+v, %v), want a fresh scan's answer: the panicked scan must release its key", got, err)
 		}
 	})
+}
+
+// A scan that panics is loud: one error record names the latch key, carries
+// the panic value, and has a stack, so a deterministic scanner bug that defers
+// a session's starts on every attempt can be found from the log.
+func TestBoundedScanPanicIsLoggedWithKeyValueAndStack(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	synctest.Test(t, func(t *testing.T) {
+		if _, err := FindRuntimesBySessionIDBounded(context.Background(), panickingScanner{}, "k-panic-log", "sid", scanBudget); err == nil {
+			t.Fatal("a panicking scan returned no error")
+		}
+		synctest.Wait()
+	})
+
+	var records []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("log line %q is not a slog JSON record: %v", line, err)
+		}
+		records = append(records, rec)
+	}
+	if len(records) != 1 {
+		t.Fatalf("got %d log records %v, want exactly one error record for the panic", len(records), records)
+	}
+	rec := records[0]
+	if rec["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", rec["level"])
+	}
+	if rec["key"] != "k-panic-log" {
+		t.Errorf("key = %v, want the latch key k-panic-log", rec["key"])
+	}
+	if rec["panic"] != "reviewer probe: scanner blew up" {
+		t.Errorf("panic = %v, want the panic value", rec["panic"])
+	}
+	if stack, _ := rec["stack"].(string); stack == "" {
+		t.Errorf("stack is empty, want the panicking goroutine's stack: %v", rec)
+	}
 }
