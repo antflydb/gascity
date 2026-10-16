@@ -622,8 +622,9 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
-	leaseTTL                time.Duration // the runtime lease records' TTL (WithRuntimeLeaseTTL)
-	orphanScanBudget        time.Duration // longest the pre-start orphan scan may run before the start is deferred
+	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
+	orphanScanBudget        time.Duration       // longest the pre-start orphan scan may run before the start is deferred
 }
 
 // defaultOrphanScanBudget is how long a start waits for its pre-start orphan
