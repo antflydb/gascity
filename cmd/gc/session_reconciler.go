@@ -337,8 +337,12 @@ func cancelSelfInitiatedDrainAckAtMinFloor(
 		return false
 	}
 	if err := dops.clearDrain(name); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
-		return false
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
+			return false
+		}
+		// The ack is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': warning: %v\n", name, err) //nolint:errcheck
 	}
 	telemetry.RecordDrainTransition(context.Background(), name, "min-floor", "cancel")
 	return true
@@ -2051,6 +2055,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// resolves the non-unique SessionName last-write-wins, so topo order is load-
 	// bearing.
 	tick := newReconcileTick(orderedInfos)
+	healAlive := &healAliveConfirmer{sp: sp}
 	infoByID := tick.infoByID
 	orderedIDs := tick.orderedIDs
 
@@ -2127,7 +2132,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// the close is store-only, so a raw re-projection of *session still sees it
 	// open — the fold must match that.
 	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
-		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
+		if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, clk.Now())) {
 			return nil
 		}
 		rollbacksThisTick++
@@ -2422,7 +2427,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closedFailedCreate := releaseBeadScopedPoolRuntimeLeased(cityPath, infoByID[id], sp, stderr) &&
+					closedFailedCreate := releaseRowOwnedRuntimeLeased(cityPath, store, infoByID[id], sp, stderr, standingRowRuntimeHold(dt, stderr, id, clk.Now())) &&
 						closeSeat(store, sw, infoByID[id], closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeGated}, clk.Now().UTC(), stderr)
 					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session
@@ -2477,7 +2482,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
+			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, nil, providerAlive), livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue
@@ -3060,9 +3065,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// that start's box: a remote runtime lists the name before
 					// Start returns, and one without a metadata store never
 					// carries identity. Rolling back here frees the name
-					// without a stop, and the late start then finds its row
-					// closed and cannot attribute the box either, so the box
-					// runs with no row. The start's commit settles the row.
+					// while the start may still be creating the box: for most
+					// rows without a stop, and the late start then finds its
+					// row closed and cannot attribute the box either; for a
+					// row that owns its name (releaseRowOwnedRuntime) the
+					// teardown can land before the create does. Either way the
+					// box runs with no row. The start's commit settles the row;
+					// once the window and the lease are over, the rollback
+					// below tears a row-owned box down before it closes.
 					// The deferral is recorded under the wake pair, not the
 					// rollback reason, so a normal start arms no auto-trace.
 					// The line names why, one standing condition per reason,
@@ -3091,7 +3101,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				continue
 			case pendingCreateRuntimeUnknown:
 				// The live runtime may be this create's own, and the rollback
-				// stops a bead-scoped pool runtime by name, so neither roll back
+				// stops a row-owned runtime by name, so neither roll back
 				// nor adopt it. Once it dies the lease-expired rollback below
 				// applies; while it lives this re-attributes every tick.
 				logStandingCondition(dt, stderr, id, "attribution_unknown.pending_create_rollback", fmt.Sprintf(
@@ -3642,7 +3652,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, true, sessFront, clk, startupTimeout, !capacityHeld)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, tp.Hints.ProcessNames, alive), true, sessFront, clk, startupTimeout, !capacityHeld)
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue
@@ -5258,6 +5268,32 @@ func idleRespawnAckUnsafeToStop(
 		return true, "activity-resumed", nil
 	}
 	return false, "", nil
+}
+
+// healAliveConfirmer is the liveness the state heal reads for a row, one per
+// reconcile pass. A runtime read alive that would wake an asleep row is
+// confirmed on a fresh read first (mc-pvonx): the tick's read can be served
+// from a listing taken before another process stopped the runtime (the tmux
+// state cache after a `gc session kill`), and a heal on it wrote state=awake
+// over the killed row, which the next pass restarted in place on its claim
+// instead of freeing the slot. A fresh read that fails wakes nothing. The
+// pass's first confirmation fixes since, so the later ones reuse the fresh
+// listing (and process snapshot) it took rather than each paying for one.
+type healAliveConfirmer struct {
+	sp    runtime.Provider
+	since time.Time
+}
+
+// alive is the liveness the heal reads for info's row, read alive.
+func (c *healAliveConfirmer) alive(info sessionpkg.Info, name string, processNames []string, alive bool) bool {
+	if !alive || strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateAsleep) {
+		return alive
+	}
+	if c.since.IsZero() {
+		c.since = time.Now()
+	}
+	fresh, err := runtime.ObserveLivenessSince(c.sp, name, processNames, c.since)
+	return err == nil && fresh.Alive
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or

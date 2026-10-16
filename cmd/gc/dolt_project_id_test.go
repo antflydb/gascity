@@ -95,6 +95,14 @@ func TestNativeStorageFixtureBootTimeoutSurvivesShardContention(t *testing.T) {
 
 func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...string) (string, int, int, func()) {
 	t.Helper()
+	return startRealDoltServer(t, repoDir, "secret", setupQueries...)
+}
+
+// startRealDoltServer starts a real dolt sql-server in repoDir and exports
+// password as GC_DOLT_PASSWORD. A non-empty password is set on root@'%'; an
+// empty one leaves dolt's passwordless root in place.
+func startRealDoltServer(t *testing.T, repoDir, password string, setupQueries ...string) (string, int, int, func()) {
+	t.Helper()
 	skipSlowCmdGCTest(t, "requires a real Dolt server; run make test-cmd-gc-process for full coverage")
 	configureTestDoltIdentityEnv(t)
 
@@ -127,7 +135,9 @@ func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...str
 	for _, query := range setupQueries {
 		run("sql", "-q", query)
 	}
-	run("sql", "-q", "CREATE USER 'root'@'%' IDENTIFIED BY 'secret'; GRANT ALL ON *.* TO 'root'@'%';")
+	if password != "" {
+		run("sql", "-q", "CREATE USER 'root'@'%' IDENTIFIED BY '"+password+"'; GRANT ALL ON *.* TO 'root'@'%';")
+	}
 
 	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
 		Dolt: doltPath,
@@ -142,7 +152,7 @@ func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...str
 		<-srv.Exited
 	}
 
-	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	t.Setenv("GC_DOLT_PASSWORD", password)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := managedDoltQueryProbeDirect("127.0.0.1", fmt.Sprintf("%d", port), "root"); err == nil {
@@ -153,7 +163,7 @@ func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...str
 
 	cleanup()
 	serverLog, _ := os.ReadFile(srv.LogPath)
-	t.Fatalf("passworded dolt sql-server on %d did not become query-ready:\n%s", port, serverLog)
+	t.Fatalf("dolt sql-server on %d did not become query-ready:\n%s", port, serverLog)
 	return "", 0, 0, func() {}
 }
 
