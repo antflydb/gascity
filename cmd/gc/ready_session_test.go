@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -440,5 +442,41 @@ func TestReadySessionReadsFreshForEveryQuestion(t *testing.T) {
 	}
 	if got := opens(readyCountedRigNames[1]); got != 1 {
 		t.Fatalf("rig opened %d times across both questions, want once: fresh reads, reused stores", got)
+	}
+}
+
+// TestReadySessionWireCarriesEveryReadyFlag: a flag the session's wire did
+// not carry would be dropped in transit, and the session would answer a
+// different question than the one asked — silently, with exit 0. Every
+// readyOpts field must survive the trip through the JSON request, so a field
+// added to readyOpts later fails here until the wire carries it.
+func TestReadySessionWireCarriesEveryReadyFlag(t *testing.T) {
+	opts := readyOpts{
+		assignee:       "worker-1",
+		unassigned:     true,
+		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=worker", "gc.kind"},
+		excludeTypes:   []string{"epic"},
+		excludeLabels:  []string{"human", "hold:mayor"},
+		sortOrder:      readySortOldest,
+		limit:          7,
+		status:         readyStatusOpen,
+	}
+	fields := reflect.ValueOf(opts)
+	for i := range fields.NumField() {
+		if fields.Field(i).IsZero() {
+			t.Fatalf("readyOpts.%s is zero in this fixture; set it so the round trip below proves the session wire carries it", fields.Type().Field(i).Name)
+		}
+	}
+
+	encoded, err := json.Marshal(readySessionRequestFor("token", "/city", opts))
+	if err != nil {
+		t.Fatalf("encoding the request: %v", err)
+	}
+	var decoded readySessionRequest
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decoding the request: %v", err)
+	}
+	if got := decoded.readyOpts(); !reflect.DeepEqual(got, opts) {
+		t.Fatalf("flags after the session wire = %+v, want %+v", got, opts)
 	}
 }
