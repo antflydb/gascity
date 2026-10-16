@@ -218,7 +218,13 @@ store answered first.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
---include-ephemeral is passed.`,
+--include-ephemeral is passed.
+
+Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
+suspended_on_start and not resumed. Their agents claim nothing and the
+controller counts no demand in them, so this reads the same rigs the controller
+does; their work comes back when the rig is resumed. The city store and a
+relocated graph store are always read.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdReady(opts, stdout, stderr) != 0 {
@@ -263,6 +269,13 @@ func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, j
 }
 
 func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation. Every store open
+	// below resolves its own inputs — the pinned bd, the storage binding env —
+	// and each of those composed the city config again, once per rig: 22 loads
+	// for one `gc ready` on a six-rig bd-backed city. They are all answering for
+	// the config this command is about to load, so the memo serves them from it
+	// (see invocationConfigMemo for what callers may and may not touch).
+	defer beginInvocationConfigMemo()()
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
