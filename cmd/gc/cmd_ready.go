@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -286,7 +287,8 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 	if code, served := readyThroughSession(cityPath, opts, stdout, stderr); served {
 		return code
 	}
-	legs, err := openReadyLegs(cityPath, stderr)
+	// One answer, then the process exits, which releases the stores it opened.
+	legs, _, err := openReadyLegs(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -302,24 +304,58 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 // federates: the city store, the serving rigs' stores and the relocated
 // binding. It is the whole cost of a `gc ready` before its first read, and a
 // ready session pays it once for every question its work query asks.
-func openReadyLegs(cityPath string, stderr io.Writer) ([]readyLeg, error) {
+//
+// owned is what this call opened, and is the caller's to close: the city store
+// and every serving rig's store, a rig keyed under the city's name included,
+// though it is left out of the legs (rigLegsExcludingCityName). It is not every
+// leg's store: the relocated binding's leg is borrowed from the process-lived
+// cliStorageRoutes memo, which owns that store and closes it at exit
+// (closeCLIStorageRoutes), and borrowers close what they opened, not what they
+// hold. An error return leaves nothing open.
+//
+// residency:allow — owned is a close list, not a residency answer: the handles
+// this call opened, returned so the caller can release them. No read goes
+// through it; every read takes the legs readyFederationLegs plans.
+func openReadyLegs(cityPath string, stderr io.Writer) (legs []readyLeg, owned []beads.Store, err error) {
 	defer beginInvocationConfigMemo()()
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	owned = []beads.Store{cityStore} // residency:allow — the close list of what this call opened; reads take the planned legs
 	rigStores, err := readyRigLegStores(cfg, cityPath)
 	if err != nil {
-		return nil, err
+		closeReadyStores(owned) //nolint:errcheck // best-effort: the failed open is the error
+		return nil, nil, err
+	}
+	for _, store := range rigStores {
+		owned = append(owned, store)
 	}
 	// A refused city fails the plan here: the plan carries the refusal that
 	// names the remedy, and a work-only answer would be a short array
 	// indistinguishable from "no work" for every work query this reader backs.
-	return readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
+	legs, err = readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
+	if err != nil {
+		closeReadyStores(owned) //nolint:errcheck // best-effort: the refusal is the error
+		return nil, nil, err
+	}
+	return legs, owned, nil
+}
+
+// closeReadyStores closes every one of stores, past any that fails to close,
+// and reports the failures together.
+func closeReadyStores(stores []beads.Store) error {
+	var errs []error
+	for _, store := range stores {
+		if err := closeBeadStoreHandle(store); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // writeReadyAnswer reads the legs for opts and writes the answer: the JSON

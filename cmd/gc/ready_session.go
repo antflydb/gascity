@@ -22,8 +22,9 @@ package main
 // the in-process read: no session on a platform without abstract unix sockets,
 // a question about another city, a session that cannot be reached. A read that
 // FAILS inside the session is answered exactly like an in-process failure, and
-// the session then drops its legs, so the next question opens fresh stores —
-// what the next `gc ready` process would have done.
+// the session then drops its legs and closes the stores it opened them with, so
+// the next question opens fresh stores — what the next `gc ready` process would
+// have done.
 
 import (
 	"bytes"
@@ -43,6 +44,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -66,6 +68,14 @@ const (
 	// is a hang guard, not a latency budget: a live session accepts at once.
 	readySessionDialTimeout = 2 * time.Second
 )
+
+// readySessionQuestionTimeout bounds how long a connection may take to ask its
+// question. An asker writes its question as it connects, so this is a hang
+// guard rather than a latency budget: anyone on the host can reach an abstract
+// socket, and a peer that connects and never asks would otherwise hold its
+// handler — and the close that waits for it — forever. A variable so tests can
+// shorten it.
+var readySessionQuestionTimeout = 2 * time.Second
 
 // hookUsesReadySession reports whether `gc hook` runs a's work query inside a
 // ready session: the generated query of a split city, whose tiers ask `gc
@@ -191,10 +201,18 @@ type readySession struct {
 	stderr   io.Writer
 	done     chan struct{}
 
+	// connMu guards conns: every connection a handler still holds, which serve
+	// drops once it stops accepting.
+	connMu sync.Mutex
+	conns  map[net.Conn]struct{}
+
 	mu sync.Mutex
 	// legs is the opened leg set: nil before the first question, and again
 	// after any failed read, so the next question opens fresh stores.
 	legs []readyLeg
+	// owned is what opening legs opened, closed when they are dropped; see
+	// openReadyLegs for why that is not every leg's store.
+	owned []beads.Store
 }
 
 // startReadySession resolves this process's city — the city the work query's
@@ -213,9 +231,14 @@ func startReadySession(stderr io.Writer) (*readySession, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &readySession{addr: addr, token: token, cityPath: cityPath, listener: ln, stderr: stderr, done: make(chan struct{})}
+	return serveReadySession(ln, addr, token, cityPath, stderr), nil
+}
+
+// serveReadySession starts answering questions about cityPath on ln.
+func serveReadySession(ln net.Listener, addr, token, cityPath string, stderr io.Writer) *readySession {
+	s := &readySession{addr: addr, token: token, cityPath: cityPath, listener: ln, stderr: stderr, done: make(chan struct{}), conns: map[net.Conn]struct{}{}}
 	go s.serve()
-	return s, nil
+	return s
 }
 
 // env is what a process needs in its environment to ask this session.
@@ -223,16 +246,50 @@ func (s *readySession) env() []string {
 	return []string{readySessionAddrEnv + "=" + s.addr, readySessionTokenEnv + "=" + s.token}
 }
 
+// serve answers each connection on its own handler until the listener closes,
+// then drops every connection still open and waits for the handlers to return.
+// The query has exited by then, so nothing still connected has a question worth
+// waiting for: a peer that never asked, or an asker the query left behind,
+// which reads in-process.
 func (s *readySession) serve() {
 	defer close(s.done)
-	var conns sync.WaitGroup
-	defer conns.Wait()
+	var handlers sync.WaitGroup
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			return
+			break
 		}
-		conns.Go(func() { s.handle(conn) })
+		s.trackConn(conn)
+		handlers.Go(func() {
+			defer s.untrackConn(conn)
+			s.handle(conn)
+		})
+	}
+	s.dropConns()
+	handlers.Wait()
+}
+
+// trackConn records conn as held by a handler, for dropConns.
+func (s *readySession) trackConn(conn net.Conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns[conn] = struct{}{}
+}
+
+// untrackConn forgets conn once its handler is done with it.
+func (s *readySession) untrackConn(conn net.Conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	delete(s.conns, conn)
+}
+
+// dropConns closes every connection a handler still holds, which ends a
+// pending read or write on it at once.
+func (s *readySession) dropConns() {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	for conn := range s.conns {
+		conn.Close() //nolint:errcheck // dropping it is the point
 	}
 }
 
@@ -240,6 +297,12 @@ func (s *readySession) serve() {
 // breaks mid-exchange is the asker's to notice: it reads in-process.
 func (s *readySession) handle(conn net.Conn) {
 	defer conn.Close() //nolint:errcheck // the exchange is over either way
+	// Nothing reads conn after the question, so the deadline bounds only the
+	// asking, never the answer's store opens and reads.
+	if err := conn.SetReadDeadline(time.Now().Add(readySessionQuestionTimeout)); err != nil {
+		s.debugf("bounding a question: %v", err)
+		return
+	}
 	var req readySessionRequest
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		s.debugf("reading a question: %v", err)
@@ -260,26 +323,40 @@ func (s *readySession) answer(req readySessionRequest) readySessionResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.legs == nil {
-		legs, err := openReadyLegs(s.cityPath, s.stderr)
+		legs, owned, err := openReadyLegs(s.cityPath, s.stderr)
 		if err != nil {
 			return readySessionResponse{Served: true, Error: err.Error()}
 		}
 		s.debugf("opened %d legs for %s", len(legs), s.cityPath)
-		s.legs = legs
+		s.legs, s.owned = legs, owned
 	}
 	var out bytes.Buffer
 	if err := writeReadyAnswer(&out, s.legs, req.readyOpts()); err != nil {
-		s.legs = nil
+		if closeErr := s.dropLegs(); closeErr != nil {
+			s.debugf("closing the legs of a failed read: %v", closeErr)
+		}
 		return readySessionResponse{Served: true, Error: err.Error()}
 	}
 	return readySessionResponse{Served: true, Output: out.Bytes()}
 }
 
-// close stops accepting questions and waits for the ones in flight.
+// dropLegs closes the stores the legs were opened with and forgets the legs,
+// so the next question opens fresh ones. The caller holds s.mu.
+func (s *readySession) dropLegs() error {
+	err := closeReadyStores(s.owned)
+	s.legs, s.owned = nil, nil
+	return err
+}
+
+// close stops accepting questions, drops every connection still open and waits
+// for the handlers to return — one still answering finishes its read first —
+// then closes the stores the session opened.
 func (s *readySession) close() error {
 	err := s.listener.Close()
 	<-s.done
-	return err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return errors.Join(err, s.dropLegs())
 }
 
 // debugf prints a session diagnostic under GC_DEBUG. Session diagnostics go

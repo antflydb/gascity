@@ -475,17 +475,18 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
 	// On a split city the ready tiers of workQuery are already city-wide, so
 	// running the whole query once per store re-asks the same question R+1 times
-	// and re-opens every leg each time. Pin the city-wide read to the primary
-	// entry and leave the extras on the single-store command they ran before the
-	// swap, which still covers the per-store crash-recovery and ephemeral tiers
-	// `gc ready` does not answer. No-op on a single-store city and for a custom
-	// work_query, where both forms are the same string.
+	// and re-opens every leg each time. Keep the primary entry alone;
+	// scopeFederatedHookStores says why the extras are no longer coverage. No-op
+	// on a single-store city and for a custom work_query, where both forms are
+	// the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 	// A split city's generated query asks `gc ready` several questions in
 	// sequence; ask the runner to answer them all from one ready session
-	// (ready_session.go). The request rides each store's own env — the env the
-	// query runs with — so any runner that ends in shellWorkQueryWithEnv honors
-	// it, whatever env it projects on the way.
+	// (ready_session.go). Scoping has already cut that city to its primary
+	// store, so only the query that asks runs under a session. The request
+	// rides the store's own env — the env the query runs with — so any runner
+	// that ends in shellWorkQueryWithEnv honors it, whatever env it projects on
+	// the way.
 	if hookUsesReadySession(&a, topo) {
 		stores = withReadySessionRequest(stores)
 	}

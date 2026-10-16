@@ -7,12 +7,15 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -229,10 +232,11 @@ func TestReadySessionOpensTheStoresOnceForAClaim(t *testing.T) {
 }
 
 // readyFailOnceStore fails its next Ready read while fail is set, the way a
-// leg hits a transient lock or a dropped connection.
+// leg hits a transient lock or a dropped connection, and counts its closes.
 type readyFailOnceStore struct {
 	beads.Store
-	fail *atomic.Bool
+	fail   *atomic.Bool
+	closes *atomic.Int32
 }
 
 func (s readyFailOnceStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
@@ -242,20 +246,35 @@ func (s readyFailOnceStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, erro
 	return s.Store.Ready(query...)
 }
 
+// CloseStore counts the close and closes the store it wraps.
+func (s readyFailOnceStore) CloseStore() error {
+	s.closes.Add(1)
+	return closeBeadStoreHandle(s.Store)
+}
+
 // TestReadySessionReopensAfterAFailedRead: a failed read is answered exactly
-// like an in-process failure, and the session then drops its legs, so the next
-// question opens fresh stores — what the next `gc ready` process would have
-// done — instead of reading a leg that just failed.
+// like an in-process failure, and the session then drops its legs, closing the
+// stores it opened them with, so the next question opens fresh stores — what
+// the next `gc ready` process would have done — instead of reading a leg that
+// just failed. The fresh stores are closed with the session.
 func TestReadySessionReopensAfterAFailedRead(t *testing.T) {
 	requireReadySessions(t)
 	newReadyCityWithRigs(t)
 	t.Setenv("GC_RIG", readyCountedRigNames[0])
 	var fail atomic.Bool
+	var closes atomic.Int32
 	opens := countReadyRigOpens(t, func(rig string, store beads.Store) beads.Store {
 		if rig == readyCountedRigNames[1] {
-			return readyFailOnceStore{Store: store, fail: &fail}
+			return readyFailOnceStore{Store: store, fail: &fail, closes: &closes}
 		}
 		return store
+	})
+	// Registered before the session's own cleanup, so it runs once the session
+	// has closed.
+	t.Cleanup(func() {
+		if got := closes.Load(); got != 2 {
+			t.Errorf("the failed rig's stores were closed %d times by the time the session closed, want twice: the failed generation's and the fresh one's", got)
+		}
 	})
 	startTestReadySession(t)
 
@@ -264,12 +283,185 @@ func TestReadySessionReopensAfterAFailedRead(t *testing.T) {
 	if failed.code == 0 || failed.stdout != "" || !strings.Contains(failed.stderr, "gc ready: rig "+readyCountedRigNames[1]+" store: database is locked") {
 		t.Fatalf("a failed leg read through the session = %+v, want the in-process failure: exit 1, no stdout, the leg named on stderr", failed)
 	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("the failed rig's store was closed %d times after the failed read, want once: dropping the legs closes the stores they were opened with", got)
+	}
 	if ok := askReady(readyOpts{}); ok.code != 0 {
 		t.Fatalf("the question after the failure = %+v, want a fresh successful read", ok)
 	}
 	if got := opens(readyCountedRigNames[1]); got != 2 {
 		t.Fatalf("the failed rig was opened %d times, want twice: once for the failed read and once fresh after it", got)
 	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("the failed rig's stores were closed %d times after a successful read, want still once: the fresh stores serve the questions after it", got)
+	}
+}
+
+// refusedReadyCityWithRig writes a city whose [storage] names a binding it has
+// not migrated onto, which this build refuses to serve, with one openable rig,
+// and returns that rig's name.
+func refusedReadyCityWithRig(t *testing.T) string {
+	t.Helper()
+	const rig = "alpha"
+	cityPath := oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
+	rigDir := filepath.Join(cityPath, "rigs", rig)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("creating rig dir %s: %v", rigDir, err)
+	}
+	cityToml, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	cityToml = append(cityToml, "\n[[rigs]]\nname = "+strconv.Quote(rig)+"\npath = "+strconv.Quote(rigDir)+"\n"...)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), cityToml, 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatalf("ensuring scoped file store layout: %v", err)
+	}
+	for _, scope := range []string{cityPath, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(scope); err != nil {
+			t.Fatalf("ensuring file store at %s: %v", scope, err)
+		}
+	}
+	mustCreateInfraBead(t, stubInfraMigrationSource(t), beads.Bead{Title: "a session", Type: "session"})
+	captureCLIStorageStderr(t)
+	return rig
+}
+
+// TestReadySessionClosesTheStoresOfAFailedOpen: a question whose leg set cannot
+// be opened — a dead rig, a city whose storage this build refuses — is answered
+// with the failure, and the stores that did open are closed with it rather than
+// held for the session's lifetime: no leg set holds them, and the next question
+// opens its own.
+func TestReadySessionClosesTheStoresOfAFailedOpen(t *testing.T) {
+	requireReadySessions(t)
+	for _, tc := range []struct {
+		name string
+		// city writes the city and returns the name of a rig that opens.
+		city    func(t *testing.T) string
+		failure string
+	}{
+		{
+			name:    "dead rig",
+			city:    func(t *testing.T) string { newReadyCityWithBrokenRig(t); return "good" },
+			failure: "gc ready: rig " + strconv.Quote(readyBrokenRigName) + " store:",
+		},
+		{name: "refused city", city: refusedReadyCityWithRig, failure: storageMigrationCommand},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			healthyRig := tc.city(t)
+			var never atomic.Bool
+			var closes atomic.Int32
+			opens := countReadyRigOpens(t, func(rig string, store beads.Store) beads.Store {
+				if rig != healthyRig {
+					return store
+				}
+				return readyFailOnceStore{Store: store, fail: &never, closes: &closes}
+			})
+			startTestReadySession(t)
+
+			for asked := int32(1); asked <= 2; asked++ {
+				failed := askReady(readyOpts{})
+				if failed.code == 0 || !strings.Contains(failed.stderr, tc.failure) {
+					t.Fatalf("question %d through the session = %+v, want the in-process failure, naming %q", asked, failed, tc.failure)
+				}
+				if got := opens(healthyRig); got != int(asked) {
+					t.Fatalf("fixture: rig %q was opened %d times over %d questions, want once per question", healthyRig, got, asked)
+				}
+				if got := closes.Load(); got != asked {
+					t.Fatalf("after %d failed opens rig %q was closed %d times, want %d: a failed open hands back none of the stores it opened", asked, healthyRig, got, asked)
+				}
+			}
+		})
+	}
+}
+
+// TestReadySessionClosesARigTheLegsLeaveOut: dropping a leg set closes what
+// opening it opened, which is not the same set as the legs' stores. A rig keyed
+// under the city's name is opened with the serving frame but left out of the
+// legs (rigLegsExcludingCityName), so no leg holds it; it is closed with them
+// all the same.
+func TestReadySessionClosesARigTheLegsLeaveOut(t *testing.T) {
+	requireReadySessions(t)
+	const cityNamedRig = "readycounted"
+	newReadyCityWithRigs(t, readyCountedRigNames[0], cityNamedRig)
+	t.Setenv("GC_RIG", readyCountedRigNames[0])
+	var never atomic.Bool
+	var closes atomic.Int32
+	opens := countReadyRigOpens(t, func(rig string, store beads.Store) beads.Store {
+		if rig == cityNamedRig {
+			return readyFailOnceStore{Store: store, fail: &never, closes: &closes}
+		}
+		return store
+	})
+	s := startTestReadySession(t)
+
+	if a := askReady(readyOpts{}); a.code != 0 {
+		t.Fatalf("gc ready through the session = %+v, want a successful read", a)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, leg := range s.legs {
+		if leg.label == "rig "+cityNamedRig {
+			t.Fatalf("fixture: rig %q is a leg, want it left out as the rig keyed under the city's name", cityNamedRig)
+		}
+	}
+	if got := opens(cityNamedRig); got != 1 {
+		t.Fatalf("fixture: rig %q was opened %d times, want once, with the serving frame", cityNamedRig, got)
+	}
+	if err := s.dropLegs(); err != nil {
+		t.Fatalf("dropping the legs: %v", err)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("dropping the legs closed rig %q %d times, want once: the session opened it, so it is the session's to close though no leg reads it", cityNamedRig, got)
+	}
+}
+
+// TestReadySessionLeavesTheProcessBindingOpen: the relocated binding's leg is
+// one the session borrowed rather than opened. The process-lived routes memo
+// owns that store and closes it at exit (closeCLIStorageRoutes); borrowers close
+// what they opened, not what they hold. So the binding is not among the stores a
+// leg set owns, and after a dropped leg set, and the session itself, it still
+// serves the process's graph-class reads.
+func TestReadySessionLeavesTheProcessBindingOpen(t *testing.T) {
+	requireReadySessions(t)
+	cityPath, _ := migratedOneShotCLICity(t)
+	step := seedRelocatedBindingBead(t, cityPath, "graph step")
+	binding, _, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the process's binding: %v", err)
+	}
+	// Registered before the session's own cleanup, so it runs once the session
+	// has closed.
+	t.Cleanup(func() {
+		if _, err := binding.Store.Get(step.ID); err != nil {
+			t.Errorf("after the session closed, the process's binding answers Get(%s) with %v, want the bead: the session closed a store it does not own", step.ID, err)
+		}
+	})
+	s := startTestReadySession(t)
+	ask := func(when string) {
+		t.Helper()
+		resp := s.answer(readySessionRequest{Token: s.token, CityPath: s.cityPath})
+		if !resp.Served || resp.Error != "" || !strings.Contains(string(resp.Output), step.ID) {
+			t.Fatalf("%s, the session answered served=%v error=%q output=%s, want the binding's %s", when, resp.Served, resp.Error, resp.Output, step.ID)
+		}
+	}
+
+	ask("on the first leg set")
+	s.mu.Lock()
+	for _, store := range s.owned {
+		if store == binding.Store {
+			s.mu.Unlock()
+			t.Fatal("the session owns the process's binding, a store it borrowed from the routes memo, and would close it with its legs")
+		}
+	}
+	err = s.dropLegs()
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("dropping the first leg set: %v", err)
+	}
+	ask("on the leg set opened after it")
 }
 
 // TestReadySessionServesOnlyItsOwnCity: a `gc ready` that resolved another
@@ -292,6 +484,104 @@ func TestReadySessionServesOnlyItsOwnCity(t *testing.T) {
 	if resp = s.answer(readySessionRequest{Token: s.token, CityPath: s.cityPath}); !resp.Served {
 		t.Fatalf("the session declined a question for its own city with its own token: %+v", resp)
 	}
+}
+
+// serveTestReadySession serves a session over a city no test question names:
+// every question these tests ask carries the wrong token, which the session
+// declines before it touches a store, so no city has to exist.
+func serveTestReadySession(t *testing.T) *readySession {
+	t.Helper()
+	requireReadySessions(t)
+	ln, addr, err := listenReadySession()
+	if err != nil {
+		t.Fatalf("listenReadySession: %v", err)
+	}
+	return serveReadySession(ln, addr, "session-token", t.TempDir(), io.Discard)
+}
+
+// setReadySessionQuestionTimeout sets how long a session waits for a
+// connection's question, for the rest of the test.
+func setReadySessionQuestionTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := readySessionQuestionTimeout
+	readySessionQuestionTimeout = d
+	t.Cleanup(func() { readySessionQuestionTimeout = prev })
+}
+
+// dialSilentReadyPeer connects to the session at addr and never asks.
+func dialSilentReadyPeer(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", addr, readySessionDialTimeout)
+	if err != nil {
+		t.Fatalf("dialing the session: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() }) //nolint:errcheck // the test is over either way
+	return conn
+}
+
+// requireReadySessionDeclines asks the session at addr a question carrying the
+// wrong token and requires the round trip to come back declined.
+func requireReadySessionDeclines(t *testing.T, addr string) {
+	t.Helper()
+	if resp, err := askReadySession(addr, readySessionRequest{Token: "not-the-token"}); err != nil || resp.Served {
+		t.Fatalf("a question with the wrong token = %+v, %v; want it answered and declined", resp, err)
+	}
+}
+
+// requireReadyPeerDropped requires that the session closed its end of conn:
+// the peer reads EOF instead of waiting.
+func requireReadyPeerDropped(t *testing.T, conn net.Conn, why string) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	if n, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("the silent peer read %d bytes with err %v, want EOF: %s", n, err, why)
+	}
+}
+
+// TestReadySessionCloseDropsAPeerThatNeverAsks: anyone on the host can reach an
+// abstract socket, so a peer can connect and never ask. Closing the session —
+// the wrapper does it the moment its query exits — must not wait on that peer:
+// it drops the connection and returns. The question timeout is an hour here, so
+// only close can free the peer.
+func TestReadySessionCloseDropsAPeerThatNeverAsks(t *testing.T) {
+	setReadySessionQuestionTimeout(t, time.Hour)
+	s := serveTestReadySession(t)
+	silent := dialSilentReadyPeer(t, s.addr)
+	// A session accepts connections in the order they arrive, so once a
+	// question asked after the silent peer's connect is answered, the session
+	// holds the silent peer's connection too.
+	requireReadySessionDeclines(t, s.addr)
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("closing the session: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("close is still waiting on a peer that connected and never asked")
+	}
+	requireReadyPeerDropped(t, silent, "closing the session drops every connection still open")
+}
+
+// TestReadySessionDropsAPeerThatNeverAsks: a peer that connects and never asks
+// is dropped once the question timeout passes, without waiting for the session
+// to close, and the session keeps answering.
+func TestReadySessionDropsAPeerThatNeverAsks(t *testing.T) {
+	setReadySessionQuestionTimeout(t, 250*time.Millisecond)
+	s := serveTestReadySession(t)
+	t.Cleanup(func() {
+		if err := s.close(); err != nil {
+			t.Errorf("closing the ready session: %v", err)
+		}
+	})
+	silent := dialSilentReadyPeer(t, s.addr)
+
+	requireReadyPeerDropped(t, silent, "a question not asked within the question timeout never will be")
+	requireReadySessionDeclines(t, s.addr)
 }
 
 // TestReadyReadsInProcessWhenTheSessionIsUnreachable: a session that is gone
