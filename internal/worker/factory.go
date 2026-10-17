@@ -73,7 +73,7 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 5)
+	opts := make([]sessionpkg.ManagerOption, 0, 6)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
@@ -88,6 +88,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
+	}
+	if cfg.Recorder != nil {
+		opts = append(opts, sessionpkg.WithEventRecorder(cfg.Recorder))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
