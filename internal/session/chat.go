@@ -531,6 +531,25 @@ func withSessionMutationLock(id string, fn func() error) error {
 	return WithSessionMutationLockContext(context.Background(), id, fn)
 }
 
+// tryWithSessionMutationLock runs fn under session id's mutation lock only
+// when the lock is free, and reports whether fn ran. It never waits: it takes
+// WithSessionMutationLockContext's try-first path with an already-done
+// context, so while another holder has the lock it returns (false, nil) and fn
+// does not run. An error fn returns itself is returned with ran true.
+func tryWithSessionMutationLock(id string, fn func() error) (bool, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ran := false
+	err := WithSessionMutationLockContext(ctx, id, func() error {
+		ran = true
+		return fn()
+	})
+	if !ran && errors.Is(err, ErrSessionMutationBusy) {
+		return false, nil
+	}
+	return ran, err
+}
+
 func acquireSessionMutationLockContext(ctx context.Context, id string) (*sessionMutationLockEntry, error) {
 	sessionMutationLocksMu.Lock()
 	lock := sessionMutationLocks[id]
