@@ -504,6 +504,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Text sent to a Claude session no longer answers its permission prompt.**
+  On Claude Code 2.1.28x gc missed the permission dialog, so
+  `GET .../pending` stayed empty, `respond` returned `409 no_pending`, and an
+  ordinary `submit` or nudge typed into the prompt, where its Enter approved
+  the pending tool call. gc now recognizes the dialog by its "Do you want to
+  …?" question and numbered menu (also when the question wraps), and
+  `respond` picks the option by its label, so `deny` can no longer select
+  "Yes, and switch to auto mode"; when no single option matches it sends
+  nothing and returns 409 `invalid_interaction`. While a prompt is pending,
+  `POST /v0/session/{id}/submit` and `.../messages` answer 409
+  `session-conflict` instead of 202, `submit` with intent `interrupt_now` is
+  refused, `gc session nudge --delivery=immediate` exits non-zero and
+  `--delivery=wait-idle` queues behind the prompt; the tmux runtime looks
+  again under the nudge lock, right before it pastes and right before Enter,
+  and refuses when it cannot look. A Claude session on a permission prompt no
+  longer reads as idle. Stopping a Claude turn on the tmux runtime (`stop` or
+  `interrupt_now`) now also clears the prompt Claude puts back into the input
+  box, which can add up to 2 s, and leaves the box alone when a client is
+  attached. The exec, k8s, ssh and herdr runtimes do not look for the prompt
+  yet. Thanks to Chris Sells (@csells) (#2892, #6832, backported in #8046).
 - **Go toolchain 1.26.9 and `golang.org/x/net` v0.60.0.** Go 1.26.9 fixes
   the 2026-10-08 standard library advisories GO-2026-6599, 6600, 6603, 6604,
   6605, 6607, 6608, 6609, 6610, 6611, 6612, 6613 and 6617 in `net/http`

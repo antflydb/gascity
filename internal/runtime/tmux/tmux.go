@@ -1685,6 +1685,34 @@ func (t *Tmux) IsSessionAttached(target string) bool {
 	return err == nil && attached == "1"
 }
 
+// SessionAttachedWithError reports whether any client is attached to target,
+// and returns an error when tmux cannot tell, so a caller that must not touch
+// a session a human may be typing in can fail closed instead of reading a
+// failed probe as detached. A blank target is an error without a probe:
+// display-message with an empty -t answers for the current session.
+func (t *Tmux) SessionAttachedWithError(target string) (bool, error) {
+	if strings.TrimSpace(target) == "" {
+		return false, fmt.Errorf("probing attachment of session %q: %w", target, runtime.ErrSessionNotFound)
+	}
+	out, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{session_name}|#{session_attached}")
+	if err != nil {
+		return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrRuntimeUnavailable, err)
+	}
+	out = strings.TrimSpace(out)
+	i := strings.LastIndex(out, "|")
+	if i <= 0 {
+		return false, fmt.Errorf("probing attachment of session %q: unexpected answer %q: %w", target, out, runtime.ErrRuntimeUnavailable)
+	}
+	if echoed := out[:i]; validSessionNameRe.MatchString(target) && echoed != target {
+		return false, fmt.Errorf("probing attachment of session %q: probe answered for session %q: %w", target, echoed, runtime.ErrRuntimeUnavailable)
+	}
+	clients, err := strconv.ParseUint(strings.TrimSpace(out[i+1:]), 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("probing attachment of session %q: parsing attached client count: %w: %w", target, runtime.ErrRuntimeUnavailable, err)
+	}
+	return clients > 0, nil
+}
+
 // WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
 // This wakes up Claude Code's event loop by simulating a terminal resize.
 //
@@ -1980,6 +2008,11 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	return true, nil
 }
 
+// sendHiddenAttachedText types text, then Enter, through target's hidden
+// attach client, and reports whether target has one. Only Gemini sessions get
+// a hidden attach client (requiresHiddenAttachedInterrupt), so this path takes
+// no look for a permission prompt between the text and Enter; it must gain
+// NudgeSession's (#2892) before it serves a Claude session.
 func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -2246,6 +2279,11 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 			sleep(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
+			if isLookRefusal(err) {
+				// Never re-send into a permission prompt, or into a pane a
+				// look could not read.
+				return false, err
+			}
 			lastErr = err
 			continue
 		}
@@ -2524,6 +2562,12 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // If multiple goroutines try to nudge the same session concurrently, they will
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
+//
+// It never types into a pending permission prompt: under the lock it checks
+// the pane before the first key, again immediately before the paste, and
+// again immediately before every submit key, and returns an error wrapping
+// runtime.ErrPendingInteraction when a prompt is showing, or the capture error
+// when a check cannot read the pane (#2892).
 func (t *Tmux) NudgeSession(session, message string) error {
 	return t.nudgeSession(
 		session,
@@ -2531,7 +2575,24 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		t.sendKeysLiteralWithRetry,
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+		t.pendingPromptRecheck(session),
 	)
+}
+
+// pendingPromptRecheck returns NudgeSession's under-the-lock look for a
+// permission prompt. A capture that fails refuses the nudge as a prompt on
+// screen does, the way NudgeNow's first check refuses a pane it cannot read:
+// what the look cannot see may be a prompt, and Enter on one approves the tool
+// call. The capture error stays wrapped, so a session that is gone is still
+// recognized as gone.
+func (t *Tmux) pendingPromptRecheck(session string) func(target string) error {
+	return func(target string) error {
+		err := t.checkNoApprovalPromptIn(session, target)
+		if err == nil || errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
+		return fmt.Errorf("%w in session %q before sending keys: %w", errPromptLookFailed, session, err)
+	}
 }
 
 // nudgeStartupSession sends the initial startup prompt. Copilot startup
@@ -2545,14 +2606,72 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 		},
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+		nil,
 	)
 }
 
+// errPromptLookFailed marks a look for a permission prompt that could not read
+// the pane.
+var errPromptLookFailed = errors.New("could not check for a pending permission prompt")
+
+// isLookRefusal reports whether err is a look's refusal of a nudge: a
+// permission prompt on screen, or a pane the look could not read.
+func isLookRefusal(err error) bool {
+	return errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, errPromptLookFailed)
+}
+
+// nudgePromptGuard takes a nudge's looks for a permission prompt (#2892):
+// under the nudge lock before the first key, immediately before the paste, and
+// immediately before every submit key. A look that finds a prompt, or cannot
+// read the pane, aborts the nudge with no further keys sent: text typed into a
+// prompt is read as menu input, and Enter picks its highlighted option.
+type nudgePromptGuard struct {
+	session, target string
+	// look returns a refusal (see isLookRefusal) when a prompt is on screen
+	// or the pane cannot be read. Nil skips the looks.
+	look func(target string) error
+	// submitsSent counts the submits the looks let through.
+	submitsSent int
+}
+
+// check takes one look.
+func (g *nudgePromptGuard) check() error {
+	if g.look == nil {
+		return nil
+	}
+	return g.look(g.target)
+}
+
+// submit takes a look, then sends the submit keys with send.
+func (g *nudgePromptGuard) submit(send func() error) error {
+	if err := g.check(); err != nil {
+		return err
+	}
+	g.submitsSent++
+	return send()
+}
+
+// refused returns what the nudge reports for err, a look's refusal. A refusal
+// before the first submit leaves the message in the input box, unsent, and
+// stands. One only before a re-send stops the re-sends, and the submit is
+// reported unconfirmed instead: the first submit may already have delivered
+// the message.
+func (g *nudgePromptGuard) refused(err error) error {
+	if g.submitsSent == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: session %q: not re-sent: %s", ErrNudgeSubmitUnconfirmed, g.session, err.Error())
+}
+
+// noPendingPrompt, when set, is checked under the nudge lock before the first
+// key, immediately before the paste, and immediately before every submit key;
+// its error aborts the nudge with no further keys sent.
 func (t *Tmux) nudgeSession(
 	session, message string,
 	sendText func(string, string, time.Duration) error,
 	shouldSendEscape func(string) bool,
 	submitKeySequence func(string) []string,
+	noPendingPrompt func(target string) error,
 ) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
@@ -2593,6 +2712,13 @@ func (t *Tmux) nudgeSession(
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
+	// A permission prompt may have appeared since the caller last looked
+	// (the lock wait alone can take seconds): nothing may be typed into it.
+	prompt := &nudgePromptGuard{session: session, target: target, look: noPendingPrompt}
+	if err := prompt.check(); err != nil {
+		return err
+	}
+
 	// 1. Clear any pending input already sitting on the line before pasting,
 	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
 	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
@@ -2600,14 +2726,18 @@ func (t *Tmux) nudgeSession(
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
 	//
-	// Skip the clear when a client is attached: a human may be mid-keystroke,
-	// and silently wiping their in-progress input is worse than the
-	// concatenation this clear otherwise prevents (#5192).
-	if !t.IsSessionAttached(session) {
-		if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
+	// For Claude the whole draft is cleared and verified: one Ctrl-U removes
+	// only one wrapped row there, and a prompt Claude restored after an early
+	// interrupt is usually several rows (see clearInputBeforePaste).
+	//
+	// Skip the clear when a client is attached, or when the probe cannot
+	// tell: a human may be mid-keystroke, and silently wiping their
+	// in-progress input is worse than the concatenation this clear otherwise
+	// prevents (#5192).
+	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
+		if err := t.clearInputBeforePaste(session, target); err != nil {
 			return err
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
@@ -2619,7 +2749,12 @@ func (t *Tmux) nudgeSession(
 		return fmt.Errorf("dismissing feedback survey before nudge: %w", err)
 	}
 
-	// 2. Send text in literal mode with retry on transient errors
+	// 2. Send text in literal mode with retry on transient errors, after a
+	// last look for a permission prompt: the clear and the survey check above
+	// take time, and a paste into a prompt is read as menu input.
+	if err := prompt.check(); err != nil {
+		return err
+	}
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -2665,10 +2800,19 @@ func (t *Tmux) nudgeSession(
 	// only for single-key (plain Enter) sequences, which is what every family
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
-	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
+	//
+	// Every submit is preceded by a look for a permission prompt: Enter on
+	// one picks its highlighted option (see nudgePromptGuard.refused).
+	sendSubmit := func() error {
+		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(target, submitKeys) })
+	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
 		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		if isLookRefusal(err) {
+			delivered = prompt.submitsSent > 0
+			return prompt.refused(err)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
@@ -2705,7 +2849,7 @@ func (t *Tmux) nudgeSession(
 			// evidence the Enter reached the pane and the agent consumed it —
 			// only the busy-state OBSERVATION missed it — so that case must be
 			// reported as proven delivery, not requeued as a failure.
-			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+			if lines, capErr := t.captureInputLines(target); capErr == nil && paneShowsDrainedComposer(lines) {
 				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
@@ -2730,6 +2874,9 @@ func (t *Tmux) nudgeSession(
 			time.Sleep(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
+			if isLookRefusal(err) {
+				return prompt.refused(err)
+			}
 			lastErr = err
 			continue
 		}
@@ -4209,6 +4356,13 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 		return false, nil
 	}
 
+	// A permission prompt is not an idle boundary even though its highlighted
+	// option ("❯ 1. Yes") matches the ready-prompt prefix: text delivered now
+	// would answer the prompt instead of reaching the composer (#2892).
+	if parseApprovalPrompt(strings.Join(lines, "\n")) != nil {
+		return false, nil
+	}
+
 	// Scan captured lines for the prompt prefix.
 	// Claude Code renders a status bar below the prompt line,
 	// so the prompt may not be the last non-empty line.
@@ -4454,25 +4608,25 @@ func paneContainsBusyIndicator(lines []string) bool {
 // agent consumed it. Earlier lines that also start with the prompt prefix are
 // scrollback transcript entries, not the live composer, and are ignored.
 //
-// It returns false when the composer still holds sent: the first non-empty
-// line of sent (compared on its first 40 runes, trimmed) is still present in
-// what remains after stripping the prompt prefix. That is the ga-bwm case --
-// the message is sitting drafted-but-unsubmitted -- and callers must keep
-// treating it as unconfirmed and retry. It returns true otherwise: the
-// composer is bare (or holds different, newer text), so the prior submit
-// drained it and only the busy-state OBSERVATION failed. When no line
-// matches the prompt prefix at all, the composer cannot be observed, so this
-// conservatively returns false rather than claiming delivery is proven.
-func paneShowsDrainedComposer(lines []string, sent string) bool {
+// It returns true only when the composer is bare: the prior submit drained it
+// and only the busy-state OBSERVATION failed. Any text left in the composer
+// means the submit is in doubt, and callers must keep treating it as
+// unconfirmed and retry. That covers the sent message sitting
+// drafted-but-unsubmitted (ga-bwm), and a merged draft that starts with
+// something else: when Claude restores an interrupted prompt and the message
+// is pasted behind it, the composer starts with the OLD prompt, so looking for
+// the sent text there reported an unsent draft as delivered. Where Claude
+// Code's framed input box is on screen, its wrapped rows count too. Dim text
+// (Claude's placeholder) must already be removed (see captureInputLines).
+// When no line matches the prompt prefix at all, the composer cannot be
+// observed, so this conservatively returns false rather than claiming
+// delivery is proven.
+func paneShowsDrainedComposer(lines []string) bool {
+	if in, ok := readClaudeInput(lines); ok {
+		return in.empty()
+	}
 	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
-	if !observed {
-		return false
-	}
-	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
-	if draft != "" && strings.Contains(remainder, draft) {
-		return false
-	}
-	return true
+	return observed && strings.TrimSpace(remainder) == ""
 }
 
 // lastComposerRemainder returns the text after the ready-prompt prefix on the
@@ -4501,17 +4655,6 @@ func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bo
 		}
 	}
 	return remainder, observed
-}
-
-// firstNonEmptyLine returns the first line of s (split on "\n") that is not
-// blank after trimming, or "" if every line is blank.
-func firstNonEmptyLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // firstNRunes returns the first n runes of s, or all of s when it has n
