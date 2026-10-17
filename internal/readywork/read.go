@@ -21,6 +21,17 @@ type Leg struct {
 	Label   string
 	Store   beads.Store
 	OnError storeref.ErrPolicy
+	// ClassBinding marks a relocated coordination-class binding. It is the one
+	// leg whose rows can also live in an earlier leg: `gc storage migrate`
+	// copies beads across with their original, work-shaped ids and never
+	// deletes back, so a migrated bead can be held both by the work store it was
+	// minted in and by the binding. The pushdown's exactness guard reads it
+	// (pushdown.go).
+	ClassBinding bool
+	// ReservedPrefixes are the reserved id namespaces a class binding holds.
+	// An id in one of them belongs to the binding and nowhere else, so it cannot
+	// also live in an earlier leg; only the binding's other, work-shaped ids can.
+	ReservedPrefixes []string
 }
 
 // LegFanOut bounds how many legs are read at once.
@@ -39,10 +50,10 @@ const LegFanOut = 8
 // id with the first leg to return an id winning, so the answer and the leg an
 // error names do not depend on which read finished first.
 //
-// The bound is applied LAST, after the merge and after the order, and it is
-// never pushed into a leg. A limit pushed down truncates each store to N and
-// then re-cuts the concatenation, so the answer is the top N of whichever legs
-// happened to fill the quota first rather than the top N of the city.
+// The bound is applied LAST, after the merge and after the order: the answer is
+// the top N of the city, not of whichever leg filled the quota first. A store
+// may be ASKED for a bounded answer (pushdown.go), but only where that is
+// provably the same top N.
 func Read(legs []Leg, q Query) ([]Row, error) {
 	c, err := compile(q)
 	if err != nil {
@@ -92,9 +103,20 @@ func Read(legs []Leg, q Query) ([]Row, error) {
 func readCandidates(legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
 	switch c.status {
 	case "":
-		return federate(legs, readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
+		return readReadyCandidates(legs, c)
 	case StatusOpen:
 		return readOpenStatusCandidates(legs)
+	case StatusInProgress:
+		// The crash-recovery tier, and the one whose rows carry blocked_by. The
+		// assignee is pushed into each leg's list; it is matched exactly on every
+		// backend, and re-applied to the merged set like every predicate.
+		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
+		if c.assignee == "" {
+			return federate(legs, listRead(plain))
+		}
+		narrowed := plain
+		narrowed.Assignee = c.assignee
+		return readNarrowed(legs, c, listRead(narrowed), listRead(plain))
 	default:
 		return federate(legs, listRead(beads.ListQuery{
 			Status:   c.status,
@@ -148,14 +170,6 @@ type legRead func(leg Leg) legResult
 type legResult struct {
 	rows []beads.Bead
 	err  error
-}
-
-// readyRead reads one leg's whole ready set for q, live.
-func readyRead(q beads.ReadyQuery) legRead {
-	return func(leg Leg) legResult {
-		rows, err := beads.HandlesFor(leg.Store).Live.Ready(q)
-		return legResult{rows: rows, err: err}
-	}
 }
 
 func listRead(q beads.ListQuery) legRead {

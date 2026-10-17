@@ -549,6 +549,33 @@ func TestReadyFederationLegOrderMatchesTheAPIContract(t *testing.T) {
 	}
 }
 
+// TestReadyMarksTheClassBindingLegWithItsReservedNamespaces pins what the reader
+// is told about each leg: only the class binding is one, and it carries the
+// reserved namespaces it holds, so the reader's narrowed reads check co-residence
+// for the binding's work-shaped relics and for nothing else.
+func TestReadyMarksTheClassBindingLegWithItsReservedNamespaces(t *testing.T) {
+	city := splittest.NewWorkStore(t, "gc")
+	rig := splittest.NewWorkStore(t, "ra")
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+
+	legs := mustReadyLegs(t, "mycity", city, map[string]beads.Store{"rig-A": rig}, graph)
+	if len(legs) != 3 {
+		t.Fatalf("legs = %+v, want city, rig and graph", legs)
+	}
+	for _, leg := range legs[:2] {
+		if leg.ClassBinding || len(leg.ReservedPrefixes) != 0 {
+			t.Fatalf("work leg %q marked as a class binding: %+v", leg.Label, leg)
+		}
+	}
+	binding := legs[2]
+	if !binding.ClassBinding {
+		t.Fatalf("graph leg not marked as a class binding: %+v", binding)
+	}
+	if !slices.Contains(binding.ReservedPrefixes, "gcg") {
+		t.Fatalf("graph leg reserved namespaces = %v, want the graph class's gcg among them", binding.ReservedPrefixes)
+	}
+}
+
 // TestReadySingleStoreCityFederatesOneLeg is the byte-identity claim: a city
 // that relocates nothing gets no second leg, so its answer is exactly the one it
 // had before the federation existed.

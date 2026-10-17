@@ -4,6 +4,7 @@ go_library(
     name = "readywork",
     srcs = [
         "doc.go",
+        "pushdown.go",
         "query.go",
         "read.go",
         "row.go",
@@ -21,6 +22,7 @@ go_test(
     name = "readywork_test",
     srcs = [
         "federate_test.go",
+        "pushdown_test.go",
         "query_test.go",
     ],
     embed = [":readywork"],

@@ -834,7 +834,7 @@ func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, inst
 
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if readyQueryFromArgs(query) != (ReadyQuery{}) {
+	if !readyQueryFromArgs(query).IsZero() {
 		return c.backing.Ready(query...)
 	}
 	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {

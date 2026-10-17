@@ -168,6 +168,10 @@ func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigS
 // the --status lists), which is why this enumerates rather than executing: the
 // plan's policy travels with each leg to the reader, which escalates it (see
 // readywork.Leg). A refused city produces no legs at all — Plan refuses first.
+//
+// A class binding is marked as one, with the reserved namespaces it holds: it
+// is the one leg whose work-shaped ids an earlier leg can also hold (migration
+// relics), which the reader's narrowed reads must know (readywork.Leg).
 func readyLegsForTopology(topo storeref.Topology) ([]readywork.Leg, error) {
 	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
 	if err != nil {
@@ -175,9 +179,32 @@ func readyLegsForTopology(topo storeref.Topology) ([]readywork.Leg, error) {
 	}
 	var legs []readywork.Leg
 	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, onError storeref.ErrPolicy) {
-		legs = append(legs, readywork.Leg{Label: readyLegLabel(leg.Ref), Store: leg.Store, OnError: onError})
+		classBinding := storeref.IsClassRef(string(leg.Ref))
+		legs = append(legs, readywork.Leg{
+			Label:            readyLegLabel(leg.Ref),
+			Store:            leg.Store,
+			OnError:          onError,
+			ClassBinding:     classBinding,
+			ReservedPrefixes: readyLegReservedPrefixes(topo, leg, classBinding),
+		})
 	})
 	return legs, nil
+}
+
+// readyLegReservedPrefixes is the reserved id namespaces a class-binding leg
+// holds: the prefixes of every binding the topology serves from that store. A
+// work leg holds none.
+func readyLegReservedPrefixes(topo storeref.Topology, leg storeref.Leg, classBinding bool) []string {
+	if !classBinding {
+		return nil
+	}
+	var prefixes []string
+	for _, binding := range topo.Bindings {
+		if binding.Leg.Store == leg.Store { // residency:allow — matches the plan's chosen leg to the binding the topology resolved for it, to read its namespaces; no store is ordered, opened or read
+			prefixes = append(prefixes, binding.Prefixes...)
+		}
+	}
+	return prefixes
 }
 
 // rigLegsExcludingCityName drops a rig keyed under the city's own name; see

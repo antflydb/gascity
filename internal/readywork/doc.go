@@ -30,4 +30,14 @@
 // A CLI work query has nowhere to say "this answer is short", so any leg that
 // cannot be read fails the whole answer, naming the leg. The plan's
 // PartialDegrade verdict on rig legs is escalated here, deliberately.
+//
+// # Pushdown
+//
+// The selective predicates (--assignee, --unassigned, plain-string
+// --metadata-field key=value) and, under the two orders a store can reproduce,
+// --limit are pushed into each leg's query. A store may narrow its answer by
+// them, and never widen it; the predicates are always re-applied to the merged
+// set here, which stays the authority. See pushdown.go for why each pushed
+// predicate is no stricter than the Go filter, and for the limit's exactness
+// rules.
 package readywork

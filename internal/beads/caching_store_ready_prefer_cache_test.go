@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -151,7 +152,7 @@ func TestReadyPreferCacheReadsLiveWhenCold(t *testing.T) {
 		t.Fatalf("ReadyPreferCache: %v", err)
 	}
 	calls := backing.readyCalls()
-	if len(calls) != 1 || calls[0] != q {
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], q) {
 		t.Fatalf("backing Ready calls = %+v, want exactly one live read of %+v", calls, q)
 	}
 	want, _ := backing.MemStore.Ready(q)
@@ -203,7 +204,7 @@ func TestReadyPreferCacheReadsLiveForAnUnanswerableCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadyPreferCache(%+v): %v", all, err)
 	}
-	if calls := backing.readyCalls(); len(calls) != 1 || calls[0] != all {
+	if calls := backing.readyCalls(); len(calls) != 1 || !reflect.DeepEqual(calls[0], all) {
 		t.Fatalf("backing Ready calls = %+v, want one live read of %+v", calls, all)
 	}
 	if want, _ := backing.MemStore.Ready(all); !rpcSameIDs(rpcIDs(got), rpcIDs(want)) {
