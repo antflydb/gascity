@@ -1344,6 +1344,44 @@ func TestReadyLoadsCityConfigOnce(t *testing.T) {
 	}
 }
 
+// TestReadyResolvesTheCityWithoutARigContext pins that `gc ready` resolves only
+// its city. The reader is city-wide, so the rig a working directory maps to
+// selects nothing, and resolving it cost a full config load of its own on every
+// call made from a rig directory without GC_RIG (the shape an operator's shell
+// is in). One config load per invocation, from anywhere.
+func TestReadyResolvesTheCityWithoutARigContext(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	t.Setenv("GC_RIG", "")
+	t.Chdir(filepath.Join(cityDir, "rigs", readyCountedRigNames[len(readyCountedRigNames)-1]))
+
+	var stdout, stderr bytes.Buffer
+	before := loadCityConfigCalls.Load()
+	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("gc ready from a rig directory loaded the city config %d times, want exactly 1: resolving which rig the cwd is in loads the config again for a rig the reader never reads", grew)
+	}
+}
+
+// TestReadyRejectsAMalformedQueryBeforeOpeningAnyStore pins that a malformed
+// flag is answered without the city-wide read it would otherwise cost: on a city
+// with a dead rig, the error names the flag, not the rig, because no store was
+// opened to find the rig dead.
+func TestReadyRejectsAMalformedQueryBeforeOpeningAnyStore(t *testing.T) {
+	newReadyCityWithBrokenRig(t)
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readywork.Query{Status: "bogus"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc ready --status bogus exited 0; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown --status "bogus"`) {
+		t.Fatalf("stderr = %q, want the malformed flag named", stderr.String())
+	}
+	if strings.Contains(stderr.String(), readyBrokenRigName) {
+		t.Fatalf("stderr = %q names the dead rig: the stores were opened before the query was validated", stderr.String())
+	}
+}
+
 // TestReadyRigLegStoresReuseSuppliedConfig pins the rig-leg opener on its own:
 // handed a config, it opens every bound rig without loading one.
 func TestReadyRigLegStoresReuseSuppliedConfig(t *testing.T) {

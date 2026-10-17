@@ -97,6 +97,13 @@ func registerReadyFlags(cmd *cobra.Command, opts *readywork.Query, includeEpheme
 }
 
 func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
+	// Every flag is validated before anything is resolved, loaded or opened: a
+	// malformed query must not cost a city-wide federated read to be told it was
+	// malformed.
+	if err := opts.Validate(); err != nil {
+		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// One composed city-config load for the whole invocation. Every store open
 	// below resolves its own inputs — the pinned bd, the storage binding env —
 	// and each of those composed the city config again, once per rig: 22 loads
@@ -104,7 +111,9 @@ func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
 	// the config this command is about to load, so the memo serves them from it
 	// (see invocationConfigMemo for what callers may and may not touch).
 	defer beginInvocationConfigMemo()()
-	cityPath, err := resolveCity()
+	// The reader is city-wide: no rig context selects anything, so the
+	// resolution skips the full config load a rig name costs.
+	cityPath, err := resolveCityPathOnly()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
