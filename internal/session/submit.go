@@ -101,7 +101,7 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForRuntime(b.Metadata, strings.TrimSpace(m.cityPath) != "", runtime.TurnInterruptModeFor(m.sp, sessName)), nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, m.deferredQueue() != nil, runtime.TurnInterruptModeFor(m.sp, sessName)), nil
 }
 
 // refusesTurnInterrupt reports whether a runtime with mode cannot replace the
@@ -220,7 +220,7 @@ func pendingConversationRestart(b beads.Bead) bool {
 func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	return SubmissionCapabilitiesForMetadata(
 		b.Metadata,
-		strings.TrimSpace(m.cityPath) != "",
+		m.deferredQueue() != nil,
 	).SupportsFollowUp
 }
 
@@ -277,7 +277,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
-	if err := m.stopTurnLocked(b, sessName, mode); err != nil {
+	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
@@ -355,13 +355,17 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // [runtime.TurnInterruptModeFor]. Only keystroke mode sends the
 // provider-specific keys (soft Escape, Ctrl-C fallback, input clear): a
 // protocol runtime drops keys and is interrupted through Interrupt alone.
-func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
-	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-		return nil
+// Every input goes under the fence ctx carries, if any. A session with no
+// turn to interrupt (stopFindsNoTurn) is sent nothing: under a fence its
+// fresh read decides the miss, as it may have stopped since its caller read
+// it running.
+func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
+	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
+		return err
 	}
 	switch mode {
 	case runtime.TurnInterruptProtocol:
-		if err := m.sp.Interrupt(sessName); err != nil {
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
 		}
 		return nil
@@ -369,12 +373,12 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.Tur
 		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
-		if err := m.sp.SendKeys(sessName, "Escape"); err != nil {
+		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
 		}
 		return nil
 	}
-	if err := m.sp.Interrupt(sessName); err != nil {
+	if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 		return fmt.Errorf("interrupting session: %w", err)
 	}
 	return nil
@@ -397,7 +401,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 	}
 	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
-			if err := m.sp.Interrupt(sessName); err != nil {
+			if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
 			}
 			return waitForIdle(15 * time.Second)
@@ -405,7 +409,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		if err := waitForIdle(softInterruptFallbackWait); err == nil {
 			return nil
 		}
-		if err := m.sp.Interrupt(sessName); err != nil {
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
 		}
 	}
@@ -588,7 +592,7 @@ func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead,
 			return err
 		}
 	}
-	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
+	if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
 	if err := sleepWithContext(ctx, interruptClearDelay); err != nil {
@@ -723,7 +727,8 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
-	if strings.TrimSpace(m.cityPath) == "" {
+	queue := m.deferredQueue()
+	if queue == nil {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
 	now := time.Now().UTC()
@@ -738,11 +743,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
-	if err := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
-		state.Pending = append(state.Pending, item)
-		nudgequeue.SortState(state)
-		return nil
-	}); err != nil {
+	if err := queue.EnqueueDeferred(item); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {
