@@ -1,0 +1,33 @@
+// Package readywork answers the city-wide claimable-work question `gc ready`
+// asks: which beads, across every store a city spreads its work over, are ready
+// for a given selector, in what order, and how many.
+//
+// It is the one reader behind two surfaces. The CLI runs it in-process over the
+// stores it opens (cmd/gc `gc ready`), and the supervisor runs it over the
+// stores it already holds open (GET /v0/city/{cityName}/work/ready). Both
+// surfaces therefore produce the same rows, in the same order, with the same
+// fields, from the same code: CLI == API holds by construction rather than by
+// two copies kept in step.
+//
+// # What the caller supplies
+//
+// The caller assembles the legs: the city store, the serving rig stores, and a
+// relocated class binding, in that order, from the city's storage plan (see
+// cmd/gc ready_federation.go). This package never decides which stores exist;
+// it reads the ones it is handed, in the order it is handed them.
+//
+// # Every read is live
+//
+// Each leg is read through its live handle (beads.HandlesFor(store).Live), never
+// through a read cache. A row that becomes ready before a read starts is in that
+// read's answer, whichever process wrote it. That is the guarantee the work
+// queries a seat claims through depend on, and it is why the supervisor does not
+// answer from its CachingStore snapshot: writes made by an agent's own `bd` reach
+// that snapshot only at its next reconcile.
+//
+// # Fail loud
+//
+// A CLI work query has nowhere to say "this answer is short", so any leg that
+// cannot be read fails the whole answer, naming the leg. The plan's
+// PartialDegrade verdict on rig legs is escalated here, deliberately.
+package readywork

@@ -1,6 +1,8 @@
 package main
 
-// The leg assembly and fan-out behind `gc ready`.
+// The leg assembly behind `gc ready`. The reader over the legs is
+// internal/readywork, shared with the supervisor's GET
+// /v0/city/{cityName}/work/ready.
 //
 // # Why this exists
 //
@@ -46,7 +48,7 @@ package main
 // A CLI work query has no `partial_errors` field: its whole output is the array,
 // and a short array is indistinguishable from "no work". So where the API can be
 // honestly partial, this command cannot, and every leg it federates fails LOUD —
-// at BOTH ends. federateBeadLegs is the read end. readyRigLegStores is the open
+// at BOTH ends. readywork.Read is the read end. readyRigLegStores is the open
 // end, and it is the end that was the hole: leg assembly runs before any read, so
 // a rig store that could not be opened used to be dropped by the builder, warned
 // about on a stream no work query parses, and answered with exit 0 and a
@@ -73,7 +75,7 @@ package main
 // # Legs are opened and read concurrently, and merged by position
 //
 // The serving rigs are opened at most readyLegFanOut at a time, then the legs
-// read at most readyLegFanOut at a time (readLegsConcurrently). Neither changes
+// read at most readywork.LegFanOut at a time. Neither changes
 // an answer: every result is kept at its leg's index and merged in leg order,
 // so first-leg-wins dedupe, the merged order, and which failing leg an error
 // names are exactly what a leg-after-leg reader produced. What changes is the
@@ -111,26 +113,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
-
-// readyLeg is one federated source: the store, the name a failure reports it by,
-// and the plan's verdict on what that failure MEANS. The label is what turns
-// "the federation failed" into "the graph store failed", which is the difference
-// between a diagnosable outage and a silent short answer.
-//
-// onError is carried rather than consulted, and that is the documented
-// divergence this file's header names: the plan marks a rig leg PartialDegrade,
-// and this reader escalates it to fatal because a CLI array has nowhere to say
-// "this is short". Carrying it keeps the escalation VISIBLE at the point it
-// happens — and lets TestReadyReaderEscalatesThePlansPartialLegs assert that
-// this reader is overriding a policy that really is PartialDegrade, rather than
-// quietly agreeing with a plan that never said so.
-type readyLeg struct {
-	label   string
-	store   beads.Store
-	onError storeref.ErrPolicy
-}
 
 // readyFederationLegs assembles the ordered leg list from Plan(RoutedWork): the
 // city store, the rig stores by name ascending, then the relocated binding.
@@ -151,7 +136,7 @@ type readyLeg struct {
 // A nil store is dropped by the plan rather than federated: a nil entry would
 // panic on first read, and by the time the legs are assembled a store that could
 // not be opened has already failed the whole query at readyRigLegStores.
-func readyFederationLegs(cityPath, cityName string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) ([]readyLeg, error) {
+func readyFederationLegs(cityPath, cityName string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) ([]readywork.Leg, error) {
 	return readyLegsForTopology(cliResidencyTopology(cityPath, cfg, cityStore, rigLegsExcludingCityName(cityName, rigStores)))
 }
 
@@ -163,7 +148,7 @@ func readyFederationLegs(cityPath, cityName string, cfg *config.City, cityStore 
 // carried forward now that the leg list comes from a plan. The identity gate is
 // unchanged: a binding that resolved back to the city's own work store is the
 // store already federated as the city leg, so there is no second store.
-func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigStores map[string]beads.Store, binding beads.Store) ([]readyLeg, error) {
+func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigStores map[string]beads.Store, binding beads.Store) ([]readywork.Leg, error) {
 	var bindings []storeref.ClassBinding
 	if leg := relocatedGraphLegFrom(binding, binding != nil, cityStore); leg != nil {
 		classes := infrastructureClasses()
@@ -179,18 +164,18 @@ func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigS
 // readyLegsForTopology is the assembly itself: Plan(RoutedWork), enumerated
 // through the resolver and labeled.
 //
-// The leg set is resolved ONCE and read by three different arms (ready, list,
-// list-with-owner), which is why this enumerates rather than executing: the
-// policy travels with each leg to the arm that will read it. A refused city
-// produces no legs at all — Plan refuses first.
-func readyLegsForTopology(topo storeref.Topology) ([]readyLeg, error) {
+// The leg set is resolved ONCE and read by every arm of the reader (ready and
+// the --status lists), which is why this enumerates rather than executing: the
+// plan's policy travels with each leg to the reader, which escalates it (see
+// readywork.Leg). A refused city produces no legs at all — Plan refuses first.
+func readyLegsForTopology(topo storeref.Topology) ([]readywork.Leg, error) {
 	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
 	if err != nil {
 		return nil, err
 	}
-	var legs []readyLeg
+	var legs []readywork.Leg
 	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, onError storeref.ErrPolicy) {
-		legs = append(legs, readyLeg{label: readyLegLabel(leg.Ref), store: leg.Store, onError: onError})
+		legs = append(legs, readywork.Leg{Label: readyLegLabel(leg.Ref), Store: leg.Store, OnError: onError})
 	})
 	return legs, nil
 }
@@ -234,8 +219,8 @@ func readyLegLabel(ref storeref.StoreRef) string {
 	}
 }
 
-// readyLegFanOut bounds how many legs `gc ready` opens at once, and then how
-// many it reads at once.
+// readyLegFanOut bounds how many rig stores `gc ready` opens at once. The legs
+// are then read at most readywork.LegFanOut at once.
 //
 // Both phases are latency-bound, not CPU-bound: a rig open is a `bd context`
 // subprocess plus a round of schema probes against its server, and a leg read
@@ -363,129 +348,4 @@ func relocatedGraphLegFrom(binding beads.Store, relocated bool, cityStore beads.
 		return nil
 	}
 	return binding
-}
-
-// federateReadyBeads reads the ready set from every leg and merges it.
-//
-// The per-leg read goes through the LIVE handle, because the CLI process never
-// primed a cache: a caching-wrapped leg answers from its backing store. The
-// API's ready arm instead prefers each leg's warm ready cache
-// (beads.ReadyPreferCache), and the Source rule of humaHandleBeadReady's
-// federation contract names the cases where the two answers can differ.
-func federateReadyBeads(legs []readyLeg, q beads.ReadyQuery) ([]beads.Bead, error) {
-	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
-		return beads.HandlesFor(store).Live.Ready(q)
-	})
-}
-
-// federateListBeads reads a status-scoped list from every leg and merges it. It
-// backs the --status arm, where a graph step assigned to a worker that died
-// lives in the relocated store.
-//
-// The read is a direct store.List rather than the live handle's, because that
-// handle overrides TierMode to TierBoth and would silently discard the caller's
-// tier selection. The API's list arm reads the store directly for the same
-// reason. The caller states the tier it wants (readReadyCandidates), so nothing
-// here has to guess it.
-func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error) {
-	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
-		return store.List(q)
-	})
-}
-
-// federateListBeadsWithOwner is federateListBeads plus a record of which leg
-// served each merged row.
-//
-// It is separate rather than a widened federateListBeads because only the
-// crash-recovery arm needs the ownership map, and every other caller would then
-// carry a map it discards. The merge rule is the same one federateBeadLegs
-// applies — first leg to return an id wins — restated here rather than shared,
-// because sharing it would mean threading a per-leg callback through the read
-// closure that federateBeadLegs deliberately keeps store-shaped. The reads
-// themselves do share readLegsConcurrently, which has no such shape to keep.
-func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, map[string]readyLeg, error) {
-	results := readLegsConcurrently(legs, func(store beads.Store) ([]beads.Bead, error) {
-		return store.List(q)
-	})
-	if err := firstLegError(legs, results); err != nil {
-		return nil, nil, err
-	}
-	var merged []beads.Bead
-	owner := make(map[string]readyLeg)
-	for i, res := range results {
-		for _, b := range res.rows {
-			if _, seen := owner[b.ID]; seen {
-				continue
-			}
-			owner[b.ID] = legs[i]
-			merged = append(merged, b)
-		}
-	}
-	return merged, owner, nil
-}
-
-// federateBeadLegs runs read against every leg, at most readyLegFanOut at once,
-// and merges the results deduped by id with the FIRST leg to return an id
-// winning — first by POSITION in legs, not by which read finished first.
-//
-// Any leg error — including a partial read, which beads reports as an error
-// carrying rows — aborts the whole federation, ESCALATING the plan's
-// PartialDegrade verdict on the rig legs. See the file header: a CLI array has
-// nowhere to say "this is short", so a degraded leg here would be served as a
-// short array indistinguishable from "no work".
-func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
-	results := readLegsConcurrently(legs, read)
-	if err := firstLegError(legs, results); err != nil {
-		return nil, err
-	}
-	var merged []beads.Bead
-	seen := make(map[string]bool)
-	for _, res := range results {
-		for _, b := range res.rows {
-			if seen[b.ID] {
-				continue
-			}
-			seen[b.ID] = true
-			merged = append(merged, b)
-		}
-	}
-	return merged, nil
-}
-
-// legReadResult is one leg's read, kept at that leg's index so every merge is
-// ordered by leg position whatever order the reads finished in.
-type legReadResult struct {
-	rows []beads.Bead
-	err  error
-}
-
-// readLegsConcurrently runs read against every leg, at most readyLegFanOut at
-// once (boundedFanOut), and returns each leg's outcome at that leg's index.
-//
-// Every leg is a DISTINCT store — the plan dedupes legs by store identity — so
-// no two reads here share a store, and each writes only its own slot. Reads
-// against different stores are what the controller's census already does
-// concurrently. Every leg is read even when an earlier one fails: the reads
-// have no side effects, and firstLegError picks the error a sequential reader
-// would have stopped at.
-func readLegsConcurrently(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) []legReadResult {
-	results := make([]legReadResult, len(legs))
-	boundedFanOut(len(legs), readyLegFanOut, func(i int) {
-		rows, err := read(legs[i].store)
-		results[i] = legReadResult{rows: rows, err: err}
-	})
-	return results
-}
-
-// firstLegError returns the error of the first leg, by POSITION, whose read
-// failed, labeled with that leg. First by position rather than first to fail
-// is deliberate: it is the leg a sequential reader would have hit and stopped
-// at, so the error names the same leg however the reads raced.
-func firstLegError(legs []readyLeg, results []legReadResult) error {
-	for i, res := range results {
-		if res.err != nil {
-			return fmt.Errorf("%s store: %w", legs[i].label, res.err)
-		}
-	}
-	return nil
 }

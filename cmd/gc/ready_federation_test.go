@@ -32,262 +32,13 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fanout/fanouttest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
-
-// readyGatedStore parks every read on probe before delegating, so a synctest
-// bubble can count how many legs are being read at once.
-type readyGatedStore struct {
-	beads.Store
-	probe *fanOutProbe
-}
-
-func (s readyGatedStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	s.probe.call(0)
-	return s.Store.Ready(query...)
-}
-
-func (s readyGatedStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	s.probe.call(0)
-	return s.Store.List(query)
-}
-
-// completionOrder lets a test force one operation to finish strictly after
-// another without timing either: the operation holding waitFor blocks until
-// the one holding signal has finished.
-type completionOrder struct {
-	finished chan struct{}
-	once     sync.Once
-}
-
-func newCompletionOrder() *completionOrder {
-	return &completionOrder{finished: make(chan struct{})}
-}
-
-func (c *completionOrder) markFinished() { c.once.Do(func() { close(c.finished) }) }
-
-// readyOrderedStore finishes its reads after the operation it waits for and
-// then signals its own completion, optionally failing. Either order field may
-// be nil.
-type readyOrderedStore struct {
-	beads.Store
-	waitFor *completionOrder
-	signal  *completionOrder
-	err     error
-}
-
-func (s readyOrderedStore) read(fn func() ([]beads.Bead, error)) ([]beads.Bead, error) {
-	if s.waitFor != nil {
-		<-s.waitFor.finished
-	}
-	if s.signal != nil {
-		defer s.signal.markFinished()
-	}
-	if s.err != nil {
-		return nil, s.err
-	}
-	return fn()
-}
-
-func (s readyOrderedStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	return s.read(func() ([]beads.Bead, error) { return s.Store.Ready(query...) })
-}
-
-func (s readyOrderedStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	return s.read(func() ([]beads.Bead, error) { return s.Store.List(query) })
-}
-
-// gatedLegs builds n legs over empty stores, every read parked on probe.
-func gatedLegs(n int, probe *fanOutProbe) []readyLeg {
-	legs := make([]readyLeg, n)
-	for i := range legs {
-		legs[i] = readyTestLeg(fmt.Sprintf("leg-%d", i), readyGatedStore{Store: beads.NewMemStore(), probe: probe})
-	}
-	return legs
-}
-
-// TestFederateReadyBeadsReadsEveryLegAtOnce pins the read half of the latency
-// fix: with fewer legs than the fan-out bound, every leg is being read at the
-// same time, so a federated read costs the slowest leg rather than the sum.
-func TestFederateReadyBeadsReadsEveryLegAtOnce(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const legCount = 5
-		probe := newFanOutProbe()
-		defer probe.open()
-
-		var err error
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_, err = federateReadyBeads(gatedLegs(legCount, probe), beads.ReadyQuery{TierMode: beads.FederatedReadTier})
-		}()
-		synctest.Wait()
-		if got := probe.running.Load(); got != legCount {
-			t.Fatalf("%d of %d legs were being read at once, want all of them: a leg-after-leg reader makes one gc ready cost the sum of every store's latency", got, legCount)
-		}
-		probe.open()
-		<-done
-		if err != nil {
-			t.Fatalf("federateReadyBeads: %v", err)
-		}
-	})
-}
-
-// TestFederateReadyBeadsBoundsTheLegFanOut pins the bound: a city with more
-// legs than readyLegFanOut never has more than that many reads in flight.
-func TestFederateReadyBeadsBoundsTheLegFanOut(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		legCount := readyLegFanOut + 3
-		probe := newFanOutProbe()
-		defer probe.open()
-
-		var rows []beads.Bead
-		var err error
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			rows, err = federateReadyBeads(gatedLegs(legCount, probe), beads.ReadyQuery{TierMode: beads.FederatedReadTier})
-		}()
-		synctest.Wait()
-		if got := probe.running.Load(); got != int64(readyLegFanOut) {
-			t.Fatalf("%d legs being read at once over a %d-leg city, want exactly the bound %d", got, legCount, readyLegFanOut)
-		}
-		probe.open()
-		<-done
-		if err != nil || len(rows) != 0 {
-			t.Fatalf("federateReadyBeads = %v, %v; want an empty answer from empty legs", rows, err)
-		}
-		if got := len(probe.sortedVisits()); got != legCount {
-			t.Fatalf("%d of %d legs were read, want every leg exactly once", got, legCount)
-		}
-	})
-}
-
-// TestFederateListBeadsWithOwnerReadsEveryLegAtOnce is the same property for
-// the crash-recovery arm, which restates the merge loop rather than sharing it.
-func TestFederateListBeadsWithOwnerReadsEveryLegAtOnce(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const legCount = 4
-		probe := newFanOutProbe()
-		defer probe.open()
-
-		var err error
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_, _, err = federateListBeadsWithOwner(gatedLegs(legCount, probe), beads.ListQuery{Status: readyStatusInProgress, Live: true, TierMode: beads.FederatedReadTier})
-		}()
-		synctest.Wait()
-		if got := probe.running.Load(); got != legCount {
-			t.Fatalf("%d of %d legs were being listed at once, want all of them", got, legCount)
-		}
-		probe.open()
-		<-done
-		if err != nil {
-			t.Fatalf("federateListBeadsWithOwner: %v", err)
-		}
-	})
-}
-
-// seedCoResidentPair puts one bead in the work store and a forced copy of the
-// same id in the class store, titled after the leg that holds it: the steady
-// state of a migrated city, where the migration preserves ids.
-func seedCoResidentPair(t *testing.T) (work, graph beads.Store, id string) {
-	t.Helper()
-	work, graph = splittest.NewSplitStores(t)
-	workCopy := mustCreateReadyBead(t, work, beads.Bead{Title: "work leg row", Type: "task"})
-	forced, ok := graph.(beads.ForeignIDCreator)
-	if !ok {
-		t.Fatalf("class store %T cannot model the migration's forced foreign-id copy", graph)
-	}
-	if _, err := forced.CreateWithForeignID(beads.Bead{ID: workCopy.ID, Title: "graph leg row", Type: "task"}); err != nil {
-		t.Fatalf("copy %s into the class store: %v", workCopy.ID, err)
-	}
-	return work, graph, workCopy.ID
-}
-
-// TestFederateReadyBeadsDedupeIsByLegPositionNotCompletion is
-// TestReadyDedupeIsFirstLegWins's concurrent twin: the first leg is forced to
-// answer LAST, and its row must still win.
-func TestFederateReadyBeadsDedupeIsByLegPositionNotCompletion(t *testing.T) {
-	work, graph, id := seedCoResidentPair(t)
-	synctest.Test(t, func(t *testing.T) {
-		graphFirst := newCompletionOrder()
-		defer graphFirst.markFinished()
-		legs := []readyLeg{
-			readyTestLeg("city", readyOrderedStore{Store: work, waitFor: graphFirst}),
-			readyTestLeg("graph", readyOrderedStore{Store: graph, signal: graphFirst}),
-		}
-		rows, err := federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
-		if err != nil {
-			t.Fatalf("federateReadyBeads: %v", err)
-		}
-		if len(rows) != 1 || rows[0].ID != id || rows[0].Title != "work leg row" {
-			t.Fatalf("merged = %v, want only the first leg's row for %s even though the second leg answered first", rows, id)
-		}
-	})
-}
-
-// TestFederateListBeadsWithOwnerResolvesOwnershipByLegPosition pins the same
-// rule for the merged rows AND the ownership map the blocked_by enrichment
-// reads through.
-func TestFederateListBeadsWithOwnerResolvesOwnershipByLegPosition(t *testing.T) {
-	work, graph, id := seedCoResidentPair(t)
-	inProgress, assignee := readyStatusInProgress, "worker-1"
-	for _, store := range []beads.Store{work, graph} {
-		if err := store.Update(id, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
-			t.Fatalf("claim %s: %v", id, err)
-		}
-	}
-	synctest.Test(t, func(t *testing.T) {
-		graphFirst := newCompletionOrder()
-		defer graphFirst.markFinished()
-		legs := []readyLeg{
-			readyTestLeg("city", readyOrderedStore{Store: work, waitFor: graphFirst}),
-			readyTestLeg("graph", readyOrderedStore{Store: graph, signal: graphFirst}),
-		}
-		rows, owners, err := federateListBeadsWithOwner(legs, beads.ListQuery{Status: readyStatusInProgress, Live: true, TierMode: beads.FederatedReadTier})
-		if err != nil {
-			t.Fatalf("federateListBeadsWithOwner: %v", err)
-		}
-		if len(rows) != 1 || rows[0].Title != "work leg row" {
-			t.Fatalf("merged = %v, want only the first leg's row", rows)
-		}
-		if owner := owners[id]; owner.label != "city" {
-			t.Fatalf("owner of %s = %q, want %q: ownership resolves by leg position, not by which leg answered first", id, owner.label, "city")
-		}
-	})
-}
-
-// TestFederateReadyBeadsReportsTheFirstFailingLegByPosition pins error
-// determinism: when two legs fail, the error names the one a sequential reader
-// would have stopped at, even though the later leg failed first. And a failing
-// leg still fails the whole answer — concurrency does not turn the fail-loud
-// rule into a partial array.
-func TestFederateReadyBeadsReportsTheFirstFailingLegByPosition(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		laterFailsFirst := newCompletionOrder()
-		defer laterFailsFirst.markFinished()
-		healthy := beads.NewMemStore()
-		mustCreateReadyBead(t, healthy, beads.Bead{Title: "healthy work", Type: "task"})
-		legs := []readyLeg{
-			readyTestLeg("city", healthy),
-			readyTestLeg("rig alpha", readyOrderedStore{Store: beads.NewMemStore(), waitFor: laterFailsFirst, err: errors.New("alpha is locked")}),
-			readyTestLeg("rig beta", readyOrderedStore{Store: beads.NewMemStore(), signal: laterFailsFirst, err: errors.New("beta is locked")}),
-		}
-		rows, err := federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
-		if err == nil {
-			t.Fatalf("two dead legs produced an answer of %d rows; a short array is indistinguishable from \"no work\"", len(rows))
-		}
-		if !strings.Contains(err.Error(), "rig alpha store") || !strings.Contains(err.Error(), "alpha is locked") {
-			t.Fatalf("error = %v, want the first-POSITION failing leg (rig alpha) named", err)
-		}
-	})
-}
 
 // TestOpenStandaloneRigStoresOpensUpToTheParallelismAtOnce pins the open half
 // of the latency fix: each rig open is a preflight subprocess plus schema
@@ -295,8 +46,8 @@ func TestFederateReadyBeadsReportsTheFirstFailingLegByPosition(t *testing.T) {
 func TestOpenStandaloneRigStoresOpensUpToTheParallelismAtOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rigs := fakeRigs(5)
-		probe := newFanOutProbe()
-		defer probe.open()
+		probe := fanouttest.NewProbe()
+		defer probe.Open()
 
 		var stores map[string]beads.Store
 		var failures []rigStoreOpenFailure
@@ -304,15 +55,15 @@ func TestOpenStandaloneRigStoresOpensUpToTheParallelismAtOnce(t *testing.T) {
 		go func() {
 			defer close(done)
 			stores, failures = openStandaloneRigStores(rigs, "/fake/city", func(string, string) (beads.Store, error) {
-				probe.call(0)
+				probe.Call(0)
 				return beads.NewMemStore(), nil
 			}, readyLegFanOut)
 		}()
 		synctest.Wait()
-		if got := probe.running.Load(); got != int64(len(rigs)) {
+		if got := probe.Running(); got != int64(len(rigs)) {
 			t.Fatalf("%d of %d rig stores were opening at once, want all of them", got, len(rigs))
 		}
-		probe.open()
+		probe.Open()
 		<-done
 		if len(failures) != 0 || len(stores) != len(rigs) {
 			t.Fatalf("opened %d stores with failures %v, want %d stores and none", len(stores), failures, len(rigs))
@@ -325,21 +76,21 @@ func TestOpenStandaloneRigStoresOpensUpToTheParallelismAtOnce(t *testing.T) {
 func TestOpenStandaloneRigStoresWithParallelismOneIsTheSequentialWalk(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rigs := fakeRigs(3)
-		probe := newFanOutProbe()
-		defer probe.open()
+		probe := fanouttest.NewProbe()
+		defer probe.Open()
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			openStandaloneRigStores(rigs, "/fake/city", func(string, string) (beads.Store, error) {
-				probe.call(0)
+				probe.Call(0)
 				return beads.NewMemStore(), nil
 			}, 1)
 		}()
 		synctest.Wait()
-		if got := probe.running.Load(); got != 1 {
+		if got := probe.Running(); got != 1 {
 			t.Fatalf("%d rig stores opening at once with parallelism 1, want exactly 1", got)
 		}
-		probe.open()
+		probe.Open()
 		<-done
 	})
 }
@@ -356,15 +107,17 @@ func TestOpenStandaloneRigStoresReportsFailuresInRigOrder(t *testing.T) {
 			{Name: "good", Path: "/fake/good"},
 			{Name: "unbound"},
 		}
-		fastFirst := newCompletionOrder()
-		defer fastFirst.markFinished()
+		fastFirst := make(chan struct{})
+		var fastOnce sync.Once
+		markFastFinished := func() { fastOnce.Do(func() { close(fastFirst) }) }
+		defer markFastFinished()
 		stores, failures := openStandaloneRigStores(rigs, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
 			switch rigPath {
 			case "/fake/slow-bad":
-				<-fastFirst.finished
+				<-fastFirst
 				return nil, errors.New("slow-bad is unmounted")
 			case "/fake/fast-bad":
-				defer fastFirst.markFinished()
+				defer markFastFinished()
 				return nil, errors.New("fast-bad is unmounted")
 			case "":
 				t.Errorf("opened the unbound rig; an empty path aliases the city scope")
@@ -574,7 +327,7 @@ func TestReadyServesNoWorkFromASuspendedRigUntilItResumes(t *testing.T) {
 		return mustCreateReadyBead(t, store, beads.Bead{Title: "routed in " + filepath.Base(scope), Type: "task", Metadata: routed}).ID
 	}
 	cityBead, alphaBead, betaBead := seed(cityDir), seed(rigDirs["alpha"]), seed(rigDirs["beta"])
-	routedOpts := readyOpts{metadataFields: []string{beadmeta.RoutedToMetadataKey + "=worker"}, unassigned: true}
+	routedOpts := readywork.Query{MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=worker"}, Unassigned: true}
 
 	rows := runCmdReady(t, routedOpts)
 	for _, id := range []string{cityBead, alphaBead} {
@@ -605,13 +358,13 @@ func TestReadyIsNotFailedByADarkSuspendedRig(t *testing.T) {
 		t.Fatalf("suspending %s: %v", readyBrokenRigName, err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readyOpts{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc ready = %d with only the suspended rig dark; stderr=%s", code, stderr.String())
 	}
 	if openFailure := "rig " + strconv.Quote(readyBrokenRigName) + " store:"; strings.Contains(stderr.String(), openFailure) {
 		t.Fatalf("gc ready stderr = %q, but the suspended rig is outside the frame and must not be opened", stderr.String())
 	}
-	var rows []readyBead
+	var rows []readywork.Row
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatalf("gc ready emitted %q, which is not the bd array: %v", stdout.String(), err)
 	}
@@ -633,7 +386,7 @@ func TestReadyRefusesAnUnreadableSuspensionState(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readyOpts{}, &stdout, &stderr); code == 0 {
+	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code == 0 {
 		t.Fatalf("gc ready exited 0 over an unreadable suspension state; stdout=%s", stdout.String())
 	}
 	if stdout.Len() != 0 {
@@ -669,7 +422,7 @@ func TestReadyComposesTheCityConfigOncePerInvocation(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := composedCityConfigLoads.Load()
-	if code := cmdReady(readyOpts{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d; stderr=%s", code, stderr.String())
 	}
 	if grew := composedCityConfigLoads.Load() - before; grew != 1 {

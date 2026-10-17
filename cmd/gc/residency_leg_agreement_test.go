@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -105,7 +106,7 @@ func (e legAgreementEnv) claimLegs(t *testing.T) []beads.Store {
 	}
 	out := make([]beads.Store, 0, len(legs))
 	for _, l := range legs {
-		out = append(out, l.store)
+		out = append(out, l.Store)
 	}
 	return out
 }
@@ -190,9 +191,9 @@ func TestEveryLegsRoutedWorkIsBothCountedAndClaimable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readyFederationLegsOverBinding: %v", err)
 	}
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + target},
+	rows, err := readywork.Read(legs, readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + target},
 	})
 	if err != nil {
 		t.Fatalf("gc ready over the claim legs: %v", err)
@@ -418,7 +419,7 @@ func TestDemandAndClaimAgreeOnTheSuspensionFrame(t *testing.T) {
 			}
 			claim := make([]beads.Store, 0, len(legs))
 			for _, l := range legs {
-				claim = append(claim, l.store)
+				claim = append(claim, l.Store)
 			}
 
 			if !sameStoreSequence(demand, claim) {

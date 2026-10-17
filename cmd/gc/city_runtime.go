@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fanout"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -4838,7 +4839,7 @@ type rigStoreOpenFailure struct {
 // serving frame (readyServingRigs).
 //
 // open is how each rig store is opened; see rigStoreOpener. At most parallelism
-// opens run at once (boundedFanOut): each open is a preflight subprocess and a
+// opens run at once (fanout.Bounded): each open is a preflight subprocess and a
 // round of schema probes, so a walk that opens rigs one after another makes its
 // caller wait for the sum of them. A parallelism of 1 is that walk, unchanged —
 // in order, on the caller's goroutine — which is what every caller except `gc
@@ -4863,7 +4864,7 @@ func openStandaloneRigStores(rigs []config.Rig, cityPath string, open rigStoreOp
 	}
 	opened := make([]beads.Store, len(bound))
 	openErrs := make([]error, len(bound))
-	boundedFanOut(len(bound), parallelism, func(i int) {
+	fanout.Bounded(len(bound), parallelism, func(i int) {
 		opened[i], openErrs[i] = open(bound[i].Path, cityPath)
 	})
 	stores := make(map[string]beads.Store, len(bound))
