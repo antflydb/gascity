@@ -265,7 +265,8 @@ var readyRigStoreOpener = oneShotRigStoreOpener
 //
 // Every dead rig is named, in config order, not just the first: unlike a read,
 // the opens have all already happened by here, so reporting one and discarding
-// the rest would throw away diagnosis already paid for.
+// the rest would throw away diagnosis already paid for. The stores that did
+// open are closed, since a failed query hands back none of them.
 //
 // A suspended rig is not in the frame, so it is never opened and its store
 // being down cannot fail the query; see readyServingRigs.
@@ -278,6 +279,9 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 	if len(failures) == 0 {
 		return stores, nil
 	}
+	for _, store := range stores {
+		closeBeadStoreHandle(store) //nolint:errcheck // best-effort: the failed opens are the error
+	}
 	errs := make([]error, 0, len(failures))
 	for _, f := range failures {
 		errs = append(errs, fmt.Errorf("rig %q store: %w", f.rig, f.err))
@@ -286,12 +290,15 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 }
 
 // readyServingRigs is the rig half of the frame `gc ready` federates: the
-// configured rigs that are not suspended, in config order. It is the same frame
-// the controller's census reads (servingRigStores), computed the same way —
-// suspendedRigPathsWithState over the effective suspension state, the runtime
-// `gc rig suspend` / `gc rig resume` override layered on suspended_on_start —
-// so the reader a seat claims through and the census that minted the seat
-// agree about which rigs exist (TestReadyServingFrameIsTheCensusFrame).
+// configured rigs that are not suspended, in config order. Over a readable
+// suspension state it is the frame the controller's census reads
+// (servingRigStores), by the same rule — suspendedRigPathsWithState over the
+// effective suspension state, the runtime `gc rig suspend` / `gc rig resume`
+// override layered on suspended_on_start — so the reader a seat claims through
+// and the census that minted the seat agree about which rigs exist
+// (TestReadyServingFrameIsTheCensusFrame). Over an unreadable one they part:
+// the census's loader (buildSuspendedRigPathsForCity) drops the error and
+// falls back to the authored defaults, where this fails the query (below).
 //
 // # Why a suspended rig is outside the frame
 //
