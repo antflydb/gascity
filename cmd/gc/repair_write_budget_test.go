@@ -1051,3 +1051,196 @@ func TestRepairWriteBudgetDispatcherRepairRefusedByTheBudgetIsSuppressedFromTheS
 		}
 	}
 }
+
+// The one report line gives the three figures it names as three separate
+// numbers: the write attempts made, the time spent inside the writes, and the
+// repairs deferred to the next build. A backlog tail of a different length than
+// the attempt cap tells the figures apart.
+func TestRepairWriteBudgetReportNamesAttemptsTimeAndDeferredRepairsSeparately(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			perWrite = repairWriteTimeBudget / (4 * repairWritesPerBuild)
+			tail     = 7
+		)
+		store := &budgetTestStore{Store: beads.NewMemStore(), delay: perWrite}
+		rows, stores := seedSlotRoutedBacklog(t, store, repairWritesPerBuild+tail)
+		budget := newRepairWriteBudget().forDomain(t.Name())
+		collapseSlotSuffixedRoutedWork(agreementConfig(), rows, stores, budget, io.Discard)
+
+		var stderr bytes.Buffer
+		budget.report(&stderr)
+		line := strings.TrimRight(stderr.String(), "\n")
+		for _, want := range []string{
+			fmt.Sprintf("after %d write attempts", repairWritesPerBuild),
+			"and " + (repairWritesPerBuild * perWrite).String() + " in writes",
+			fmt.Sprintf("; %d repairs deferred", tail),
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("report %q lacks %q", line, want)
+			}
+		}
+	})
+}
+
+// The time cap is a cap on the time the writes take, whether they succeed or
+// fail: writes that each cost a fifth of the budget get about five before the
+// build stops, and a store that fails slowly, which is what a write timeout
+// looks like, is stopped just the same. The range, not an exact count, is the
+// assertion.
+func TestRepairWriteBudgetTimeCapStopsAtTheBudgetWhetherWritesSucceedOrFail(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		failAll bool
+	}{
+		{"succeeding", false},
+		{"failing", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const perWrite = repairWriteTimeBudget / 5
+				store := &budgetTestStore{Store: beads.NewMemStore(), delay: perWrite, failAll: c.failAll}
+				rows, stores := seedSlotRoutedBacklog(t, store, 4*repairWritesPerBuild)
+				budget := newRepairWriteBudget().forDomain(t.Name())
+
+				collapseSlotSuffixedRoutedWork(agreementConfig(), rows, stores, budget, io.Discard)
+
+				if store.writes < 4 || store.writes > 6 {
+					t.Fatalf("writes = %d, want about 5: each costs %s of the %s time budget", store.writes, perWrite, repairWriteTimeBudget)
+				}
+				if !budget.exhausted() {
+					t.Error("exhausted() = false after the time cap was spent")
+				}
+			})
+		})
+	}
+}
+
+// Two workflow roots in one store are read and stamped one each: the memo keys
+// a root on its id as well as on its store.
+func TestStampRunSessionIdentityReadsAndStampsEachDistinctRoot(t *testing.T) {
+	seed := []beads.Bead{}
+	work := []beads.Bead{}
+	for _, id := range []string{"dr-a", "dr-b"} {
+		seed = append(seed, beads.Bead{ID: id + "-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}})
+		step := beads.Bead{
+			ID: id + "-step", Type: "step", Status: "in_progress", Assignee: budgetSession,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: id + "-root"},
+		}
+		seed = append(seed, step)
+		work = append(work, step)
+	}
+	store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
+	stores := []beads.Store{store, store}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(budgetSession, budgetSessionWD)})
+
+	stampRunSessionIdentity(gaConfig(), work, stores, sessions, nil, newRootGetMemo(), io.Discard)
+
+	for _, rootID := range []string{"dr-a-root", "dr-b-root"} {
+		if got := store.gets[rootID]; got != 1 {
+			t.Errorf("Get(%s) ran %d times, want 1", rootID, got)
+		}
+		root, err := store.Store.Get(rootID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", rootID, err)
+		}
+		if root.Metadata[beadmeta.SessionNameMetadataKey] != budgetSession {
+			t.Errorf("root %s was not stamped with its step's session", rootID)
+		}
+	}
+}
+
+// Every desired-state build reads a workflow root afresh. A root whose read
+// failed in one build is read again, and stamped, by the next: the memo of a
+// failed read lives for one build only.
+func TestRepairWriteBudgetBuildReadsAnUnreadableRootAgainOnTheNextBuild(t *testing.T) {
+	const rootID = "nb-root"
+	seed := []beads.Bead{
+		{
+			ID: "sess-budget", Type: sessionBeadType, Labels: []string{"gc:session"}, Status: "open",
+			Metadata: map[string]string{"session_name": budgetSession, "work_dir": budgetSessionWD, "state": "active"},
+		},
+		{ID: rootID, Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
+		{
+			ID: "nb-step", Type: "step", Status: "in_progress", Assignee: budgetSession,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		},
+	}
+	store := &budgetTestStore{Store: beads.NewMemStoreFrom(0, seed, nil), hidden: map[string]bool{rootID: true}}
+	cityDir := t.TempDir()
+	build := func() {
+		t.Helper()
+		snapshot, err := loadSessionBeadSnapshot(store)
+		if err != nil {
+			t.Fatalf("loadSessionBeadSnapshot: %v", err)
+		}
+		buildDesiredStateWithSessionBeads("test-city", cityDir, time.Now().UTC(), gaConfig(), runtime.NewFake(), store, nil, snapshot, nil, io.Discard)
+	}
+
+	build()
+	if got := store.gets[rootID]; got != 1 {
+		t.Fatalf("the first build read %s %d times, want 1 (the fixture's step must reach the stamp pass)", rootID, got)
+	}
+	store.hidden = nil
+	build()
+	if got := store.gets[rootID]; got != 2 {
+		t.Fatalf("two builds read %s %d times, want 2: the second build retries the read the first one failed", rootID, got)
+	}
+	root, err := store.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", rootID, err)
+	}
+	if root.Metadata[beadmeta.SessionNameMetadataKey] != budgetSession {
+		t.Errorf("the second build did not stamp the root that had become readable (metadata %v)", root.Metadata)
+	}
+}
+
+// budgetLongBacklog seeds three budgets' worth of open slot-routed rows, which
+// a bounded repair pass would leave partly unrepaired.
+func budgetLongBacklog(t *testing.T) (*config.City, *budgetTestStore, []beads.Bead) {
+	t.Helper()
+	cfg := gaConfig()
+	cfg.Agents = []config.Agent{poolAgent("planner", "rig-A", intPtr(5), 0)}
+	rows := make([]beads.Bead, 3*repairWritesPerBuild)
+	for i := range rows {
+		rows[i] = workBead(fmt.Sprintf("ga-long-%03d", i), "rig-A/planner-2", "", "open", 5)
+	}
+	return cfg, &budgetTestStore{Store: beads.NewMemStoreFrom(0, rows, nil)}, rows
+}
+
+// budgetLongBacklogRepaired counts the backlog rows whose slot-suffixed route
+// was collapsed to the pool's route.
+func budgetLongBacklogRepaired(t *testing.T, store beads.Store, rows []beads.Bead) int {
+	t.Helper()
+	repaired := 0
+	for _, row := range reloadRows(t, store, rows) {
+		if row.Metadata[beadmeta.RoutedToMetadataKey] == "rig-A/planner" {
+			repaired++
+		}
+	}
+	return repaired
+}
+
+// The v2 backstop lane runs off the reconciler tick and passes no budget: one
+// run repairs a backlog three budgets long.
+func TestBackstopLaneRepairsABacklogLongerThanTheBuildBudget(t *testing.T) {
+	cfg, store, rows := budgetLongBacklog(t)
+
+	runBackstopDemandRepairs(t.Context(), externalReadsEnv{Cfg: cfg, CityStore: store}, io.Discard)
+
+	if got := budgetLongBacklogRepaired(t, store.Store, rows); got != len(rows) {
+		t.Fatalf("one lane run repaired %d of %d rows, want all of them: the lane is not bounded by the build budget", got, len(rows))
+	}
+}
+
+// The doctor's fix sweep passes no budget either: one sweep repairs the whole
+// backlog.
+func TestDoctorV2DemandMigrationsFixRepairsABacklogLongerThanTheBuildBudget(t *testing.T) {
+	cfg, store, rows := budgetLongBacklog(t)
+	c := demandMigrationsCheckFor(t, cfg, t.TempDir(), store, nil)
+
+	c.sweep(true, io.Discard)
+
+	if got := budgetLongBacklogRepaired(t, store.Store, rows); got != len(rows) {
+		t.Fatalf("one fix sweep repaired %d of %d rows, want all of them: the sweep is not bounded by the build budget", got, len(rows))
+	}
+}
