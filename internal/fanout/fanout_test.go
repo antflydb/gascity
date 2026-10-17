@@ -2,12 +2,13 @@ package fanout
 
 import (
 	"fmt"
-	"github.com/gastownhall/gascity/internal/fanout/fanouttest"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+
+	"github.com/gastownhall/gascity/internal/fanout/fanouttest"
 )
 
 func indexRange(n int) []int {

@@ -9,9 +9,15 @@ go_library(
 
 go_test(
     name = "fanout_test",
-    srcs = ["fanout_test.go"],
+    srcs = [
+        "fanout_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":fanout"],
-    deps = ["//internal/fanout/fanouttest"],
+    deps = [
+        "//internal/fanout/fanouttest",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
