@@ -113,18 +113,18 @@ func (fx *escalationFixture) seed(t *testing.T, ep session.StartupHealthEpisode)
 	}
 }
 
-func (fx *escalationFixture) disposition(t *testing.T, name string) session.AlertDisposition {
+func (fx *escalationFixture) disposition(t *testing.T) session.AlertDisposition {
 	t.Helper()
-	ep, err := fx.store.LoadStartupHealthEpisode(name)
+	ep, err := fx.store.LoadStartupHealthEpisode("s1")
 	if err != nil {
 		t.Fatalf("loading episode: %v", err)
 	}
 	return ep.AlertDisposition
 }
 
-func (fx *escalationFixture) writeStderr(t *testing.T, name, content string) {
+func (fx *escalationFixture) writeStderr(t *testing.T, content string) {
 	t.Helper()
-	dir := filepath.Join(citylayout.SessionDiagnosticsDir(fx.cityPath), name)
+	dir := filepath.Join(citylayout.SessionDiagnosticsDir(fx.cityPath), "s1")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestStartupHealthEscalationBelowThresholdIsSilent(t *testing.T) {
 	if fx.mail.attempts() != 0 {
 		t.Fatalf("send attempts = %d, want 0", fx.mail.attempts())
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionNone {
+	if got := fx.disposition(t); got != session.AlertDispositionNone {
 		t.Fatalf("disposition = %q, want none", got)
 	}
 	if fx.stderr.Len() != 0 {
@@ -202,7 +202,7 @@ func TestStartupHealthEscalationSendsOnceAtThreshold(t *testing.T) {
 			t.Errorf("Body missing %q:\n%s", want, msg.Body)
 		}
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionSent {
+	if got := fx.disposition(t); got != session.AlertDispositionSent {
 		t.Fatalf("disposition = %q, want sent", got)
 	}
 }
@@ -248,7 +248,7 @@ func TestStartupHealthEscalationRestartAfterClaimDoesNotResend(t *testing.T) {
 	if got := fx.mail.attempts(); got != 0 {
 		t.Fatalf("send attempts = %d, want 0 for an already-claimed episode", got)
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionSending {
+	if got := fx.disposition(t); got != session.AlertDispositionSending {
 		t.Fatalf("disposition = %q, want sending left visible for doctor", got)
 	}
 }
@@ -291,7 +291,7 @@ func TestStartupHealthEscalationEmptyRecipientSkipsAndLogsOnce(t *testing.T) {
 	if fx.mail.attempts() != 0 {
 		t.Fatalf("send attempts = %d, want 0", fx.mail.attempts())
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionSkipped {
+	if got := fx.disposition(t); got != session.AlertDispositionSkipped {
 		t.Fatalf("disposition = %q, want skipped", got)
 	}
 	if !strings.Contains(logged, "s1") || !strings.Contains(logged, "skipped") {
@@ -314,7 +314,7 @@ func TestStartupHealthEscalationInvalidRecipientFailsWithoutSending(t *testing.T
 			if fx.mail.attempts() != 0 {
 				t.Fatalf("send attempts = %d, want 0", fx.mail.attempts())
 			}
-			if got := fx.disposition(t, "s1"); got != session.AlertDispositionFailed {
+			if got := fx.disposition(t); got != session.AlertDispositionFailed {
 				t.Fatalf("disposition = %q, want failed", got)
 			}
 			if !strings.Contains(fx.stderr.String(), "invalid") {
@@ -336,7 +336,7 @@ func TestStartupHealthEscalationMailFailureIsRecordedNotRetriedPerTick(t *testin
 	if got := fx.mail.attempts(); got != 1 {
 		t.Fatalf("send attempts = %d, want 1 (no per-tick retry)", got)
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionFailed {
+	if got := fx.disposition(t); got != session.AlertDispositionFailed {
 		t.Fatalf("disposition = %q, want failed", got)
 	}
 	if !strings.Contains(fx.stderr.String(), "mail backend down") {
@@ -351,7 +351,7 @@ func TestStartupHealthEscalationUnavailableMailProviderFails(t *testing.T) {
 
 	fx.esc.sweep()
 
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionFailed {
+	if got := fx.disposition(t); got != session.AlertDispositionFailed {
 		t.Fatalf("disposition = %q, want failed", got)
 	}
 	if !strings.Contains(fx.stderr.String(), "mail provider") {
@@ -373,7 +373,7 @@ func TestStartupHealthEscalationClaimWriteFailureSendsNothingAndRetriesLater(t *
 	if fx.mail.attempts() != 0 {
 		t.Fatalf("send attempts = %d, want 0 when the claim write fails", fx.mail.attempts())
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionPending {
+	if got := fx.disposition(t); got != session.AlertDispositionPending {
 		t.Fatalf("disposition = %q, want pending left for the next tick", got)
 	}
 	if !strings.Contains(fx.stderr.String(), "state write refused") {
@@ -403,7 +403,7 @@ func TestStartupHealthEscalationOutcomeWriteFailureNeverResends(t *testing.T) {
 	if got := fx.mail.attempts(); got != 1 {
 		t.Fatalf("send attempts = %d, want 1", got)
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionSending {
+	if got := fx.disposition(t); got != session.AlertDispositionSending {
 		t.Fatalf("disposition = %q, want sending", got)
 	}
 	if !strings.Contains(fx.stderr.String(), "state write refused") {
@@ -484,7 +484,7 @@ func TestNewStartupHealthEscalatorWithoutControllerStateHasNoProvider(t *testing
 func TestStartupHealthEscalationTailIsBoundedAndKeepsTheEnd(t *testing.T) {
 	fx := newEscalationFixture(t, escalationTestRecipient)
 	fx.seed(t, pendingEpisode("s1", session.FailureKindStartupDeath))
-	fx.writeStderr(t, "s1", "FIRST-LINE-MARKER\n"+strings.Repeat("x", 100_000)+"\nLAST-LINE-MARKER\n")
+	fx.writeStderr(t, "FIRST-LINE-MARKER\n"+strings.Repeat("x", 100_000)+"\nLAST-LINE-MARKER\n")
 
 	fx.esc.sweep()
 
@@ -539,7 +539,7 @@ func TestStartupHealthEscalationRedactsSecretsInTail(t *testing.T) {
 	t.Setenv("GC_TEST_ESCALATION_API_TOKEN", "sk-live-0123456789abcdef")
 	fx := newEscalationFixture(t, escalationTestRecipient)
 	fx.seed(t, pendingEpisode("s1", session.FailureKindStartupDeath))
-	fx.writeStderr(t, "s1", "auth failed using sk-live-0123456789abcdef against api\n")
+	fx.writeStderr(t, "auth failed using sk-live-0123456789abcdef against api\n")
 
 	fx.esc.sweep()
 
@@ -562,7 +562,7 @@ func TestStartupHealthEscalationMissingStderrLogStillSends(t *testing.T) {
 	if !strings.Contains(body, "start-stderr.log") {
 		t.Fatalf("body does not say the log is unavailable:\n%s", body)
 	}
-	if got := fx.disposition(t, "s1"); got != session.AlertDispositionSent {
+	if got := fx.disposition(t); got != session.AlertDispositionSent {
 		t.Fatalf("disposition = %q, want sent", got)
 	}
 }
@@ -570,7 +570,7 @@ func TestStartupHealthEscalationMissingStderrLogStillSends(t *testing.T) {
 func TestStartupHealthEscalationTailOnlyForStartupDeath(t *testing.T) {
 	fx := newEscalationFixture(t, escalationTestRecipient)
 	fx.seed(t, pendingEpisode("s1", session.FailureKindOther))
-	fx.writeStderr(t, "s1", "SHOULD-NOT-APPEAR\n")
+	fx.writeStderr(t, "SHOULD-NOT-APPEAR\n")
 
 	fx.esc.sweep()
 

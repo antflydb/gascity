@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -27,15 +28,27 @@ const (
 // startupHealthLastDetailMaxRunes bounds StartupHealthEpisode.LastDetail.
 const startupHealthLastDetailMaxRunes = 500
 
-// AlertDisposition tracks whether a startup-health escalation has been sent
-// for the current run of consecutive failures.
+// AlertDisposition tracks the startup-health escalation for the current run of
+// consecutive failures. A run escalates at most once: pending is the only
+// state a sender may claim, and every other non-empty state is terminal until
+// a successful start clears the episode.
 type AlertDisposition string
 
 // AlertDisposition values.
 const (
 	AlertDispositionNone    AlertDisposition = ""
 	AlertDispositionPending AlertDisposition = "pending"
+	// AlertDispositionSending marks a claimed escalation whose outcome is not
+	// yet recorded. It is written before the send, so an episode left here by a
+	// crash is never sent again.
+	AlertDispositionSending AlertDisposition = "sending"
 	AlertDispositionSent    AlertDisposition = "sent"
+	// AlertDispositionSkipped records a threshold crossing with no
+	// [session].escalation_to configured.
+	AlertDispositionSkipped AlertDisposition = "skipped"
+	// AlertDispositionFailed records an escalation that was attempted and did
+	// not go out: an invalid recipient, an unavailable provider, or a send error.
+	AlertDispositionFailed AlertDisposition = "failed"
 )
 
 // FailureKind classifies why a startup attempt failed, so a caller (such as
@@ -48,6 +61,9 @@ const (
 	FailureKindUnspecified FailureKind = ""
 	FailureKindTimeout     FailureKind = "timeout"
 	FailureKindOther       FailureKind = "other"
+	// FailureKindStartupDeath marks a start whose process died during startup,
+	// leaving start-stderr.log in the session diagnostics directory.
+	FailureKindStartupDeath FailureKind = "startup_death"
 )
 
 // StartupHealthEpisode is a bookkeeping record of consecutive startup
@@ -123,9 +139,9 @@ func formatStartupHealthTime(t time.Time) string {
 // FirstFailureAt is stamped only once (preserved across accrual); LastDetail
 // and Kind are overwritten on every call (no accrual, no stickiness);
 // QuarantinedUntil is set once ConsecutiveCount reaches threshold; and
-// AlertDisposition escalates to pending on entering quarantine but never
-// regresses away from AlertDispositionSent (an already-sent escalation stays
-// sent through further accrual).
+// AlertDisposition escalates to pending only from AlertDispositionNone, so
+// every later state (pending, sending, sent, skipped, failed) is kept through
+// further accrual and one run of failures escalates at most once.
 func RecordStartupFailure(prior StartupHealthEpisode, kind FailureKind, detail string, now time.Time, threshold int, quarantineDuration time.Duration) StartupHealthEpisode {
 	firstFailureAt := prior.FirstFailureAt
 	if firstFailureAt.IsZero() {
@@ -147,7 +163,7 @@ func RecordStartupFailure(prior StartupHealthEpisode, kind FailureKind, detail s
 	}
 	if next.ConsecutiveCount >= threshold {
 		next.QuarantinedUntil = now.Add(quarantineDuration)
-		if next.AlertDisposition != AlertDispositionSent {
+		if next.AlertDisposition == AlertDispositionNone {
 			next.AlertDisposition = AlertDispositionPending
 		}
 	}
@@ -222,6 +238,55 @@ func (s *Store) ListStartupHealthEpisodes() ([]StartupHealthEpisode, error) {
 	matches, err := s.store.List(beads.ListQuery{Type: StartupHealthEpisodeType, IncludeClosed: true})
 	if err != nil {
 		return nil, fmt.Errorf("listing startup-health episodes: %w", err)
+	}
+	episodes := make([]StartupHealthEpisode, 0, len(matches))
+	for _, b := range matches {
+		episodes = append(episodes, StartupHealthEpisodeFromMetadata(b.Metadata))
+	}
+	return episodes, nil
+}
+
+// ErrStartupHealthAlertConflict reports that a startup-health episode's alert
+// disposition was not the one the caller expected, or that the episode no
+// longer exists. The caller lost the claim and must not act on it.
+var ErrStartupHealthAlertConflict = errors.New("startup-health alert disposition changed")
+
+// SetStartupHealthAlert moves sessionName's episode from the expected alert
+// disposition to next, writing only the disposition key so a concurrent
+// failure or clear of the other fields is not overwritten. It returns
+// ErrStartupHealthAlertConflict when the episode is absent or holds a
+// different disposition. The read-then-write is not atomic across processes;
+// the controller's single escalation sweep is the only writer of these
+// transitions.
+func (s *Store) SetStartupHealthAlert(sessionName string, expected, next AlertDisposition) error {
+	matches, err := s.startupHealthEpisodeBeads(sessionName)
+	if err != nil {
+		return fmt.Errorf("looking up startup-health episode for %q: %w", sessionName, err)
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("startup-health episode for %q: %w", sessionName, ErrStartupHealthAlertConflict)
+	}
+	current := AlertDisposition(matches[0].Metadata[StartupHealthAlertMetadataKey])
+	if current != expected {
+		return fmt.Errorf("startup-health episode for %q is %q, want %q: %w", sessionName, current, expected, ErrStartupHealthAlertConflict)
+	}
+	if err := s.store.SetMetadataBatch(matches[0].ID, map[string]string{StartupHealthAlertMetadataKey: string(next)}); err != nil {
+		return fmt.Errorf("setting startup-health alert for %q: %w", sessionName, err)
+	}
+	return nil
+}
+
+// ListStartupHealthEpisodesByAlert returns the open startup-health episodes
+// whose alert disposition is exactly d. Unlike ListStartupHealthEpisodes it
+// skips closed beads: only an open bead can be claimed through
+// SetStartupHealthAlert.
+func (s *Store) ListStartupHealthEpisodesByAlert(d AlertDisposition) ([]StartupHealthEpisode, error) {
+	matches, err := s.store.List(beads.ListQuery{
+		Type:     StartupHealthEpisodeType,
+		Metadata: map[string]string{StartupHealthAlertMetadataKey: string(d)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing startup-health episodes with alert %q: %w", d, err)
 	}
 	episodes := make([]StartupHealthEpisode, 0, len(matches))
 	for _, b := range matches {

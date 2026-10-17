@@ -144,3 +144,28 @@ func TestSetStartupHealthAlertPropagatesWriteFailure(t *testing.T) {
 		t.Fatal("a write failure must not read as a conflict")
 	}
 }
+
+func TestListStartupHealthEpisodesByAlertFiltersExactly(t *testing.T) {
+	s := newAlertTestStore(t)
+	for name, disp := range map[string]AlertDisposition{
+		"a": AlertDispositionPending,
+		"b": AlertDispositionSent,
+		"c": AlertDispositionPending,
+		"d": AlertDispositionNone,
+	} {
+		if err := s.SaveStartupHealthEpisode(StartupHealthEpisode{SessionName: name, ConsecutiveCount: 3, AlertDisposition: disp}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListStartupHealthEpisodesByAlert(AlertDispositionPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, ep := range got {
+		names[ep.SessionName] = true
+	}
+	if len(got) != 2 || !names["a"] || !names["c"] {
+		t.Fatalf("pending episodes = %+v, want exactly a and c", got)
+	}
+}

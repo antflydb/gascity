@@ -1340,6 +1340,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "demand_desired_state_and_sync", session: true, run: (*CityRuntime).tickDemandDesiredStateAndSync},
 	{name: "reap_stale_extmsg_bindings", run: (*CityRuntime).tickReapStaleExtmsgBindings},
 	{name: "reap_stale_extmsg_participants", run: (*CityRuntime).tickReapStaleExtmsgParticipants},
+	{name: "escalate_startup_health", run: (*CityRuntime).tickEscalateStartupHealth},
 	{name: "refresh_desired_state", session: true, run: (*CityRuntime).tickRefreshDesiredState},
 	{name: "apply_soft_reload_acceptance", session: true, run: (*CityRuntime).tickApplySoftReloadAcceptance},
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},

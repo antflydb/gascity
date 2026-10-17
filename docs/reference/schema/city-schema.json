@@ -2928,6 +2928,10 @@
           "description": "NudgeRetryInterval is the retry interval between nudge readiness polls.\nDuration string. Defaults to \"500ms\".",
           "default": "500ms"
         },
+        "escalation_to": {
+          "type": "string",
+          "description": "EscalationTo is the mail address that receives one escalation when a\nsession's consecutive startup failures first reach the startup-health\nthreshold. Optional: when empty the threshold crossing is logged and\nrecorded as skipped, and nothing is sent. It is never defaulted to a role."
+        },
         "nudge_poll_interval": {
           "type": "string",
           "description": "NudgePollInterval is the cycle interval for the per-session nudge\npoller sidecar (`gc nudge poll`). Each cycle observes the session and\nchecks the queued-nudge state, so on hosts running many sessions a\nlonger interval trades nudge-delivery latency for less standing load.\nDuration string. Unset means the poller's built-in default (2s).",

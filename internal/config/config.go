@@ -1681,6 +1681,11 @@ type SessionConfig struct {
 	// NudgeRetryInterval is the retry interval between nudge readiness polls.
 	// Duration string. Defaults to "500ms".
 	NudgeRetryInterval string `toml:"nudge_retry_interval,omitempty" jsonschema:"default=500ms"`
+	// EscalationTo is the mail address that receives one escalation when a
+	// session's consecutive startup failures first reach the startup-health
+	// threshold. Optional: when empty the threshold crossing is logged and
+	// recorded as skipped, and nothing is sent. It is never defaulted to a role.
+	EscalationTo string `toml:"escalation_to,omitempty"`
 	// NudgePollInterval is the cycle interval for the per-session nudge
 	// poller sidecar (`gc nudge poll`). Each cycle observes the session and
 	// checks the queued-nudge state, so on hosts running many sessions a
@@ -1780,6 +1785,12 @@ func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
 	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
+}
+
+// EscalationRecipient returns the configured startup-health escalation
+// address with surrounding whitespace removed, or "" when unset.
+func (s *SessionConfig) EscalationRecipient() string {
+	return strings.TrimSpace(s.EscalationTo)
 }
 
 // NudgePollIntervalDuration returns the configured nudge poller cycle
