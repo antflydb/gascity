@@ -811,6 +811,12 @@ type resumeFailure struct {
 	// maxResumeFailuresBeforeReset. A capacity refusal, a deadline, a name
 	// collision and a spawn error are not.
 	counted bool
+	// holdConversation: the runtime refused the start because another live
+	// session occupies the working directory (sessionpkg.ErrWorkDirCollision,
+	// ErrWorkDirLivenessUnavailable). The conversation was never attempted, so
+	// it is never reset on this failure; the failure still accrues wake attempts
+	// so a permanent collision quarantines instead of spinning.
+	holdConversation bool
 }
 
 // startResumeFailure classifies a start that did not commit: resumed, its
@@ -818,6 +824,9 @@ type resumeFailure struct {
 // startup; err, its error, which a startup death's last pane output rides
 // in; pane, the dead pane's screen when one was read.
 func startResumeFailure(resumed, died bool, sessionKey string, err error, pane string) resumeFailure {
+	if errors.Is(err, sessionpkg.ErrWorkDirCollision) || errors.Is(err, sessionpkg.ErrWorkDirLivenessUnavailable) {
+		return resumeFailure{holdConversation: true}
+	}
 	if !resumed || err == nil || runtime.IsProviderCapacity(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, runtime.ErrSessionExists) {
 		return resumeFailure{}
 	}
@@ -894,7 +903,7 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 	// resets at once, and the maxResumeFailuresBeforeReset-th resume-shaped
 	// failure in a row resets too; a committed manual conversation's reset
 	// records session.conversation_reset{reason:resume-failed}.
-	if info.SessionKey != "" || info.StartedConfigHash != "" {
+	if (info.SessionKey != "" || info.StartedConfigHash != "") && !rf.holdConversation {
 		failures, _ := strconv.Atoi(info.ResumeFailures)
 		manual := sessionpkg.HasStartedManualConversation(info)
 		kept := manual || wakeFailureKeepsConversation(info, transcriptRoots)

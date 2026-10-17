@@ -6,13 +6,16 @@ go_library(
         "cmdline_darwin.go",
         "cmdline_other.go",
         "listener.go",
+        "livecwd.go",
         "pidutil.go",
         "procargs2.go",
         "subreaper.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/pidutil",
     visibility = ["//:__subpackages__"],
-    deps = select({
+    deps = [
+        "//internal/pathutil",
+    ] + select({
         "@rules_go//go/platform:darwin": [
             "@org_golang_x_sys//unix",
         ],
@@ -28,6 +31,7 @@ go_test(
     srcs = [
         "cmdline_portable_test.go",
         "listener_test.go",
+        "livecwd_test.go",
         "pidutil_test.go",
         "procargs2_test.go",
         "starttime_portable_test.go",

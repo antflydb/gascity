@@ -13491,7 +13491,7 @@ func TestReconcileSessionBeads_FreshAlwaysNamedWithPoolDemandMaterializesNamedDe
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3), WorkDir: ".gc/workspaces/{{.AgentBase}}"},
 		},
 		NamedSessions: []config.NamedSession{
 			{Template: "mayor", Mode: "always"},
@@ -13530,7 +13530,7 @@ func TestReconcileSessionBeads_ExistingAlwaysNamedStillAllowsSameTemplatePoolDem
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3), WorkDir: ".gc/workspaces/{{.AgentBase}}"},
 		},
 		NamedSessions: []config.NamedSession{
 			{Template: "mayor", Mode: "always"},

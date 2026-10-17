@@ -2778,6 +2778,9 @@
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionStartRefusedCwdPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionStrandedClaimsPayload"
           },
           {
@@ -8307,6 +8310,21 @@
         ],
         "type": "object"
       },
+      "SessionStartRefusedCwdPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "colliding_session_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
       "SessionStrandedClaimsPayload": {
         "additionalProperties": false,
         "properties": {
@@ -13001,6 +13019,7 @@
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
+            "session.start_refused_cwd": "#/components/schemas/TypedEventStreamEnvelopeSessionStartRefusedCwd",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedEventStreamEnvelopeSessionStranded",
             "session.stranded_claims": "#/components/schemas/TypedEventStreamEnvelopeSessionStrandedClaims",
@@ -13278,6 +13297,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStartRefusedCwd"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped"
@@ -14724,6 +14746,7 @@
                 "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.start_refused_cwd",
                 "session.conversation_reset",
                 "session.pending",
                 "session.pending_cleared",
@@ -18303,6 +18326,63 @@
         "title": "TypedEventStreamEnvelope session.reset_stalled",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionStartRefusedCwd": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStartRefusedCwdPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.start_refused_cwd",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.start_refused_cwd",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionStopped": {
         "additionalProperties": false,
         "properties": {
@@ -19645,6 +19725,7 @@
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
+            "session.start_refused_cwd": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStranded",
             "session.stranded_claims": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStrandedClaims",
@@ -19922,6 +20003,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped"
@@ -21463,6 +21547,7 @@
                 "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.start_refused_cwd",
                 "session.conversation_reset",
                 "session.pending",
                 "session.pending_cleared",
@@ -25285,6 +25370,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.reset_stalled",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStartRefusedCwdPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.start_refused_cwd",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.start_refused_cwd",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionStopped": {

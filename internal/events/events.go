@@ -249,6 +249,14 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
+	// SessionStartRefusedCwd fires when a session start or respawn is
+	// refused because its working directory is already occupied by another
+	// live session, or because the live-process scan needed to verify that
+	// could not be completed (fail-closed rather than risk two sessions
+	// sharing a directory). The payload's Reason distinguishes the two
+	// cases; CollidingSessionID is set only for the collision case. The
+	// envelope's Subject carries the refused session's ID. See ga-ighomh.1.
+	SessionStartRefusedCwd = "session.start_refused_cwd"
 	// SessionConversationReset fires when the reconciler resets a committed
 	// manual conversation, so that its next start is a fresh conversation
 	// rather than a resume. The payload's reason names the cause: stale-key,
@@ -525,6 +533,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionStartRefusedCwd,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,

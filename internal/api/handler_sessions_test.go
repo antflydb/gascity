@@ -232,7 +232,7 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
 	mgr := session.NewManagerWithOptions(store, sp)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestHandleSessionListPreservesPartialRows(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	info := createTestSession(t, store, fs.sp, "Session survivor")
+	info := createTestSession(t, store.MemStore, fs.sp, "Session survivor")
 	survivor, err := store.Get(info.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", info.ID, err)
@@ -1092,7 +1092,9 @@ func writeCanonicalCodexTelemetryRollout(t *testing.T, root string, ts time.Time
 func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := newHermeticCodexSessionSearchPath(t)
-	workDir := t.TempDir()
+	// One WorkDir per session: two live sessions in one directory trip the
+	// cwd collision guard.
+	workDirs := []string{t.TempDir(), t.TempDir()}
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 
 	type wantTelemetry struct {
@@ -1113,7 +1115,7 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 			Template: "myrig/worker",
 			Title:    fmt.Sprintf("Codex Chat %d", i+1),
 			Command:  "codex",
-			WorkDir:  workDir,
+			WorkDir:  workDirs[i],
 			// The concrete configured name need not contain "codex"; the
 			// persisted provider_kind is the canonical transcript family.
 			Provider: "remote-openai",
@@ -1132,7 +1134,7 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 			t.Fatalf("PersistSessionKey(%s): %v", info.ID, err)
 		}
 		wants[i].info = info
-		writeCanonicalCodexTelemetryRollout(t, searchBase, now, wants[i].sessionKey, workDir, wants[i].model, inputTokens[i], cachedInputTokens[i])
+		writeCanonicalCodexTelemetryRollout(t, searchBase, now, wants[i].sessionKey, workDirs[i], wants[i].model, inputTokens[i], cachedInputTokens[i])
 	}
 
 	// Wrap only after all session setup so any Get call below belongs to the

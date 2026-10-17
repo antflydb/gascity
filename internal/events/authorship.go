@@ -137,6 +137,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionWorkQueryFailed:         AuthorWorker,
 	SessionDrainFenceUnavailable:   AuthorWorker,
 	SessionDemandClaimDivergence:   AuthorWorker,
+	SessionStartRefusedCwd:         AuthorWorker,
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
 	HookClaimReclaimedStale:        AuthorWorker,
