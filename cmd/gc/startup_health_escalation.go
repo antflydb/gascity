@@ -156,9 +156,6 @@ func (e *startupHealthEscalator) compose(ep session.StartupHealthEpisode) (subje
 	fmt.Fprintf(&b, "Failure kind: %s\n", kindLabel(ep.Kind))
 	fmt.Fprintf(&b, "First failure: %s\n", ep.FirstFailureAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "Last failure: %s\n", ep.LastFailureAt.Format(time.RFC3339))
-	if !ep.QuarantinedUntil.IsZero() {
-		fmt.Fprintf(&b, "Quarantined until: %s\n", ep.QuarantinedUntil.Format(time.RFC3339))
-	}
 	if ep.Kind == session.FailureKindStartupDeath {
 		b.WriteString("\n")
 		b.WriteString(e.stderrSection(ep.SessionName))
