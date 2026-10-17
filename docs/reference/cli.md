@@ -3607,7 +3607,7 @@ gc ready [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--assignee` | string |  | only work assigned to this identity |
+| `--assignee` | string |  | only work assigned to exactly this identity |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |

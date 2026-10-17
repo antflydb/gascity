@@ -19,7 +19,10 @@ go_library(
 
 go_test(
     name = "readywork_test",
-    srcs = ["federate_test.go"],
+    srcs = [
+        "federate_test.go",
+        "query_test.go",
+    ],
     embed = [":readywork"],
     deps = [
         "//internal/beads",

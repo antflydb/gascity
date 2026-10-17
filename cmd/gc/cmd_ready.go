@@ -74,7 +74,7 @@ relocated graph store are always read.`,
 // A test that re-declared these flags would be testing its own copy of the
 // contract, which is the drift this whole lane exists to remove.
 func registerReadyFlags(cmd *cobra.Command, opts *readywork.Query, includeEphemeral, jsonOut *bool) {
-	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "only work assigned to this identity")
+	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "only work assigned to exactly this identity")
 	cmd.Flags().BoolVar(&opts.Unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.MetadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.ExcludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")

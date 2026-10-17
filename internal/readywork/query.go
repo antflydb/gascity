@@ -47,9 +47,12 @@ func KnownStatuses() []string { return slices.Clone(knownStatuses) }
 // so neither selects anything; a field nothing consults is how a flag ends up
 // looking honored while one leg quietly narrows (ga-8lyxc).
 type Query struct {
-	// Assignee keeps only beads assigned to this identity.
+	// Assignee keeps only beads whose assignee is exactly this identity, as
+	// `bd ready --assignee` matches. Surrounding whitespace in the flag is
+	// trimmed; the stored assignee is compared as stored.
 	Assignee string
-	// Unassigned keeps only beads with no assignee.
+	// Unassigned keeps only beads with no assignee (an empty assignee), as
+	// `bd ready --unassigned` matches.
 	Unassigned bool
 	// MetadataFields are "key=value" (the value must match exactly, and an empty
 	// value is a real value) or bare "key" (the key must be present with a
@@ -141,11 +144,15 @@ func (q Query) Matcher() (func(beads.Bead) bool, error) {
 }
 
 // matches applies the row predicates to one bead.
+//
+// --assignee and --unassigned compare the stored assignee exactly, as `bd ready`
+// does and as every store's own assignee filter does, so `gc ready` stays the
+// drop-in for the `bd ready` the generated work query was built on.
 func (c compiled) matches(b beads.Bead) bool {
-	if c.query.Unassigned && strings.TrimSpace(b.Assignee) != "" {
+	if c.query.Unassigned && b.Assignee != "" {
 		return false
 	}
-	if c.assignee != "" && strings.TrimSpace(b.Assignee) != c.assignee {
+	if c.assignee != "" && b.Assignee != c.assignee {
 		return false
 	}
 	if c.excludeTypes[b.Type] {
