@@ -21,6 +21,7 @@ go_library(
 go_test(
     name = "readywork_test",
     srcs = [
+        "enrich_test.go",
         "federate_test.go",
         "pushdown_test.go",
         "query_test.go",

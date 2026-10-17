@@ -252,6 +252,11 @@ func merge(results []legResult) ([]beads.Bead, map[string]int) {
 // gate-blocked step on every tick. A relocated step's blockers live in the same
 // store the step does, so the leg that answered is the leg that can answer this.
 //
+// The reads run concurrently: the legs, each leg's rows, and each leg's distinct
+// blocking targets. Each row is answered exactly as the per-row walk answered
+// it, with its blockers in the same order, and a failure names the same row and
+// blocker it always did.
+//
 // A dependency read that FAILS is returned, not swallowed. Reporting a gated
 // bead as unblocked is what re-serves work no worker can advance; the federation
 // is fail-loud for the same reason.
@@ -259,36 +264,116 @@ func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (ma
 	if len(owners) == 0 || len(items) == 0 {
 		return nil, nil
 	}
-	out := make(map[string][]Blocker, len(items))
+	byLeg := make(map[int][]string)
+	var legOrder []int
 	for _, item := range items {
 		idx, ok := owners[item.ID]
 		if !ok || legs[idx].Store == nil {
 			continue
 		}
-		leg := legs[idx]
-		live := beads.HandlesFor(leg.Store).Live
-		deps, err := live.DepList(item.ID, "down")
-		if err != nil {
-			return nil, fmt.Errorf("%s store: listing dependencies of %q: %w", leg.Label, item.ID, err)
+		if _, seen := byLeg[idx]; !seen {
+			legOrder = append(legOrder, idx)
 		}
-		blockers := make([]Blocker, 0, len(deps))
-		for _, dep := range deps {
+		byLeg[idx] = append(byLeg[idx], item.ID)
+	}
+	perLeg := make([]legBlockers, len(legOrder))
+	fanout.Bounded(len(legOrder), LegFanOut, func(i int) {
+		idx := legOrder[i]
+		perLeg[i] = readLegBlockers(legs[idx], byLeg[idx])
+	})
+	// Report the failure of the first row, in answer order, whose enrichment
+	// failed: the row the sequential walk would have stopped at.
+	failed := make(map[string]error)
+	for _, lb := range perLeg {
+		for id, err := range lb.errs {
+			failed[id] = err
+		}
+	}
+	out := make(map[string][]Blocker, len(items))
+	for _, item := range items {
+		if err, bad := failed[item.ID]; bad {
+			return nil, err
+		}
+	}
+	for _, lb := range perLeg {
+		for id, blockers := range lb.blockers {
+			if len(blockers) > 0 {
+				out[id] = blockers
+			}
+		}
+	}
+	return out, nil
+}
+
+// legBlockers is one leg's enrichment: each row's blockers, or the error that
+// row's enrichment hit.
+type legBlockers struct {
+	blockers map[string][]Blocker
+	errs     map[string]error
+}
+
+// readLegBlockers resolves the blockers of ids, every one of them served by leg.
+//
+// Each row's edges are read with the same per-row DepList the sequential walk
+// used, so every row's blockers come back in the order that read returns them;
+// the rows and then the distinct blocking targets are read concurrently, at most
+// LegFanOut at a time.
+func readLegBlockers(leg Leg, ids []string) legBlockers {
+	out := legBlockers{blockers: make(map[string][]Blocker, len(ids)), errs: make(map[string]error)}
+	live := beads.HandlesFor(leg.Store).Live
+	deps := make([][]beads.Dep, len(ids))
+	depErrs := make([]error, len(ids))
+	fanout.Bounded(len(ids), LegFanOut, func(i int) {
+		deps[i], depErrs[i] = live.DepList(ids[i], "down")
+	})
+	// Collect every distinct blocking target, in first-seen order.
+	var targets []string
+	byTarget := make(map[string]int)
+	for i, id := range ids {
+		if depErrs[i] != nil {
+			out.errs[id] = fmt.Errorf("%s store: listing dependencies of %q: %w", leg.Label, id, depErrs[i])
+			continue
+		}
+		for _, dep := range deps[i] {
 			if !beads.IsReadyBlockingDependencyType(dep.Type) {
 				continue
 			}
-			blocker, err := live.Get(dep.DependsOnID)
-			if err != nil {
+			if _, seen := byTarget[dep.DependsOnID]; seen {
+				continue
+			}
+			byTarget[dep.DependsOnID] = len(targets)
+			targets = append(targets, dep.DependsOnID)
+		}
+	}
+	got := make([]beads.Bead, len(targets))
+	getErrs := make([]error, len(targets))
+	fanout.Bounded(len(targets), LegFanOut, func(i int) {
+		got[i], getErrs[i] = live.Get(targets[i])
+	})
+	for i, id := range ids {
+		if depErrs[i] != nil {
+			continue
+		}
+		var blockers []Blocker
+		for _, dep := range deps[i] {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			t := byTarget[dep.DependsOnID]
+			if getErrs[t] != nil {
 				// A blocking edge whose target this leg cannot resolve is a
 				// cross-store dependency, which the split topology forbids (strict
 				// residence), so it is a real fault, not an absence: treating it as
 				// "no blocker" would serve a gated bead.
-				return nil, fmt.Errorf("%s store: resolving blocker %q of %q: %w", leg.Label, dep.DependsOnID, item.ID, err)
+				out.errs[id] = fmt.Errorf("%s store: resolving blocker %q of %q: %w", leg.Label, dep.DependsOnID, id, getErrs[t])
+				blockers = nil
+				break
 			}
-			blockers = append(blockers, Blocker{ID: blocker.ID, Status: blocker.Status})
+			blockers = append(blockers, Blocker{ID: got[t].ID, Status: got[t].Status})
 		}
-		if len(blockers) > 0 {
-			out[item.ID] = blockers
+		if _, failed := out.errs[id]; !failed {
+			out.blockers[id] = blockers
 		}
 	}
-	return out, nil
+	return out
 }
