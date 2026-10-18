@@ -35,6 +35,8 @@ type budgetTestStore struct {
 
 var errBudgetTestWrite = errors.New("budget test: write failed")
 
+// write records an attempt, waits for the configured delay, and returns any
+// configured failure for the bead.
 func (s *budgetTestStore) write(id string) error {
 	s.writes++
 	s.written = append(s.written, id)
@@ -47,6 +49,8 @@ func (s *budgetTestStore) write(id string) error {
 	return nil
 }
 
+// Update records and delays the write attempt, delegating to the backing store
+// only when the simulated write succeeds.
 func (s *budgetTestStore) Update(id string, opts beads.UpdateOpts) error {
 	if err := s.write(id); err != nil {
 		return err
@@ -54,6 +58,8 @@ func (s *budgetTestStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.Store.Update(id, opts)
 }
 
+// SetMetadataBatch records and delays the write attempt, delegating the metadata
+// update to the backing store only when the simulated write succeeds.
 func (s *budgetTestStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if err := s.write(id); err != nil {
 		return err
@@ -61,6 +67,8 @@ func (s *budgetTestStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// Get counts the read and reports hidden beads as missing, delegating other
+// reads to the backing store.
 func (s *budgetTestStore) Get(id string) (beads.Bead, error) {
 	if s.gets == nil {
 		s.gets = map[string]int{}
@@ -108,6 +116,8 @@ func reloadRows(t *testing.T, store beads.Store, rows []beads.Bead) []beads.Bead
 	return out
 }
 
+// repairedRouteCount reloads the rows and counts those routed to the canonical
+// template rather than a slot suffix.
 func repairedRouteCount(t *testing.T, store beads.Store, rows []beads.Bead) int {
 	t.Helper()
 	n := 0
@@ -119,6 +129,8 @@ func repairedRouteCount(t *testing.T, store beads.Store, rows []beads.Bead) int 
 	return n
 }
 
+// TestRepairWriteBudgetCapsAttemptsPerBuild checks that a repair pass respects
+// the attempt cap and repairs one row per successful write.
 func TestRepairWriteBudgetCapsAttemptsPerBuild(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &budgetTestStore{Store: beads.NewMemStore()}
@@ -139,6 +151,8 @@ func TestRepairWriteBudgetCapsAttemptsPerBuild(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetTimeCapStopsBeforeAttemptCap checks that slow writes
+// exhaust the time cap first while allowing the write in flight to finish.
 func TestRepairWriteBudgetTimeCapStopsBeforeAttemptCap(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const perWrite = 4 * time.Second
@@ -163,6 +177,8 @@ func TestRepairWriteBudgetTimeCapStopsBeforeAttemptCap(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetChargesWriteTimeOnly checks that idle time before a
+// repair pass does not prevent budgeted writes from running.
 func TestRepairWriteBudgetChargesWriteTimeOnly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &budgetTestStore{Store: beads.NewMemStore()}
@@ -180,6 +196,8 @@ func TestRepairWriteBudgetChargesWriteTimeOnly(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetCountsFailedWrites checks that failed writes stay within
+// the attempt cap and that each attempted failure is logged.
 func TestRepairWriteBudgetCountsFailedWrites(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &budgetTestStore{Store: beads.NewMemStore(), failAll: true}
@@ -198,6 +216,8 @@ func TestRepairWriteBudgetCountsFailedWrites(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetWriteContract checks that attempts are recorded per store
+// before execution, failures propagate, and exhausted writes are silently refused.
 func TestRepairWriteBudgetWriteContract(t *testing.T) {
 	storeA := &budgetTestStore{Store: beads.NewMemStore()}
 	storeB := &budgetTestStore{Store: beads.NewMemStore()}
@@ -244,6 +264,8 @@ func TestRepairWriteBudgetWriteContract(t *testing.T) {
 	}
 }
 
+// TestRepairWriteBudgetAttemptedLooksThroughBeadPolicyWrapper checks that writes
+// through a policy wrapper and its backing store share the same attempt identity.
 func TestRepairWriteBudgetAttemptedLooksThroughBeadPolicyWrapper(t *testing.T) {
 	raw := &budgetTestStore{Store: beads.NewMemStore()}
 	wrapped := wrapStoreWithBeadPolicies(raw, nil)
@@ -268,6 +290,8 @@ func TestRepairWriteBudgetAttemptedLooksThroughBeadPolicyWrapper(t *testing.T) {
 	}
 }
 
+// TestNilRepairWriteBudgetIsUnbounded checks that a nil budget always reports
+// stores as attempted and allows repairs beyond both normal caps.
 func TestNilRepairWriteBudgetIsUnbounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var budget *repairWriteBudget
@@ -298,6 +322,8 @@ func TestNilRepairWriteBudgetIsUnbounded(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetRotationReachesTheTail checks that successive builds
+// repair the tail of a backlog despite persistent failures at its head.
 func TestRepairWriteBudgetRotationReachesTheTail(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const total = 4 * repairWritesPerBuild
@@ -333,6 +359,8 @@ func TestRepairWriteBudgetRotationReachesTheTail(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetRotationIsPerDomain checks that a city's resume hint
+// does not change the first repair attempted in another city domain.
 func TestRepairWriteBudgetRotationIsPerDomain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &budgetTestStore{Store: beads.NewMemStore()}
@@ -351,6 +379,8 @@ func TestRepairWriteBudgetRotationIsPerDomain(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetSteadyStateWritesNothingAndSaysNothing checks that a pass
+// over repaired rows spends no attempts and emits no budget report.
 func TestRepairWriteBudgetSteadyStateWritesNothingAndSaysNothing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &budgetTestStore{Store: beads.NewMemStore()}
@@ -376,6 +406,8 @@ func TestRepairWriteBudgetSteadyStateWritesNothingAndSaysNothing(t *testing.T) {
 	})
 }
 
+// TestRepairWriteBudgetReportsOneLineWhenRepairsWereDeferred checks that an
+// exhausted pass emits one budget line and a nil budget emits none.
 func TestRepairWriteBudgetReportsOneLineWhenRepairsWereDeferred(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &budgetTestStore{Store: beads.NewMemStore()}
@@ -404,6 +436,8 @@ func TestRepairWriteBudgetReportsOneLineWhenRepairsWereDeferred(t *testing.T) {
 	})
 }
 
+// TestRepairControlDispatcherRoutesDrawsFromTheSharedBudget checks that route
+// repairs respect both the dispatcher's own cap and the remaining shared budget.
 func TestRepairControlDispatcherRoutesDrawsFromTheSharedBudget(t *testing.T) {
 	maxActive := 1
 	cfg := &config.City{Agents: []config.Agent{{
@@ -456,6 +490,8 @@ func TestRepairControlDispatcherRoutesDrawsFromTheSharedBudget(t *testing.T) {
 	}
 }
 
+// rootMemoFixture seeds assigned steps sharing a workflow root and a session
+// snapshot, optionally hiding the root from store reads.
 func rootMemoFixture(t *testing.T, steps int, rootExists bool) (*budgetTestStore, []beads.Bead, *sessionBeadSnapshot) {
 	t.Helper()
 	const sessionName = "rootmemo-worker-1"
@@ -478,6 +514,8 @@ func rootMemoFixture(t *testing.T, steps int, rootExists bool) (*budgetTestStore
 	return store, work, sessions
 }
 
+// TestStampRunSessionIdentityReadsAMissingRootOncePerBuild checks that a failed
+// root read is memoized within a build, then retried and stamped on the next build.
 func TestStampRunSessionIdentityReadsAMissingRootOncePerBuild(t *testing.T) {
 	const steps = 10
 	store, work, sessions := rootMemoFixture(t, steps, false)
@@ -507,6 +545,8 @@ func TestStampRunSessionIdentityReadsAMissingRootOncePerBuild(t *testing.T) {
 	}
 }
 
+// TestStampRunSessionIdentityReadsASharedRootOncePerStore checks that a root ID
+// shared by steps in two stores is read once and stamped in each store.
 func TestStampRunSessionIdentityReadsASharedRootOncePerStore(t *testing.T) {
 	const steps = 6
 	storeA, workA, sessions := rootMemoFixture(t, steps, true)
@@ -613,6 +653,8 @@ type budgetWriter struct {
 	extra []beads.Bead
 }
 
+// budgetWriters returns repair fixtures with their configurations, seed rows,
+// writer callbacks, and predicates for recognizing repaired rows.
 func budgetWriters() []budgetWriter {
 	rowID := func(prefix string, i int) string { return fmt.Sprintf("%s-%03d", prefix, i) }
 	sessions := func() *sessionBeadSnapshot {
@@ -951,6 +993,8 @@ func TestRepairWriteBudgetTraceRecordsTheRepairBudgetOfEachPass(t *testing.T) {
 	}
 }
 
+// budgetDispatcherConfig extends the agreement fixture with a control dispatcher
+// bound to the rig and limited to one active session.
 func budgetDispatcherConfig() *config.City {
 	cfg := agreementConfig()
 	maxActive := 1
@@ -961,6 +1005,8 @@ func budgetDispatcherConfig() *config.City {
 	return cfg
 }
 
+// budgetControlRows creates open workflow-finalize tasks routed through the
+// legacy control-dispatcher name and rooted in the rig store.
 func budgetControlRows(n int) []beads.Bead {
 	rows := make([]beads.Bead, n)
 	for i := range n {
