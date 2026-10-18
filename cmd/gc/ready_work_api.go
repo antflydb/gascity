@@ -13,13 +13,6 @@ import (
 
 var _ api.ReadyWorkReader = (*controllerState)(nil)
 
-// errReadyWorkConfigPending refuses a ready-work request while a city config
-// change is staged but not yet reloaded. The controller's legs are built from
-// its loaded config, and a rig added, removed or rebound since would make its
-// answer read a different set of stores than a fresh `gc ready` reads. The
-// refusal is a 503, and the CLI then reads in-process.
-var errReadyWorkConfigPending = errors.New("the city config changed and the controller has not reloaded it yet")
-
 // ReadyWork answers `gc ready` (GET /v0/city/{cityName}/work/ready) from the
 // stores this controller already holds open, with the reader the CLI runs
 // in-process (internal/readywork).
@@ -32,12 +25,16 @@ var errReadyWorkConfigPending = errors.New("the city config changed and the cont
 // handle, so a CachingStore leg answers from its backing store and never from
 // its read cache: the answer is as fresh as an in-process read, whoever wrote
 // the bead. Opening nothing is the whole saving.
+//
+// The legs come from the config this controller has PUBLISHED, read with its
+// stores as one consistent snapshot, which is what every other read it serves
+// answers from and what its sessions run under. A change on disk (a rig added,
+// removed or rebound) applies at its next reload, as it does for those. The
+// config watcher's dirty flag is not a reason to refuse: on a live city it is
+// set again between every pair of reconcile ticks.
 func (cs *controllerState) ReadyWork(_ context.Context, q readywork.Query) ([]readywork.ReadyBead, error) {
 	if err := q.Validate(); err != nil {
 		return nil, err
-	}
-	if cs.configDirty != nil && cs.configDirty.Load() {
-		return nil, errReadyWorkConfigPending
 	}
 	legs, err := cs.readyWorkLegs()
 	if err != nil {

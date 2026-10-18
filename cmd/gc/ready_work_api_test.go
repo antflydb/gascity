@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -190,18 +189,27 @@ func TestControllerReadyWorkSkipsSuspendedRigs(t *testing.T) {
 	}
 }
 
-// TestControllerReadyWorkRefusesWhileAConfigReloadIsPending pins the leg-set
-// guard: a staged config change could add, remove or rebind a rig, so the
-// controller refuses rather than answer for a different set of stores than a
-// fresh read would.
-func TestControllerReadyWorkRefusesWhileAConfigReloadIsPending(t *testing.T) {
+// TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange pins
+// that the controller answers from the config it has published, whatever its
+// config watcher has flagged since.
+//
+// configDirty is set by the watcher between reconcile ticks on a live city, so
+// it reads true almost all the time. A refusal keyed on it turned the endpoint
+// off on maintainer-city (8d5: 0 of 60 requests answered). The controller reads
+// a consistent snapshot of its published config and stores, which is what every
+// other read it serves answers from, and what its sessions run under.
+func TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange(t *testing.T) {
 	f := newReadyWorkSplitFixture(t)
 	cs := f.controller()
 	var dirty atomic.Bool
 	dirty.Store(true)
 	cs.configDirty = &dirty
-	if _, err := cs.ReadyWork(context.Background(), readywork.Query{}); !errors.Is(err, errReadyWorkConfigPending) {
-		t.Fatalf("ReadyWork with a pending reload = %v, want errReadyWorkConfigPending", err)
+	got, err := cs.ReadyWork(context.Background(), readywork.Query{})
+	if err != nil {
+		t.Fatalf("ReadyWork with the watcher's flag set = %v; the controller must answer from its published config", err)
+	}
+	if want := f.inProcess(t, readywork.Query{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadyWork with the watcher's flag set differs from the in-process answer over the same stores")
 	}
 }
 
@@ -254,16 +262,14 @@ func TestReadyRoutesThroughTheController(t *testing.T) {
 }
 
 // TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure pins the safe
-// route: a controller that refuses (here a pending config reload) is answered
-// by the in-process read, which on this city fails loud on its broken rig,
-// exactly as `gc ready` did before the endpoint existed.
+// route: a controller that refuses (here, a serving rig whose store it does
+// not hold) is answered by the in-process read, which on this city fails loud
+// on its broken rig, exactly as `gc ready` did before the endpoint existed.
 func TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure(t *testing.T) {
 	newReadyCityWithBrokenRig(t)
 	f := newReadyWorkSplitFixture(t)
+	delete(f.rigs, "bravo")
 	cs := f.controller()
-	var dirty atomic.Bool
-	dirty.Store(true)
-	cs.configDirty = &dirty
 	client := readyWorkTestServer(t, cs)
 	prev := readyAPIClient
 	readyAPIClient = func(string) (*api.Client, string) { return client, "" }

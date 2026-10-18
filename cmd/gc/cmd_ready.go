@@ -194,8 +194,8 @@ var readyAPIClient = supervisorFallthroughAPIClient
 //
 // It answers false on ANY failure, and the caller reads in-process exactly as it
 // always has: no controller, a controller from before the endpoint existed, a
-// refused request (a config reload in flight), a store the controller could not
-// read, a transport error or a timeout. An answer from the controller is only a
+// refused request, a store the controller could not read, a transport error or
+// a timeout. An answer from the controller is only a
 // faster route to the same rows, never a different answer, so the slower route
 // is always the safe one. GC_NO_API forces it.
 func readyThroughController(cityPath string, q readywork.Query, stderr io.Writer) ([]readywork.ReadyBead, bool) {
