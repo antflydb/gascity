@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -190,26 +193,59 @@ func TestControllerReadyWorkSkipsSuspendedRigs(t *testing.T) {
 }
 
 // TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange pins
-// that the controller answers from the config it has published, whatever its
-// config watcher has flagged since.
+// that the controller answers from the config it has published while a reload
+// is due, even though the config on disk has changed since.
 //
-// configDirty is set by the watcher between reconcile ticks on a live city, so
-// it reads true almost all the time. A refusal keyed on it turned the endpoint
-// off on maintainer-city (8d5: 0 of 60 requests answered). The controller reads
-// a consistent snapshot of its published config and stores, which is what every
-// other read it serves answers from, and what its sessions run under.
+// configDirty records that a reload is due. It says nothing about whether the
+// published config and the stores agree: controllerState.update publishes them
+// together. A refusal keyed on it turned the endpoint off on maintainer-city
+// (8d5: 0 of 60 requests answered); ga-wc5dmg tracks why the flag stayed set
+// there. The city.toml on disk here has dropped bravo, so a controller that
+// read the config from disk instead of the one it published would answer
+// without bravo's rows.
 func TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange(t *testing.T) {
 	f := newReadyWorkSplitFixture(t)
+	var cityToml strings.Builder
+	cityToml.WriteString("[workspace]\nname = " + strconv.Quote(f.cityName) + "\n")
+	for _, rig := range f.cfg.Rigs {
+		if rig.Name == "bravo" {
+			continue
+		}
+		cityToml.WriteString("\n[[rigs]]\nname = " + strconv.Quote(rig.Name) + "\npath = " + strconv.Quote(rig.Path) + "\nprefix = " + strconv.Quote(rig.Prefix) + "\n")
+		if rig.SuspendedOnStart {
+			cityToml.WriteString("suspended_on_start = true\n")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.cityPath, "city.toml"), []byte(cityToml.String()), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	onDisk, err := loadCityConfig(f.cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the edited city.toml: %v", err)
+	}
+	for _, rig := range onDisk.Rigs {
+		if rig.Name == "bravo" {
+			t.Fatalf("the city.toml on disk still declares bravo; the test needs a disk config that differs from the published one")
+		}
+	}
+
 	cs := f.controller()
 	var dirty atomic.Bool
 	dirty.Store(true)
 	cs.configDirty = &dirty
 	got, err := cs.ReadyWork(context.Background(), readywork.Query{})
 	if err != nil {
-		t.Fatalf("ReadyWork with the watcher's flag set = %v; the controller must answer from its published config", err)
+		t.Fatalf("ReadyWork with a reload due = %v; the controller must answer from its published config", err)
 	}
 	if want := f.inProcess(t, readywork.Query{}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ReadyWork with the watcher's flag set differs from the in-process answer over the same stores")
+		t.Fatalf("ReadyWork with a reload due differs from the in-process answer over the published config and the same stores")
+	}
+	servedBravo := false
+	for _, row := range got {
+		servedBravo = servedBravo || strings.HasPrefix(row.ID, "rb-")
+	}
+	if !servedBravo {
+		t.Fatalf("ReadyWork served no row from bravo, which the published config serves; the controller must not read the config on disk")
 	}
 }
 

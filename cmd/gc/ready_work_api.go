@@ -14,24 +14,29 @@ import (
 var _ api.ReadyWorkReader = (*controllerState)(nil)
 
 // ReadyWork answers `gc ready` (GET /v0/city/{cityName}/work/ready) from the
-// stores this controller already holds open, with the reader the CLI runs
-// in-process (internal/readywork).
+// config this controller has published and the stores it already holds open,
+// with the reader the CLI runs in-process (internal/readywork).
 //
-// The legs are the ones a fresh `gc ready` assembles, from the same functions:
-// the serving frame (readyServingRigs), the same topology constructor over this
-// controller's own class-binding routes (assembleResidencyTopology over
-// residencyBindingsFromRoutes, which is how the controller's census builds its
-// topology), and the same plan. readywork reads every leg through its live
-// handle, so a CachingStore leg answers from its backing store and never from
-// its read cache: the answer is as fresh as an in-process read, whoever wrote
-// the bead. Opening nothing is the whole saving.
+// The legs are assembled over that config by the functions a fresh `gc ready`
+// uses: the serving frame (readyServingRigs), the same topology constructor
+// over the class-binding routes this controller resolved when it started
+// (assembleResidencyTopology over residencyBindingsFromRoutes, which is how the
+// controller's census builds its topology), and the same plan. readywork reads
+// every leg through its live handle, so a CachingStore leg answers from its
+// backing store and never from its read cache: the answer is as fresh as an
+// in-process read, whoever wrote the bead. Opening nothing is the whole saving.
 //
-// The legs come from the config this controller has PUBLISHED, read with its
-// stores as one consistent snapshot, which is what every other read it serves
-// answers from and what its sessions run under. A change on disk (a rig added,
-// removed or rebound) applies at its next reload, as it does for those. The
-// config watcher's dirty flag is not a reason to refuse: on a live city it is
-// set again between every pair of reconcile ticks.
+// The config is read under cs.mu with the stores controllerState.update
+// published alongside it, so the two are one generation. The answer is
+// therefore not a fresh read of the config on disk: a rig added, removed or
+// rebound there reaches it at the next config reload, as it reaches the
+// controller's sessions.
+//
+// configDirty is not a reason to refuse. It records that a reload is due, for
+// instance after the config watcher has seen a file change, after `gc reload`,
+// or after an API config mutation has already published, and a reconcile tick
+// clears it when it starts that reload. It says nothing about whether the
+// config and the stores agree: they are one generation whatever it reads.
 func (cs *controllerState) ReadyWork(_ context.Context, q readywork.Query) ([]readywork.ReadyBead, error) {
 	if err := q.Validate(); err != nil {
 		return nil, err
