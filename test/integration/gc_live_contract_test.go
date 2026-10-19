@@ -1565,6 +1565,8 @@ func appendLiveContractDefaultQuery(path, pathTemplate string, fx liveContractFi
 		query.Set("limit", "20")
 	case strings.HasSuffix(pathTemplate, "/extmsg/bindings"):
 		query.Set("session_id", fx.sessionID)
+	case strings.HasSuffix(pathTemplate, "/work/active-step"):
+		query.Set("assignee", fx.sessionID)
 	case strings.HasSuffix(pathTemplate, "/extmsg/groups"), strings.HasSuffix(pathTemplate, "/extmsg/transcript"):
 		query = fx.conversation
 	case strings.HasSuffix(pathTemplate, "/readiness") || strings.HasSuffix(pathTemplate, "/provider-readiness"):
