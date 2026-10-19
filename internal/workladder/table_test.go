@@ -42,6 +42,7 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil)},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 })},
 		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true })},
+		{"claim/escalated, pool alerted", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.RateLimitAlerted = 1, true, true })},
 	}
 	type col struct {
 		name string
@@ -53,6 +54,8 @@ func TestDecisionTable(t *testing.T) {
 		{"gate held", func(o *Observation) { o.Gate.Held = true }},
 		{"not quiet", func(o *Observation) { o.Quiet.State = NotQuiet }},
 		{"runtime dead", func(o *Observation) { o.Runtime = TriFalse }},
+		{"quiet, rate-limited 2x", func(o *Observation) { o.RateLimited = 2 }},
+		{"quiet, degraded, rate-limited 2x", func(o *Observation) { o.Provider.Degraded, o.RateLimited = true, 2 }},
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)\n\n")
@@ -108,7 +111,10 @@ func render(a Action) string {
 		}
 		return fmt.Sprintf("nudge %d", a.Attempt)
 	case Recycle:
-		if a.KeepClaim {
+		switch {
+		case a.Fresh:
+			return "fresh recycle (keep claim)"
+		case a.KeepClaim:
 			return "recycle (keep claim)"
 		}
 		return "recycle"

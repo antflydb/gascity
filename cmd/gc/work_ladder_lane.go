@@ -11,7 +11,11 @@ package main
 // the work a nudge or a recycle would act on, commit the work_ladder cell by
 // a CAS on the row that decides again on the fresh read (UpdateRowFenced),
 // and only then act: nudge through today's delivery call, post a recycle to
-// the planner's inbox (arm A16), or release an unstarted claim. Every write
+// the planner's inbox (arm A16), or release an unstarted claim. A recycle
+// for the rate-limit rule (a seat its provider refuses with a rate limit) is
+// a fresh restart instead (gc session reset): its request lands with the
+// cell, in the same CAS, and arm A13 restarts the seat in place on a new
+// conversation, keeping its claims. Every write
 // of the cell is a CAS (WL6); the old pacing keys are neither read nor
 // written (§6.7), so a deploy starts every seat from a fresh grace and no
 // drain wave is possible.
@@ -89,6 +93,10 @@ type ladderPass struct {
 	// ladder holds but the snapshot lacks is carried, re-read live before
 	// anything is done about it.
 	partial bool
+	// ctx bounds the pass's reads; turns reads a seat's turns for the
+	// rate-limit rule (nil: none).
+	ctx   context.Context
+	turns ladderTurnReader
 }
 
 // runWorkLadder is the step's body over the planner's last allocation s.
@@ -100,9 +108,13 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	}
 	p := &ladderPass{
 		l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore),
-		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial,
+		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial, ctx: ctx,
+	}
+	if l.turnReaderFor != nil {
+		p.turns = l.turnReaderFor(env)
 	}
 	work := p.outstanding(s, raw)
+	governed := make(map[string]bool)
 	for _, row := range raw {
 		if ctx.Err() != nil {
 			return
@@ -110,8 +122,10 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 		if !ladderGoverns(row) {
 			continue
 		}
+		governed[row.ID] = true
 		p.seat(row, work[row.ID])
 	}
+	l.rateLimits.keep(governed)
 }
 
 // ladderGoverns is the seats the ladder paces: open pool-managed session
@@ -152,7 +166,10 @@ func (l *externalReadsLane) clearLadderReleases(store beads.Store, raw []beads.B
 // continuation pinned to it; and the in_progress claims it holds under a
 // current identity. Work on a dispatch hold (hold:mayor, hold:external) is
 // not the ladder's (owner ruling 2026-10-18): it stays with its agent,
-// unnudged, until the hold lifts, and then the ladder takes it up afresh.
+// unnudged, until the hold lifts, and then the ladder takes it up afresh. So
+// is a claim whose seat asked a person and waits on their decision
+// (awaitsHuman): no nudge can hurry a person, and no recycle or release may
+// cut the wait short.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
 	held := make(map[string]bool)
@@ -160,6 +177,10 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 		if beadmeta.HasDispatchHold(b.Labels) {
 			held[b.ID] = true
 		}
+	}
+	claimed := make(map[string]beads.Bead, len(s.AssignedWork))
+	for _, b := range s.AssignedWork {
+		claimed[b.ID] = b
 	}
 	claimWork := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claimWork))
@@ -191,14 +212,20 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			})
 		}
 		for _, c := range claims.forIdentities(currentSessionAssigneeIdentities(row)) {
-			if held[c.BeadID] {
+			if held[c.BeadID] || awaitsHuman(claimed[c.BeadID], row.ID) {
 				continue
 			}
-			target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
+			target, seat := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}, row.ID
 			ts = append(ts, ladderTarget{
 				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
 				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
-				recheck:      func() backstopResolution { return unlessHeld(revalidateExecutionClaim(target)) },
+				recheck: func() backstopResolution {
+					res, b := revalidateExecutionClaim(target)
+					if res == backstopResolutionOutstanding && awaitsHuman(b, seat) {
+						return backstopResolutionClear
+					}
+					return unlessHeld(res, b)
+				},
 			})
 		}
 		if len(ts) > 0 {
@@ -257,6 +284,13 @@ func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
 	return res
 }
 
+// awaitsHuman reports whether claim b's seat (seat, its session ID) asked a
+// person and waits on their decision (gc.awaiting_human names it): not the
+// ladder's until the seat works the step again and clears it.
+func awaitsHuman(b beads.Bead, seat string) bool {
+	return beadmeta.AwaitsHuman(b.Metadata, seat)
+}
+
 // carriedRecheck re-reads, live through the store that owns it, work the
 // seat's ladder carries under an incomplete snapshot: still what its kind
 // says (a trigger open and unclaimed; a continuation open and pinned to the
@@ -271,6 +305,8 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 		case err != nil:
 			return backstopResolutionHold
 		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)) || beadmeta.HasDispatchHold(b.Labels):
+			return backstopResolutionClear
+		case w.Kind == workladder.KindClaim && awaitsHuman(b, row.ID):
 			return backstopResolutionClear
 		}
 		status := "in_progress"
@@ -298,6 +334,7 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 		targets = p.carryLadderWork(row, targets, prev)
 	}
 	info, live := sessionInfoFromBead(row), p.observeRuntime(row)
+	live.rateLimit = p.rateLimits(row, info, live, targets)
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision
 	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
@@ -318,7 +355,7 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	if !ok {
 		return
 	}
-	p.act(row, landed)
+	p.act(row, landed, live)
 }
 
 // carryLadderWork adds to targets, under an incomplete snapshot, every work
@@ -384,6 +421,30 @@ type ladderRuntime struct {
 	quiet    workladder.Quiet
 	activity time.Time
 	provider workladder.ProviderState
+	// rateLimit is what the seat's turns say its provider did with them.
+	rateLimit rateLimitReading
+}
+
+// rateLimits reads the seat's turns for the rate-limit rule, when the rule
+// could act on them: a running, quiet seat whose gate is open and whose
+// provider is not degraded, holding a claim. Otherwise, and when the turns
+// cannot be read (a family that records no turns, a transcript not found
+// here), it reads no refusal; a read that fails is logged once per seat and
+// conversation.
+func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRuntime, targets []ladderTarget) rateLimitReading {
+	if p.turns == nil || rt.running != workladder.TriTrue || rt.quiet.State != workladder.Quiescent || rt.provider.Degraded ||
+		ladderGate(info, row.Metadata, p.now).Held ||
+		!slices.ContainsFunc(targets, func(t ladderTarget) bool { return t.work.Kind == workladder.KindClaim }) {
+		return rateLimitReading{}
+	}
+	r, err := p.l.rateLimits.read(p.ctx, p.turns, row, rt.activity)
+	if err != nil {
+		if p.l.rateLimits.firstFailure(row, err) {
+			fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its turns for the rate-limit rule: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
+		}
+		return rateLimitReading{}
+	}
+	return r
 }
 
 // observeRuntime reads row's runtime: running, quiet (sessionQuietHold's
@@ -437,6 +498,9 @@ func (p *ladderPass) observe(info session.Info, meta map[string]string, prev wor
 		obs.Outstanding = append(obs.Outstanding, t.work)
 	}
 	obs.Started, obs.StartedRead = ladderStarted(meta, prev, gen, targets)
+	if rt.rateLimit.in(meta) { // a reading of another generation or conversation is not this row's
+		obs.RateLimited = rt.rateLimit.refused
+	}
 	return obs
 }
 
@@ -554,7 +618,14 @@ func (p *ladderPass) commit(id string, targets []ladderTarget, hold map[workladd
 		if !d.Changed {
 			return session.RowPatch{}, false
 		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(d.Next)}}, true
+		patch := session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(d.Next)}
+		if freshRecycle(d) {
+			// gc session reset's request (Manager.RequestFreshRestart), at
+			// the generation this CAS proves: A13 restarts the seat in place
+			// on a new conversation.
+			patch["restart_requested"], patch["continuation_reset_pending"] = "true", "true"
+		}
+		return session.RowPatch{Metadata: patch}, true
 	})
 	switch {
 	case err != nil:
@@ -567,6 +638,14 @@ func (p *ladderPass) commit(id string, targets []ladderTarget, hold map[workladd
 	return landed, true
 }
 
+// freshRecycle reports whether d recycles its seat to a fresh conversation.
+func freshRecycle(d workladder.Decision) bool {
+	return slices.ContainsFunc(d.Actions, func(a workladder.Action) bool {
+		r, ok := a.(workladder.Recycle)
+		return ok && r.Fresh
+	})
+}
+
 // newRelease is the release d writes that prev did not hold.
 func newRelease(prev workladder.Record, d workladder.Decision) (workladder.ClaimKey, bool) {
 	r := d.Next.Release
@@ -577,8 +656,10 @@ func newRelease(prev workladder.Record, d workladder.Decision) (workladder.Claim
 }
 
 // act performs what landed: the releases first (a claim given back needs no
-// nudge), then the nudge, the recycle and the alerts.
-func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
+// nudge), then the nudge, the recycle and the alerts. A fresh recycle's
+// request landed with the cell; the planner is woken for it. rt is the
+// seat's runtime as the pass read it.
+func (p *ladderPass) act(row beads.Bead, d workladder.Decision, rt ladderRuntime) {
 	gen := d.Next.Gen
 	released := map[workladder.ClaimKey]bool{}
 	for _, a := range d.Actions {
@@ -590,7 +671,7 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
 			released[r.Key] = p.release(row, r.Key, at)
 		}
 	}
-	recycled := false
+	recycled, fresh := false, false
 	for _, a := range d.Actions {
 		switch a := a.(type) {
 		case workladder.Nudge:
@@ -599,15 +680,41 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
 			}
 		case workladder.Recycle:
 			p.event(events.WorkRecycleRequested, row, a.Key, gen, workLadderEventFields{Reason: recycleReason(a)})
-			if !recycled {
+			switch {
+			case a.Fresh:
+				fresh = true
+			case !recycled:
 				recycled = true
 				p.recycle(row, gen)
 			}
 		case workladder.Alert:
-			fmt.Fprintf(p.l.stderr, "work-ladder: %s: %s on %s\n", row.ID, a.Reason, a.Key.Bead) //nolint:errcheck // best-effort stderr
-			p.event(events.WorkEscalated, row, a.Key, gen, workLadderEventFields{Reason: a.Reason})
+			f := workLadderEventFields{Reason: a.Reason, Message: alertMessage(row, a, rt.rateLimit)}
+			line := fmt.Sprintf("work-ladder: %s: %s on %s", row.ID, a.Reason, a.Key.Bead)
+			if f.Message != "" {
+				line += ": " + f.Message
+			}
+			fmt.Fprintln(p.l.stderr, line) //nolint:errcheck // best-effort stderr
+			p.event(events.WorkEscalated, row, a.Key, gen, f)
 		}
 	}
+	if fresh {
+		p.l.onChange()
+	}
+}
+
+// alertMessage is a rate-limit alert's text for people, "" for any other
+// alert (its reason says it all). It names the provider and quotes its
+// newest refusal, so whoever reroutes the lane sees what the provider said
+// (a pool's cooldown, in its own words).
+func alertMessage(row beads.Bead, a workladder.Alert, r rateLimitReading) string {
+	provider := strings.TrimSpace(row.Metadata["provider"])
+	switch a.Reason {
+	case workladder.AlertRateLimitedRecycled:
+		return fmt.Sprintf("provider %s refused the seat's last %d turns with a rate limit; recycling the seat to a fresh conversation, keeping its claim: %s", provider, r.refused, r.last.Message)
+	case workladder.AlertProviderRateLimited:
+		return fmt.Sprintf("provider %s refused the seat's fresh conversation too (%d turns): its pool is refusing every seat; reroute the lane: %s", provider, r.refused, r.last.Message)
+	}
+	return ""
 }
 
 // refusedOf is the refusals r records for key's entry.
@@ -619,7 +726,10 @@ func refusedOf(r workladder.Record, key workladder.ClaimKey) int {
 }
 
 func recycleReason(r workladder.Recycle) string {
-	if r.KeepClaim {
+	switch {
+	case r.Fresh:
+		return "rate_limited"
+	case r.KeepClaim:
 		return "started_unanswered"
 	}
 	return "trigger_unclaimed"
@@ -743,6 +853,8 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 		outcome, why = "kept", fmt.Sprintf("%d live hits", len(hits))
 	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
 		outcome = "gone" // parked on a hold since the snapshot: not the ladder's
+	case awaitsHuman(hits[0].bead, row.ID):
+		outcome = "gone" // its seat asked a person since the snapshot: not the ladder's
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
 		outcome = "started"
 	default:
@@ -795,11 +907,12 @@ func (p *ladderPass) claimGone(row beads.Bead, bead string) bool {
 }
 
 // workLadderEventFields are the parts of a work.* event's payload beyond the
-// seat and the work.
+// seat and the work. Message is the event's text when it says more than
+// Reason.
 type workLadderEventFields struct {
-	Kind, Rung, Reason string
-	Attempt            int
-	Paused             bool
+	Kind, Rung, Reason, Message string
+	Attempt                     int
+	Paused                      bool
 }
 
 // event records one work.* event about key on row's seat at gen.
@@ -809,12 +922,17 @@ func (p *ladderPass) event(typ string, row beads.Bead, key workladder.ClaimKey, 
 	}
 	payload, err := json.Marshal(events.WorkLadderPayload{
 		SessionID: row.ID, SessionName: strings.TrimSpace(row.Metadata["session_name"]), Template: strings.TrimSpace(row.Metadata["template"]),
-		BeadID: key.Bead, StoreRef: key.Store, Generation: gen, Kind: f.Kind, Rung: f.Rung, Attempt: f.Attempt, Paused: f.Paused, Reason: f.Reason,
+		Provider: strings.TrimSpace(row.Metadata["provider"]),
+		BeadID:   key.Bead, StoreRef: key.Store, Generation: gen, Kind: f.Kind, Rung: f.Rung, Attempt: f.Attempt, Paused: f.Paused, Reason: f.Reason,
 	})
 	if err != nil {
 		return
 	}
+	message := f.Reason
+	if f.Message != "" {
+		message = f.Message
+	}
 	p.l.events.Record(events.Event{
-		Type: typ, Actor: eventActor(), Subject: key.Bead, SessionID: row.ID, Message: f.Reason, Payload: payload,
+		Type: typ, Actor: eventActor(), Subject: key.Bead, SessionID: row.ID, Message: message, Payload: payload,
 	})
 }

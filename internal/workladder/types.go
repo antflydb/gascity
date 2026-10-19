@@ -124,6 +124,12 @@ type Observation struct {
 	LastActivity time.Time
 	Gate         Gate
 	Provider     ProviderState
+	// RateLimited is how many of the seat's latest turns, newest first, its
+	// provider refused with a rate limit (as the agent's own transcript
+	// classifies them: HTTP 429), counted up to the first it did not refuse,
+	// in the seat's current conversation. A seat refused like that cannot
+	// answer a nudge (the rate-limit rule).
+	RateLimited int
 }
 
 // Policy is the ladder's pacing. DefaultPolicy is OD7's.
@@ -136,6 +142,10 @@ type Policy struct {
 	RecycleRepost time.Duration // a trigger's recycle request is reposted no sooner
 	Threshold     map[Kind]map[Rung]int
 	MaxRecycles   int // R: recycles of a started claim per seat
+	// RateLimitThreshold is the turns in a row the seat's provider refuses
+	// with a rate limit before its started claims are recycled to a fresh
+	// conversation (within MaxRecycles), or, past it, alerted on.
+	RateLimitThreshold int
 }
 
 // Action is one effect Decide asks the caller for.
@@ -153,10 +163,14 @@ type Nudge struct {
 }
 
 // Recycle asks for the seat to be recycled through the planner's inbox.
-// KeepClaim keeps a started claim on the seat across the restart.
+// KeepClaim keeps a started claim on the seat across the restart. Fresh
+// restarts the seat in place with fresh provider conversation state (gc
+// session reset): the seat, its claims and its pins are kept, the
+// conversation is not.
 type Recycle struct {
 	Key       ClaimKey
 	KeepClaim bool
+	Fresh     bool
 }
 
 // Release asks the caller to release an unstarted claim, after re-proving by
@@ -183,6 +197,13 @@ const (
 	AlertReleaseUnfinished      = "release_unfinished"
 	AlertReleaseRacedStart      = "release_raced_start"
 	AlertNudgeRefused           = "nudge_refused"
+	// AlertRateLimitedRecycled: the seat's provider refused its latest turns
+	// with a rate limit, so the claim's seat was recycled to a fresh
+	// conversation.
+	AlertRateLimitedRecycled = "rate_limited_recycled"
+	// AlertProviderRateLimited: the provider refused the claim's fresh seat
+	// too. The pool itself is refusing, and a human must reroute the lane.
+	AlertProviderRateLimited = "provider_rate_limited"
 )
 
 // Decision is Decide's answer: the cell to CAS (no write when !Changed) and
@@ -230,6 +251,9 @@ type Entry struct {
 	// permission prompt, a runtime unavailable): while it is above zero the
 	// entry is nudged no more often than PausedCap.
 	Refused int
+	// RateLimitAlerted: the provider_rate_limited alert was raised for the
+	// entry; it is raised once in the entry's life.
+	RateLimitAlerted bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

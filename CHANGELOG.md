@@ -282,6 +282,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The work ladder recycles a seat its provider keeps refusing with a rate
+  limit, and leaves a step alone while its seat waits on a person.** With
+  `[daemon] work_ladder` on (the default), a pool seat holding a started claim
+  whose last two turns the provider refused with HTTP 429 (as the agent CLI
+  classified them in its own transcript) is restarted at once to a fresh
+  conversation (`gc session reset` semantics: the same seat, its claims kept),
+  instead of after six unanswered nudges. That is the one recycle a started
+  claim gets; if the fresh seat is refused too, one `work.escalated` event
+  with reason `provider_rate_limited` names the provider and the claim is
+  nudged hourly. Every `work.*` payload now carries the seat's `provider`. A
+  claimed step whose metadata `gc.awaiting_human` names the seat holding it
+  (the seat asked a person and waits on their decision, such as an approval
+  asked by mail) gets no nudge, recycle or release until the seat clears it;
+  a step re-claimed by another seat is paced as usual. The rate-limit rule
+  never acts while the provider-health gate reports the provider degraded:
+  that gate alerts on the outage itself. Failed Claude turns now record the
+  provider error they ended on (class, HTTP status and text).
+
 - **A suspended rig or city is left cold.** gc no longer touches the bead
   store of a suspended rig, or of any scope of a suspended city. That covers
   cache scans, demand, order-tracking sweeps, the completions sweep,

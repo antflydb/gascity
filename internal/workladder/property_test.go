@@ -135,6 +135,9 @@ func (s *sim) step() Observation {
 	if flip(5) {
 		s.obs.Provider = ProviderState{Degraded: !s.obs.Provider.Degraded}
 	}
+	if flip(8) { // the provider refuses the seat's turns now and then
+		s.obs.RateLimited = s.rng.IntN(4)
+	}
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
 		s.activity = s.now.Add(-time.Duration(s.rng.IntN(120)) * time.Second)
@@ -208,6 +211,7 @@ func runSequence(seed uint64) error {
 	}
 	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
 	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
+	poolAlerts := map[ClaimKey]int{}       // provider_rate_limited alerts while the entry lives
 	for i := range 90 {
 		prev := s.rec
 		prevCopy := prev
@@ -245,11 +249,12 @@ func runSequence(seed uint64) error {
 				delete(lastTrigger, e.Key)
 				if !ok {
 					delete(recycles, e.Key)
+					delete(poolAlerts, e.Key)
 				}
 			}
 		}
 
-		nudges := 0
+		nudges, fresh := 0, false
 		for _, a := range d.Actions {
 			switch a := a.(type) {
 			case Nudge:
@@ -287,6 +292,17 @@ func runSequence(seed uint64) error {
 				if o.Provider.Degraded {
 					return fail("WL4: recycle while degraded")
 				}
+				if a.Fresh {
+					fresh = true
+					// The rate-limit rule recycles only a started claim of a
+					// seat refused at least RateLimitThreshold times in a row.
+					if o.RateLimited < DefaultRateLimitThreshold || !a.KeepClaim {
+						return fail("a fresh recycle of %v with %d refusals", a.Key, o.RateLimited)
+					}
+					if e, ok := entryOf(d.Next, a.Key); !ok || e.Kind != KindClaim || e.Rung < RungStarted {
+						return fail("a fresh recycle of %v, not a started claim", a.Key)
+					}
+				}
 				if a.KeepClaim {
 					if recycles[a.Key]++; recycles[a.Key] > DefaultMaxRecycles {
 						return fail("WL3: %d recycles of started %v", recycles[a.Key], a.Key)
@@ -312,11 +328,19 @@ func runSequence(seed uint64) error {
 				if o.Provider.Degraded && a.Reason != AlertReleaseRacedStart {
 					return fail("WL4: escalation while degraded")
 				}
+				if a.Reason == AlertProviderRateLimited {
+					if poolAlerts[a.Key]++; poolAlerts[a.Key] > 1 {
+						return fail("the pool alert for %v raised %d times in its life", a.Key, poolAlerts[a.Key])
+					}
+				}
 				lastHeard[a.Key] = o.Now
 			}
 		}
 		if nudges > 1 {
 			return fail("WL3: %d nudges in one pass", nudges)
+		}
+		if fresh && nudges > 0 {
+			return fail("a nudge to a seat the pass recycled fresh")
 		}
 		if o.Provider.Degraded {
 			if d.Next.Release != nil && (prev.Release == nil || *d.Next.Release != *prev.Release) {

@@ -12,8 +12,11 @@ import (
 // rise; a rise resets the count); reset counts on a new generation, and on
 // progress the seat made since its last nudge, whether or not the ladder saw
 // it; settle a pending release; then, only with the gate open, the runtime
-// alive and the seat quiet, act on the due entries, earliest first: at most
-// one Nudge per pass, and none within Base of the seat's last (WL3). An entry
+// alive and the seat quiet: apply the rate-limit rule (a seat whose provider
+// refused its latest turns with a rate limit has its started claims
+// recycled to a fresh conversation, or, past the recycle budget, alerted
+// on), and otherwise act on the due entries, earliest first: at most one
+// Nudge per pass, and none within Base of the seat's last (WL3). An entry
 // whose live read could not tell (obs.Hold) waits, kept as it is.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
@@ -81,8 +84,14 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		return p.settle(d, prev)
 	}
 
-	// 7-8. Quiet: act on the due entries, earliest first.
+	// 7. The rate-limit rule. Never while the provider is degraded (WL4):
+	// the provider's health gate owns that outage and alerts on it.
 	degraded := obs.Provider.Degraded
+	if !degraded && obs.RateLimited >= p.RateLimitThreshold && p.rateLimited(&d, obs) {
+		return p.settle(d, prev) // the seat is being restarted: nothing else this pass
+	}
+
+	// 8. Quiet: act on the due entries, earliest first.
 	order := make([]int, 0, len(d.Next.Entries))
 	for i, e := range d.Next.Entries {
 		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
@@ -183,6 +192,36 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	return p.settle(d, prev)
 }
 
+// rateLimited applies the rate-limit rule to d's started claims and reports
+// whether it recycled the seat. A seat whose provider refuses its turns with
+// a rate limit is not ignoring its nudges: it cannot answer them, and the
+// refusal sticks to its conversation. So a started claim within its recycle
+// budget (the one an unanswered started claim spends, WL3) recycles the seat
+// at once to a fresh conversation, keeping its claims. A claim past its
+// budget that the fresh seat's provider refuses as well (a generation after
+// the ladder's last recycle) shows the provider's pool refusing every seat:
+// one alert names it, and the claim is paced at Cap from then on. A claim
+// whose live read could not tell, or that is being released, waits.
+func (p Policy) rateLimited(d *Decision, obs Observation) (recycled bool) {
+	for i := range d.Next.Entries {
+		e := &d.Next.Entries[i]
+		if e.Kind != KindClaim || e.Rung < RungStarted || obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
+			continue
+		}
+		switch {
+		case e.Recycles < p.MaxRecycles:
+			e.Recycles++
+			e.RecycleAt, e.Last, d.Next.RecycledGen = obs.Now, obs.Now, obs.Gen
+			recycled = true
+			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true, Fresh: true}, Alert{Key: e.Key, Reason: AlertRateLimitedRecycled})
+		case !e.RateLimitAlerted && d.Next.RecycledGen != obs.Gen:
+			e.RateLimitAlerted, e.Rung, e.Escalated = true, RungEscalated, true
+			d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertProviderRateLimited})
+		}
+	}
+	return recycled
+}
+
 // progressReset restarts e's count when the seat made progress at least
 // ProgressReset after e's last nudge, observed now or not (an outage, a
 // hold, the ladder off): its activity clock is the evidence, read on any
@@ -259,7 +298,8 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
+			x.Refused != y.Refused || x.RateLimitAlerted != y.RateLimitAlerted ||
+			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}
 	}
