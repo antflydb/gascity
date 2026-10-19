@@ -430,7 +430,7 @@ type ladderRuntime struct {
 // provider is not degraded, holding a claim. Otherwise, and when the turns
 // cannot be read (a family that records no turns, a transcript not found
 // here), it reads no refusal; a read that fails is logged once per seat and
-// conversation.
+// conversation, unless the family records no turns at all.
 func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRuntime, targets []ladderTarget) rateLimitReading {
 	if p.turns == nil || rt.running != workladder.TriTrue || rt.quiet.State != workladder.Quiescent || rt.provider.Degraded ||
 		ladderGate(info, row.Metadata, p.now).Held ||
@@ -439,7 +439,8 @@ func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRunt
 	}
 	r, err := p.l.rateLimits.read(p.ctx, p.turns, row, rt.activity)
 	if err != nil {
-		if p.l.rateLimits.firstFailure(row, err) {
+		// A family that records no turns is not the rule's: nothing to report.
+		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) && p.l.rateLimits.firstFailure(row, err) {
 			fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its turns for the rate-limit rule: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
 		}
 		return rateLimitReading{}

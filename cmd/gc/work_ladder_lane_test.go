@@ -1779,9 +1779,13 @@ func TestWorkLadderRateLimitRuleNeedsAnOpenQuietSeat(t *testing.T) {
 			if v := c.row().Metadata["restart_requested"]; v != "" || len(c.events(events.WorkRecycleRequested)) != 0 || len(c.events(events.WorkEscalated)) != 0 {
 				t.Fatalf("restart_requested %q, recycles %d, alerts %d", v, len(c.events(events.WorkRecycleRequested)), len(c.events(events.WorkEscalated)))
 			}
-			// A seat the rule cannot act on has its turns read not at all.
+			// A seat the rule cannot act on has its turns read not at all; one
+			// whose turns cannot be read is read again only when it moves.
 			if name != "unreadable" && turns.reads != 0 {
 				t.Fatalf("%d turn reads of a seat the rule cannot act on", turns.reads)
+			}
+			if name == "unreadable" && turns.reads != 1 {
+				t.Fatalf("%d reads of an unreadable seat that never moved, want 1", turns.reads)
 			}
 		})
 	}
@@ -1822,5 +1826,33 @@ func TestWorkLadderRateLimitReadingIsTheConversations(t *testing.T) {
 	c.pass()
 	if v := c.row().Metadata["restart_requested"]; v != "" || len(c.events(events.WorkRecycleRequested)) != 0 {
 		t.Fatalf("restart_requested %q for conv-2 on conv-1's refusals", v)
+	}
+}
+
+// A turn read that fails is reported once per seat and conversation, not
+// every pass; a seat whose provider records no turns (cursor, a codex
+// family) is not the rule's at all, and is not reported.
+func TestWorkLadderReportsAFailedTurnReadOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		lines int
+	}{
+		{"unreadable", fmt.Errorf("transcript: %w", runtime.ErrRuntimeUnavailable), 1},
+		{"no turns recorded", fmt.Errorf("cursor: %w", runtime.ErrTurnIdentityUnsupported), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("quiet")
+			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "conv-1"})
+			var stderr strings.Builder
+			c.lane.stderr = &stderr
+			turns := &ladderTurns{err: tc.err}
+			turns.install(c)
+			c.run(time.Hour, 30*time.Second, func() { c.sp.SetActivity(ladderSeatName, c.now.Add(-time.Hour)) })
+			if n := strings.Count(stderr.String(), "reading its turns"); n != tc.lines {
+				t.Fatalf("%d reports in an hour, want %d:\n%s", n, tc.lines, stderr.String())
+			}
+		})
 	}
 }

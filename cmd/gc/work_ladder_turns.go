@@ -37,6 +37,8 @@ type rateLimitReading struct {
 	activity time.Time // the seat's last activity when it was read
 	refused  int
 	last     runtime.TurnFailure
+	// err is a read that failed: no refusal, until the seat moves.
+	err error
 }
 
 // in reports whether the reading was taken in the conversation and
@@ -94,29 +96,30 @@ func (c *ladderRateLimits) firstFailure(row beads.Bead, err error) bool {
 
 // read is row's reading at activity: the cached one while the seat has not
 // moved, else a fresh read through read. A read that fails is no refusal,
-// and is not cached.
+// and is cached the same way: the seat is read again when it moves.
 func (c *ladderRateLimits) read(ctx context.Context, read ladderTurnReader, row beads.Bead, activity time.Time) (rateLimitReading, error) {
 	r := rateLimitReading{gen: rowGeneration(row.Metadata), key: strings.TrimSpace(row.Metadata["session_key"]), activity: activity}
 	c.mu.Lock()
 	cached, ok := c.last[row.ID]
 	c.mu.Unlock()
 	if ok && cached.gen == r.gen && cached.key == r.key && cached.activity.Equal(activity) {
-		return cached, nil
+		return cached, cached.err
 	}
 	ctx, cancel := context.WithTimeout(ctx, ladderTurnReadBound)
 	defer cancel()
 	hist, err := read(ctx, row)
 	if err != nil {
-		return rateLimitReading{}, err
+		r.err = err
+	} else {
+		r.refused, r.last = rateLimitedTurns(hist)
 	}
-	r.refused, r.last = rateLimitedTurns(hist)
 	c.mu.Lock()
 	if c.last == nil {
 		c.last = make(map[string]rateLimitReading)
 	}
 	c.last[row.ID] = r
 	c.mu.Unlock()
-	return r, nil
+	return r, r.err
 }
 
 // keep forgets every seat a pass no longer governs.
