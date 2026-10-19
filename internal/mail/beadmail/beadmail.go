@@ -493,7 +493,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	}
 	matches := make([]mail.Message, 0, len(candidates))
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if b.Status != "open" || isStagedHandoff(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {

@@ -181,3 +181,30 @@ func TestExistingOrdinaryAutoHandoffRemainsVisible(t *testing.T) {
 		t.Fatalf("Count = (%d, %d), want (1, 1) for existing ordinary handoff", total, unread)
 	}
 }
+
+func TestBulkArchiveLeavesAStagedHandoffOpen(t *testing.T) {
+	provider, store, message := newStagedHandoff(t)
+	filter := ArchiveFilter{Recipients: []string{"worker"}, IncludeRead: true}
+
+	candidates, err := provider.ArchiveCandidates(filter)
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("ArchiveCandidates offered staged handoff %#v", candidates)
+	}
+	archived, _, err := provider.ArchiveMatching(filter)
+	if err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	if len(archived) != 0 {
+		t.Fatalf("ArchiveMatching archived staged handoff %#v", archived)
+	}
+	b, err := store.Get(message.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status != "open" {
+		t.Fatalf("staged handoff status = %q after bulk archive, want open", b.Status)
+	}
+}
