@@ -42,7 +42,10 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil)},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 })},
 		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true })},
-		{"claim/escalated, recycled fresh", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.FreshRecycled = 1, true, true })},
+		{"claim/escalated, recycled fresh long ago", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.FreshRecycled = 1, true, true })},
+		{"claim/escalated, recycled fresh just now", ent(KindClaim, RungEscalated, 9, func(e *Entry) {
+			e.Recycles, e.Escalated, e.FreshRecycled, e.RecycleAt = 1, true, true, now.Add(-5*time.Minute)
+		})},
 		{"claim/escalated, rate limit alerted", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.RateLimitAlerted = 1, true, true })},
 	}
 	type col struct {

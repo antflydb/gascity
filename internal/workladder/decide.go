@@ -216,9 +216,10 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 // returned in queued, to be paced as degraded until its turn comes; a claim
 // under a standing hold is paced as ever. A claim past its budget
 // is alerted on once, a generation after the ladder's last recycle, and paced
-// at Cap from then on: if its recycle was fresh, the fresh seat was refused
-// too, so the provider's pool is refusing every seat; if it was a drain that
-// resumed the same conversation, a human must reset the seat or reroute. A
+// at Cap from then on: if its recycle was fresh and within Cap, the fresh
+// seat was refused too, so the provider's pool is refusing every seat; if it
+// was fresh but long ago, or a drain that resumed the same conversation, the
+// claim is stuck again, and a human must reset the seat or reroute. A
 // claim whose live read could not tell, or that is being released, waits.
 func (p Policy) rateLimited(d *Decision, obs Observation) (recycled bool, queued map[ClaimKey]bool) {
 	for i := range d.Next.Entries {
@@ -246,9 +247,14 @@ func (p Policy) rateLimited(d *Decision, obs Observation) (recycled bool, queued
 			recycled = true
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true, Fresh: true}, Alert{Key: e.Key, Reason: AlertRateLimitedRecycled})
 		case !e.RateLimitAlerted && d.Next.RecycledGen != obs.Gen:
+			// Only a fresh conversation refused soon after its restart says
+			// the provider's pool refuses fresh conversations.
 			reason := AlertProviderRateLimited
-			if !e.FreshRecycled {
+			switch {
+			case !e.FreshRecycled:
 				reason = AlertRateLimitedUnrecycled
+			case obs.Now.Sub(e.RecycleAt) > p.Cap:
+				reason = AlertRateLimitedAgain
 			}
 			e.RateLimitAlerted, e.Rung, e.Escalated = true, RungEscalated, true
 			d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: reason})

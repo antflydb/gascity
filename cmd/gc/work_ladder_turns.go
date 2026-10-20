@@ -31,6 +31,12 @@ const (
 	// ladder's last nudge to it moves; the bound catches the rest, such as a
 	// refusal tmux's activity clock discounts (output right after a nudge).
 	ladderReadMaxAge = 5 * time.Minute
+	// ladderUnknownFor is how long after its last good reading a refused
+	// seat whose turns cannot be read has its claims wait, rather than paced
+	// as if its provider served it: twice ladderReadMaxAge, so it covers the
+	// re-read when the good reading ages out. Past it, the ladder paces the
+	// seat as ever: failing reads never silence it.
+	ladderUnknownFor = 2 * ladderReadMaxAge
 	// ladderCanaryFlight is how long a provider's fresh-recycle canary holds
 	// the provider's other refused seats: long enough to see its fresh
 	// conversation refused (a restart, the grace, one nudge: about 5
@@ -44,9 +50,6 @@ const (
 	// ladderRefusingMax.
 	ladderRefusingFor = workladder.DefaultCap
 	ladderRefusingMax = 24 * time.Hour
-	// ladderServedOpen is how long a turn must stay open for the provider to
-	// have served it: a turn it refuses with a rate limit ends in seconds.
-	ladderServedOpen = time.Minute
 )
 
 // ladderTurnReader reads a seat's current and recent turns.
@@ -67,12 +70,16 @@ type rateLimitReading struct {
 	refusedAt time.Time
 	last      runtime.TurnFailure
 	// servedAt is when the newest ended turn ended, when the provider
-	// answered it (it completed); zero otherwise. openSince is when the turn
-	// still open began; zero when none is.
-	servedAt  time.Time
-	openSince time.Time
+	// answered it (it completed), whether or not a newer turn is open: the
+	// only evidence of service the rule takes. Zero otherwise.
+	servedAt time.Time
 	// err is a read that failed: no refusal, until the reading is read again.
 	err error
+	// unknown: this read failed, and the last good reading of the same
+	// conversation, younger than ladderUnknownFor, showed the provider
+	// refusing the seat: whether the ladder's last nudge was refused too
+	// cannot be told, so the seat's claims wait the pass out.
+	unknown bool
 }
 
 // in reports whether the reading was taken in the conversation and
@@ -84,14 +91,19 @@ func (r rateLimitReading) in(meta map[string]string) bool {
 // rateLimitedTurns reads hist for the rule: how many of its latest ended
 // turns, newest first, the provider refused with a rate limit, up to the
 // first it did not, when the newest of them ended and its error; and when
-// the newest ended turn ended if the provider answered it. A turn still open
-// has no answer yet: no refusal, nothing served.
+// the newest ended turn ended if the provider answered it (completed),
+// whether or not a newer turn is open. A turn still open has no answer yet:
+// no refusal. How long a turn has been open proves nothing (a provider can
+// take minutes to refuse one).
 func rateLimitedTurns(hist runtime.TurnHistory) (refused int, refusedAt time.Time, last runtime.TurnFailure, servedAt time.Time) {
-	if hist.Current.Active() || len(hist.Recent) == 0 {
+	if len(hist.Recent) == 0 {
 		return 0, time.Time{}, runtime.TurnFailure{}, time.Time{}
 	}
 	if newest := hist.Recent[0]; newest.Status == runtime.TurnStatusCompleted {
 		servedAt = newest.EndedAt
+	}
+	if hist.Current.Active() {
+		return 0, time.Time{}, runtime.TurnFailure{}, servedAt
 	}
 	for _, t := range hist.Recent {
 		if t.Status != runtime.TurnStatusFailed || !t.Failure.RateLimited {
@@ -111,13 +123,17 @@ func rateLimitedTurns(hist runtime.TurnHistory) (refused int, refusedAt time.Tim
 type ladderRateLimits struct {
 	mu     sync.Mutex
 	last   map[string]rateLimitReading // by session ID
+	good   map[string]rateLimitReading // by session ID: the last read that did not fail
 	failed map[string]string           // by session ID: the conversation and error last reported
 }
 
 // read is row's reading: the cached one while the seat has not moved (its
 // activity, generation, conversation and the ladder's last nudge to it all
 // as read) and is younger than ladderReadMaxAge, else a fresh read through
-// read. A read that fails is cached the same way, as no refusal.
+// read. A read that fails is cached the same way, as no refusal, with the
+// error; unknown when the last good reading of the same conversation,
+// younger than ladderUnknownFor, showed refusals (a failed read must not
+// take a queued claim out of its queue, nor, for longer than that, hold it).
 func (c *ladderRateLimits) read(ctx context.Context, read ladderTurnReader, row beads.Bead, activity, lastNudge, now time.Time) (rateLimitReading, error) {
 	r := rateLimitReading{gen: rowGeneration(row.Metadata), key: strings.TrimSpace(row.Metadata["session_key"]), activity: activity, lastNudge: lastNudge, readAt: now}
 	c.mu.Lock()
@@ -125,7 +141,7 @@ func (c *ladderRateLimits) read(ctx context.Context, read ladderTurnReader, row 
 	c.mu.Unlock()
 	if ok && cached.gen == r.gen && cached.key == r.key && cached.activity.Equal(activity) && cached.lastNudge.Equal(lastNudge) &&
 		now.Sub(cached.readAt) < ladderReadMaxAge {
-		return cached, cached.err
+		return c.orGood(row.ID, cached, now), cached.err
 	}
 	ctx, cancel := context.WithTimeout(ctx, ladderTurnReadBound)
 	defer cancel()
@@ -134,17 +150,30 @@ func (c *ladderRateLimits) read(ctx context.Context, read ladderTurnReader, row 
 		r.err = err
 	} else {
 		r.refused, r.refusedAt, r.last, r.servedAt = rateLimitedTurns(hist)
-		if hist.Current.Active() {
-			r.openSince = hist.CurrentStart
-		}
 	}
 	c.mu.Lock()
 	if c.last == nil {
-		c.last = make(map[string]rateLimitReading)
+		c.last, c.good = make(map[string]rateLimitReading), make(map[string]rateLimitReading)
 	}
 	c.last[row.ID] = r
+	if r.err == nil {
+		c.good[row.ID] = r
+	}
 	c.mu.Unlock()
-	return r, r.err
+	return c.orGood(row.ID, r, now), r.err
+}
+
+// orGood is r, or, when r is a failed read, no refusal, unknown while the
+// last good reading of the same conversation, younger than
+// ladderUnknownFor, showed the provider refusing the seat.
+func (c *ladderRateLimits) orGood(id string, r rateLimitReading, now time.Time) rateLimitReading {
+	if r.err == nil {
+		return r
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	g, ok := c.good[id]
+	return rateLimitReading{unknown: ok && g.gen == r.gen && g.key == r.key && g.refused > 0 && now.Sub(g.readAt) < ladderUnknownFor}
 }
 
 // firstFailure records that row's turns could not be read (err), and
@@ -176,6 +205,11 @@ func (c *ladderRateLimits) keep(ids map[string]bool) {
 	for id := range c.failed {
 		if !ids[id] {
 			delete(c.failed, id)
+		}
+	}
+	for id := range c.good {
+		if !ids[id] {
+			delete(c.good, id)
 		}
 	}
 }
@@ -293,6 +327,9 @@ func (c *ladderCanaries) refused(provider, seat string, now time.Time) time.Time
 		c.streak = make(map[string]refusalStreak)
 	}
 	n := c.streak[provider].n
+	if now.Sub(c.streak[provider].at) > ladderRefusingMax {
+		n = 0 // a day with no refusal: a new episode
+	}
 	holds := min(ladderRefusingFor<<min(n, 10), ladderRefusingMax)
 	c.streak[provider] = refusalStreak{n: n + 1, at: now}
 	c.by[provider] = providerCanary{seat: seat, since: now, refusing: true, holds: holds}

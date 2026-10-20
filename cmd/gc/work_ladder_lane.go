@@ -347,6 +347,13 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 		live.freshHold = p.freshHold(row) // only a reading the rule can act on asks: the attach probe is not free
 	}
 	hold := map[workladder.ClaimKey]bool{}
+	if live.rateLimit.unknown { // a refused seat's turns could not be read: its claims wait the pass out
+		for _, t := range targets {
+			if t.work.Kind == workladder.KindClaim {
+				hold[t.work.Key] = true
+			}
+		}
+	}
 	var d workladder.Decision
 	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
 		d = decideWorkLadder(prev, p.observe(info, row.Metadata, prev, targets, hold, live))
@@ -482,18 +489,12 @@ func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRunt
 		return rateLimitReading{}
 	}
 	r, err := p.l.rateLimits.read(p.ctx, p.turns, row, rt.activity, lastNudge, p.now)
-	if err != nil {
-		// A family that records no turns is not the rule's: nothing to report.
-		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) && p.l.rateLimits.firstFailure(row, err) {
-			fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its turns for the rate-limit rule: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
-		}
-		return rateLimitReading{}
+	// A family that records no turns is not the rule's: nothing to report.
+	if err != nil && !errors.Is(err, runtime.ErrTurnIdentityUnsupported) && p.l.rateLimits.firstFailure(row, err) {
+		fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its turns for the rate-limit rule: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
 	}
-	switch {
-	case !r.servedAt.IsZero():
+	if !r.servedAt.IsZero() {
 		p.l.canaries.served(provider, r.servedAt)
-	case !r.openSince.IsZero() && p.now.Sub(r.openSince) >= ladderServedOpen:
-		p.l.canaries.served(provider, p.now) // a turn the provider refused ends in seconds: this one it serves
 	}
 	return r
 }
@@ -774,6 +775,8 @@ func alertMessage(row beads.Bead, a workladder.Alert, r rateLimitReading, holdUn
 			provider, r.refused, holdUntil.UTC().Format(time.RFC3339), r.last.Message)
 	case workladder.AlertRateLimitedUnrecycled:
 		return fmt.Sprintf("provider %s refused the seat's last %d turns with a rate limit, and its one recycle already went to a drain that resumed the same conversation: reset the seat (gc session reset) or reroute the lane: %s", provider, r.refused, r.last.Message)
+	case workladder.AlertRateLimitedAgain:
+		return fmt.Sprintf("provider %s refused the seat's last %d turns with a rate limit again, long after its one recycle gave it a fresh conversation: reset the seat (gc session reset) or reroute the lane: %s", provider, r.refused, r.last.Message)
 	}
 	return ""
 }

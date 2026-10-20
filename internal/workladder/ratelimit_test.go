@@ -86,7 +86,7 @@ func TestDecideRateLimited(t *testing.T) {
 		},
 		{
 			name: "fresh seat refused again: the pool itself, alert once, paced at Cap",
-			e:    notDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 1, Recycles: 1, FreshRecycled: true}),
+			e:    notDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 1, Recycles: 1, FreshRecycled: true, RecycleAt: now.Add(-10 * time.Minute)}),
 			obs:  func(o Observation) Observation { return rateLimited(o, 2, answered) },
 			want: []Action{Alert{Key: key("x"), Reason: AlertProviderRateLimited}},
 			check: func(t *testing.T, e Entry, _ Decision) {
@@ -100,7 +100,7 @@ func TestDecideRateLimited(t *testing.T) {
 		},
 		{
 			name: "fresh seat refused again and due: alert and the nudge it is owed",
-			e:    isDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 2, Recycles: 1, FreshRecycled: true}),
+			e:    isDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 2, Recycles: 1, FreshRecycled: true, RecycleAt: now.Add(-10 * time.Minute)}),
 			obs:  func(o Observation) Observation { return rateLimited(o, 3, now) },
 			want: []Action{Alert{Key: key("x"), Reason: AlertProviderRateLimited}, Nudge{Key: key("x"), Kind: KindClaim, Rung: RungEscalated, Attempt: 3}},
 		},
@@ -123,7 +123,7 @@ func TestDecideRateLimited(t *testing.T) {
 		},
 		{
 			name: "an escalated claim not yet named for the pool: the pool alert, once",
-			e:    notDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungEscalated, Attempts: 9, Recycles: 1, FreshRecycled: true, Escalated: true}),
+			e:    notDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungEscalated, Attempts: 9, Recycles: 1, FreshRecycled: true, Escalated: true, RecycleAt: now.Add(-10 * time.Minute)}),
 			obs:  func(o Observation) Observation { return rateLimited(o, 2, answered) },
 			want: []Action{Alert{Key: key("x"), Reason: AlertProviderRateLimited}},
 			check: func(t *testing.T, e Entry, _ Decision) {
@@ -331,7 +331,7 @@ func TestDecideRateLimitedTracksTheLastRecycle(t *testing.T) {
 	now := t0.Add(5 * time.Hour)
 	pol := DefaultPolicy()
 	pol.MaxRecycles = 2
-	e := Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 6, Last: t0, Recycles: 1, FreshRecycled: true}
+	e := Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 6, Last: t0, Recycles: 1, FreshRecycled: true, RecycleAt: now.Add(-10 * time.Minute)}
 	d := Decide(rec(1, e), startedBy1(quiet(now, 1, claim("x")), "x", SrcAgent), pol)
 	wantEffects(t, d, Recycle{Key: key("x"), KeepClaim: true}, Alert{Key: key("x"), Reason: AlertStartedRecycled})
 	if got := entry(t, d, "x"); got.FreshRecycled || got.Recycles != 2 {
@@ -400,4 +400,34 @@ func TestDecideRateLimitedHeldClaims(t *testing.T) {
 			t.Fatalf("actions %#v: the unstarted claim's release was paused with the queued claim", d.Actions)
 		}
 	})
+}
+
+// The pool is inferred refusing only from a fresh conversation refused soon
+// after its restart (within Cap): a claim recycled fresh a day ago, served
+// since and refused again now says nothing about fresh conversations, so it
+// gets its own accurate alert, rate_limited_again, which holds no other seat
+// (round-4 review M2).
+func TestDecideRateLimitedAgainLongAfterItsFreshRecycle(t *testing.T) {
+	now := t0.Add(30 * time.Hour)
+	for name, tc := range map[string]struct {
+		recycledAgo time.Duration
+		want        string
+	}{
+		"refused soon after its fresh recycle: the pool": {5 * time.Minute, AlertProviderRateLimited},
+		"at Cap: still the pool":                         {DefaultCap, AlertProviderRateLimited},
+		"refused a day after it: again, not the pool":    {26 * time.Hour, AlertRateLimitedAgain},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := Entry{
+				Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: now.Add(-time.Hour), Attempts: 1, Last: now.Add(-time.Minute),
+				Recycles: 1, FreshRecycled: true, RecycleAt: now.Add(-tc.recycledAgo),
+			}
+			o := rateLimited(startedBy1(quiet(now, 2, claim("x")), "x", SrcAgent), 2, now.Add(-time.Minute+time.Second))
+			d := Decide(rec(2, e), o, p)
+			wantEffects(t, d, Alert{Key: key("x"), Reason: tc.want})
+			if got := entry(t, d, "x"); !got.RateLimitAlerted || got.Rung != RungEscalated {
+				t.Fatalf("entry %+v, want alerted once and escalated", got)
+			}
+		})
+	}
 }

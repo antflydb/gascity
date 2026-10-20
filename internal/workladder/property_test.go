@@ -374,12 +374,14 @@ func runSequence(seed uint64) error {
 				if o.Provider.Degraded && a.Reason != AlertReleaseRacedStart {
 					return fail("WL4: escalation while degraded")
 				}
-				if a.Reason == AlertProviderRateLimited || a.Reason == AlertRateLimitedUnrecycled {
+				if a.Reason == AlertProviderRateLimited || a.Reason == AlertRateLimitedUnrecycled || a.Reason == AlertRateLimitedAgain {
 					if poolAlerts[a.Key]++; poolAlerts[a.Key] > 1 {
 						return fail("a rate-limit alert for %v raised %d times in its life", a.Key, poolAlerts[a.Key])
 					}
-					if e, _ := entryOf(d.Next, a.Key); (a.Reason == AlertProviderRateLimited) != e.FreshRecycled {
-						return fail("%s for %v whose last recycle was fresh=%v", a.Reason, a.Key, e.FreshRecycled)
+					e, _ := entryOf(d.Next, a.Key)
+					recent := e.FreshRecycled && o.Now.Sub(e.RecycleAt) <= DefaultCap
+					if (a.Reason == AlertProviderRateLimited) != recent || (a.Reason == AlertRateLimitedUnrecycled) == e.FreshRecycled {
+						return fail("%s for %v whose last recycle was fresh=%v %v ago", a.Reason, a.Key, e.FreshRecycled, o.Now.Sub(e.RecycleAt))
 					}
 				}
 				lastHeard[a.Key] = o.Now
@@ -428,8 +430,8 @@ func runSequence(seed uint64) error {
 		// that has no end of its own silences it.
 		for _, e := range d.Next.Entries {
 			k := e.Key
-			open := o.Gate.Held == false && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Provider.Degraded &&
-				o.FreshHold != FreshHoldQueued && !o.Hold[k] && prev.Gen == o.Gen && (d.Next.Release == nil || d.Next.Release.Key != k)
+			open := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Provider.Degraded &&
+				!queuedFor(k) && !o.Hold[k] && prev.Gen == o.Gen && (d.Next.Release == nil || d.Next.Release.Key != k)
 			switch {
 			case e.Kind != KindClaim || e.Rung < RungStarted || e.Escalated || e.RateLimitAlerted || !open:
 				delete(quietSince, k)

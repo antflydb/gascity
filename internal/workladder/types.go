@@ -238,6 +238,11 @@ const (
 	// resumed the same conversation. A human must reset the seat or reroute
 	// the lane.
 	AlertRateLimitedUnrecycled = "rate_limited_unrecycled"
+	// AlertRateLimitedAgain: the provider refuses the claim's seat with a
+	// rate limit again, long (more than Cap) after its one recycle gave it a
+	// fresh conversation: no evidence about the provider's pool, only that
+	// this claim is stuck again. A human must reset the seat or reroute.
+	AlertRateLimitedAgain = "rate_limited_again"
 )
 
 // Decision is Decide's answer: the cell to CAS (no write when !Changed) and

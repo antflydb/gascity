@@ -305,7 +305,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   person, is never restarted fresh, and is paced as usual, so its silence
   still reaches the drain and the alerts. If a claim's one recycle already
   went to a drain that
-  resumed the same conversation, `rate_limited_unrecycled` says so instead.
+  resumed the same conversation, `rate_limited_unrecycled` says so instead. A claim refused again long (more
+  than an hour) after its fresh recycle gets `rate_limited_again`, which
+  says nothing about the pool and holds no other seat. Only a completed turn
+  counts as the provider serving a seat; a failed read of a refused seat's
+  turns has its claims wait up to 10 minutes rather than count a nudge.
   Every `work.*` payload now carries the seat's `provider`. A claimed step
   whose metadata `gc.awaiting_human` names the seat holding it (the seat
   asked a person and waits on their decision, such as an approval asked by
