@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -960,6 +961,25 @@ func TestScanWithRootReportsStartIdentity(t *testing.T) {
 	}
 }
 
+// entryErrorPIDs returns the pid of every [EntryError] in err's tree, in
+// order. Tests assert on it instead of searching the message, which carries
+// the fixture path.
+func entryErrorPIDs(err error) []int {
+	var pids []int
+	switch e := err.(type) { //nolint:errorlint // walks the joined error tree by hand; errors.As finds only the first entry
+	case nil:
+	case *EntryError:
+		pids = append(pids, e.PID)
+	case interface{ Unwrap() []error }:
+		for _, child := range e.Unwrap() {
+			pids = append(pids, entryErrorPIDs(child)...)
+		}
+	case interface{ Unwrap() error }:
+		pids = entryErrorPIDs(e.Unwrap())
+	}
+	return pids
+}
+
 // TestOrphanCandidateScanReadsOnlyReparentedProcesses (mc-ygved): the
 // empty-id scan reports the roots reparented to init or the user subreaper
 // and reads no other process's environment: a non-candidate whose environ
@@ -1005,9 +1025,8 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 			if strings.Join(ids, ",") != "gc-init,gc-sub" {
 				t.Fatalf("orphan candidates %v, want gc-init and gc-sub only", ids)
 			}
-			var entry *EntryError
-			if !errors.As(err, &entry) || entry.PID != 104 || HasWholeScanFailure(err) || strings.Contains(err.Error(), "103") {
-				t.Fatalf("scan error %v, want only pid 104's unreadable parent, as an entry error", err)
+			if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{104}) || HasWholeScanFailure(err) {
+				t.Fatalf("scan error %v has entry errors for pids %v, want only pid 104's unreadable parent, as an entry error", err, pids)
 			}
 			all, _ := scanWithRoot(root, "gc-paned")
 			if len(all) != 1 || all[0].PID != 102 {
