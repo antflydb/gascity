@@ -177,7 +177,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 			nudge(false)
 		case e.Recycles < p.MaxRecycles:
-			e.Recycles++
+			e.Recycles, e.FreshRecycled = e.Recycles+1, false
 			e.RecycleAt, e.Last, d.Next.RecycledGen = now, now, obs.Gen
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true}, Alert{Key: e.Key, Reason: AlertStartedRecycled})
 		default:
@@ -195,28 +195,44 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 // rateLimited applies the rate-limit rule to d's started claims and reports
 // whether it recycled the seat. A seat whose provider refuses its turns with
 // a rate limit is not ignoring its nudges: it cannot answer them, and the
-// refusal sticks to its conversation. So a started claim within its recycle
-// budget (the one an unanswered started claim spends, WL3) recycles the seat
-// at once to a fresh conversation, keeping its claims. A claim past its
-// budget that the fresh seat's provider refuses as well (a generation after
-// the ladder's last recycle) shows the provider's pool refusing every seat:
-// one alert names it, and the claim is paced at Cap from then on. A claim
-// whose live read could not tell, or that is being released, waits.
+// refusal may stick to its conversation. The rule acts on a claim only once
+// a refusal answered the ladder's own nudge (the claim was nudged in this
+// generation, and the newest refusal ended after that nudge): refusals that
+// were in the transcript before the ladder nudged it recycle nothing (WL8),
+// and a stale one gets a nudge first. Then a started claim within its
+// recycle budget (the one an unanswered started claim spends, WL3) recycles
+// the seat at once to a fresh conversation, keeping its claims, unless the
+// caller holds fresh recycles back (obs.FreshHeld). A claim past its budget
+// is alerted on once, a generation after the ladder's last recycle, and paced
+// at Cap from then on: if its recycle was fresh, the fresh seat was refused
+// too, so the provider's pool is refusing every seat; if it was a drain that
+// resumed the same conversation, a human must reset the seat or reroute. A
+// claim whose live read could not tell, or that is being released, waits.
 func (p Policy) rateLimited(d *Decision, obs Observation) (recycled bool) {
 	for i := range d.Next.Entries {
 		e := &d.Next.Entries[i]
 		if e.Kind != KindClaim || e.Rung < RungStarted || obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
 			continue
 		}
+		if e.Attempts+e.Paused == 0 || !obs.RateLimitedAt.After(e.Last) {
+			continue // no refusal has answered the ladder's nudge yet
+		}
 		switch {
 		case e.Recycles < p.MaxRecycles:
-			e.Recycles++
+			if obs.FreshHeld {
+				continue
+			}
+			e.Recycles, e.FreshRecycled = e.Recycles+1, true
 			e.RecycleAt, e.Last, d.Next.RecycledGen = obs.Now, obs.Now, obs.Gen
 			recycled = true
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true, Fresh: true}, Alert{Key: e.Key, Reason: AlertRateLimitedRecycled})
 		case !e.RateLimitAlerted && d.Next.RecycledGen != obs.Gen:
+			reason := AlertProviderRateLimited
+			if !e.FreshRecycled {
+				reason = AlertRateLimitedUnrecycled
+			}
 			e.RateLimitAlerted, e.Rung, e.Escalated = true, RungEscalated, true
-			d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertProviderRateLimited})
+			d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: reason})
 		}
 	}
 	return recycled
@@ -298,7 +314,7 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || x.RateLimitAlerted != y.RateLimitAlerted ||
+			x.Refused != y.Refused || x.RateLimitAlerted != y.RateLimitAlerted || x.FreshRecycled != y.FreshRecycled ||
 			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}

@@ -127,9 +127,18 @@ type Observation struct {
 	// RateLimited is how many of the seat's latest turns, newest first, its
 	// provider refused with a rate limit (as the agent's own transcript
 	// classifies them: HTTP 429), counted up to the first it did not refuse,
-	// in the seat's current conversation. A seat refused like that cannot
-	// answer a nudge (the rate-limit rule).
-	RateLimited int
+	// in the seat's current conversation, and RateLimitedAt when the newest
+	// of them ended. A seat refused like that cannot answer a nudge (the
+	// rate-limit rule); the rule acts only on a refusal that ended after the
+	// ladder's own last nudge, so refusals already in a transcript when the
+	// ladder first sees it recycle nothing (WL8).
+	RateLimited   int
+	RateLimitedAt time.Time
+	// FreshHeld holds the rate-limit rule's fresh recycle back, by the
+	// caller's evidence: the seat is attached, or waits on a person for
+	// another claim, or its provider's one fresh-recycle canary is in flight
+	// or was refused too. The seat is paced as ever meanwhile.
+	FreshHeld bool
 }
 
 // Policy is the ladder's pacing. DefaultPolicy is OD7's.
@@ -204,6 +213,11 @@ const (
 	// AlertProviderRateLimited: the provider refused the claim's fresh seat
 	// too. The pool itself is refusing, and a human must reroute the lane.
 	AlertProviderRateLimited = "provider_rate_limited"
+	// AlertRateLimitedUnrecycled: the provider refuses the claim's seat with
+	// a rate limit, and the claim's one recycle already went to a drain that
+	// resumed the same conversation. A human must reset the seat or reroute
+	// the lane.
+	AlertRateLimitedUnrecycled = "rate_limited_unrecycled"
 )
 
 // Decision is Decide's answer: the cell to CAS (no write when !Changed) and
@@ -251,9 +265,13 @@ type Entry struct {
 	// permission prompt, a runtime unavailable): while it is above zero the
 	// entry is nudged no more often than PausedCap.
 	Refused int
-	// RateLimitAlerted: the provider_rate_limited alert was raised for the
-	// entry; it is raised once in the entry's life.
+	// RateLimitAlerted: a rate-limit alert (provider_rate_limited or
+	// rate_limited_unrecycled) was raised for the entry; one is raised in
+	// the entry's life.
 	RateLimitAlerted bool
+	// FreshRecycled: the entry's last recycle restarted its seat to a fresh
+	// conversation (the rate-limit rule's), not a drain that resumes it.
+	FreshRecycled bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

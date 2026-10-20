@@ -384,6 +384,8 @@ type externalReadsLane struct {
 	// rateLimits caches what it read, per seat.
 	turnReaderFor func(env externalReadsEnv) ladderTurnReader
 	rateLimits    ladderRateLimits
+	// canaries is the rate-limit rule's per-provider fresh-recycle canary.
+	canaries ladderCanaries
 }
 
 // sourceRead is one read in flight.

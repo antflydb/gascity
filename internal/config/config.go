@@ -2843,10 +2843,12 @@ type DaemonConfig struct {
 	// seats. "on" (default) runs the work-progress ladder: nudges back off from
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
 	// and then escalated, and an unstarted claim is released after its third
-	// unanswered nudge. A seat whose provider refused its last two turns with a
-	// rate limit (HTTP 429, as its own transcript records them) has that one
-	// recycle at once, to a fresh conversation, and an alert names the provider
-	// if the fresh seat is refused too. A claim whose metadata
+	// unanswered nudge. A seat whose provider refused its answer to the
+	// ladder's nudge with a rate limit (HTTP 429, as its own transcript records
+	// it; two refusals in a row) has that one recycle at once, to a fresh
+	// conversation, one seat per provider at a time; if the fresh seat is
+	// refused too, an alert names the provider and its seats are paced as
+	// degraded until it serves a turn. A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
 	// their decision) is not nudged, recycled or released. "off" runs the
 	// three backstops it replaced (idle-claim, continuation, execution)

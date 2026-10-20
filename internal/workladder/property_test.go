@@ -137,6 +137,10 @@ func (s *sim) step() Observation {
 	}
 	if flip(8) { // the provider refuses the seat's turns now and then
 		s.obs.RateLimited = s.rng.IntN(4)
+		s.obs.RateLimitedAt = s.now.Add(-time.Duration(s.rng.IntN(int(maxStep))))
+	}
+	if flip(5) {
+		s.obs.FreshHeld = !s.obs.FreshHeld
 	}
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
@@ -211,7 +215,7 @@ func runSequence(seed uint64) error {
 	}
 	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
 	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
-	poolAlerts := map[ClaimKey]int{}       // provider_rate_limited alerts while the entry lives
+	poolAlerts := map[ClaimKey]int{}       // rate-limit alerts while the entry lives
 	for i := range 90 {
 		prev := s.rec
 		prevCopy := prev
@@ -295,12 +299,17 @@ func runSequence(seed uint64) error {
 				if a.Fresh {
 					fresh = true
 					// The rate-limit rule recycles only a started claim of a
-					// seat refused at least RateLimitThreshold times in a row.
-					if o.RateLimited < DefaultRateLimitThreshold || !a.KeepClaim {
-						return fail("a fresh recycle of %v with %d refusals", a.Key, o.RateLimited)
+					// seat refused at least RateLimitThreshold times in a row,
+					// the newest answering the ladder's own nudge, and never
+					// while fresh recycles are held.
+					if o.RateLimited < DefaultRateLimitThreshold || !a.KeepClaim || o.FreshHeld {
+						return fail("a fresh recycle of %v with %d refusals (held %v)", a.Key, o.RateLimited, o.FreshHeld)
 					}
-					if e, ok := entryOf(d.Next, a.Key); !ok || e.Kind != KindClaim || e.Rung < RungStarted {
+					if e, ok := entryOf(d.Next, a.Key); !ok || e.Kind != KindClaim || e.Rung < RungStarted || !e.FreshRecycled {
 						return fail("a fresh recycle of %v, not a started claim", a.Key)
+					}
+					if pe, ok := entryOf(prev, a.Key); !ok || pe.Attempts+pe.Paused == 0 || !o.RateLimitedAt.After(pe.Last) {
+						return fail("a fresh recycle of %v on a refusal that answered no nudge (prev %+v, refused at %v)", a.Key, pe, o.RateLimitedAt.Sub(t0))
 					}
 				}
 				if a.KeepClaim {
@@ -328,9 +337,12 @@ func runSequence(seed uint64) error {
 				if o.Provider.Degraded && a.Reason != AlertReleaseRacedStart {
 					return fail("WL4: escalation while degraded")
 				}
-				if a.Reason == AlertProviderRateLimited {
+				if a.Reason == AlertProviderRateLimited || a.Reason == AlertRateLimitedUnrecycled {
 					if poolAlerts[a.Key]++; poolAlerts[a.Key] > 1 {
-						return fail("the pool alert for %v raised %d times in its life", a.Key, poolAlerts[a.Key])
+						return fail("a rate-limit alert for %v raised %d times in its life", a.Key, poolAlerts[a.Key])
+					}
+					if e, _ := entryOf(d.Next, a.Key); (a.Reason == AlertProviderRateLimited) != e.FreshRecycled {
+						return fail("%s for %v whose last recycle was fresh=%v", a.Reason, a.Key, e.FreshRecycled)
 					}
 				}
 				lastHeard[a.Key] = o.Now
@@ -443,8 +455,10 @@ func TestNoDrainWave(t *testing.T) {
 			}
 		}
 		r := prev
+		refused := rng.IntN(5) // refusals already in the transcript at deploy
 		for now := t0; now.Sub(t0) < window; now = now.Add(time.Duration(1+rng.IntN(60)) * time.Second) {
 			o := quiet(now, 42, work...)
+			o.RateLimited, o.RateLimitedAt = refused, t0.Add(-time.Duration(1+rng.IntN(600))*time.Minute)
 			if r.V == 0 || r.Gen != 42 {
 				o.Started = started
 			} else {

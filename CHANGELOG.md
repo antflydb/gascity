@@ -284,20 +284,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The work ladder recycles a seat its provider keeps refusing with a rate
   limit, and leaves a step alone while its seat waits on a person.** With
-  `[daemon] work_ladder` on (the default), a pool seat holding a started claim
-  whose last two turns the provider refused with HTTP 429 (as the agent CLI
-  classified them in its own transcript) is restarted at once to a fresh
-  conversation (`gc session reset` semantics: the same seat, its claims kept),
-  instead of after six unanswered nudges. That is the one recycle a started
-  claim gets; if the fresh seat is refused too, one `work.escalated` event
-  with reason `provider_rate_limited` names the provider and the claim is
-  nudged hourly. Every `work.*` payload now carries the seat's `provider`. A
-  claimed step whose metadata `gc.awaiting_human` names the seat holding it
-  (the seat asked a person and waits on their decision, such as an approval
-  asked by mail) gets no nudge, recycle or release until the seat clears it;
-  a step re-claimed by another seat is paced as usual. The rate-limit rule
-  never acts while the provider-health gate reports the provider degraded:
-  that gate alerts on the outage itself. Failed Claude turns now record the
+  `[daemon] work_ladder` on (the default), when the provider refuses a pool
+  seat's answer to the ladder's own nudge with HTTP 429 (two refusals in a
+  row, as the agent CLI classified them in its own transcript), and the seat
+  holds a started claim, the ladder restarts the seat at once to a fresh
+  conversation (`gc session reset` semantics: the same seat, its claims
+  kept) instead of after six unanswered nudges. That is the one recycle a
+  started claim gets. Refusals already in a transcript when the ladder first
+  sees it recycle nothing. Only one seat per provider is recycled fresh at a
+  time; if that fresh conversation is refused too, the provider's pool is
+  refusing: one `work.escalated` event with reason `provider_rate_limited`
+  names the provider, and its seats are paced as on a degraded provider
+  (keeping their conversations) until it serves a turn again. A seat that a
+  person is attached to, or that also holds a claim waiting on a person, is
+  never recycled fresh. If a claim's one recycle already went to a drain that
+  resumed the same conversation, `rate_limited_unrecycled` says so instead.
+  Every `work.*` payload now carries the seat's `provider`. A claimed step
+  whose metadata `gc.awaiting_human` names the seat holding it (the seat
+  asked a person and waits on their decision, such as an approval asked by
+  mail) gets no nudge, recycle or release until the seat clears it; a step
+  re-claimed by another seat is paced as usual. The rate-limit rule never
+  acts while the provider-health gate reports the provider degraded: that
+  gate alerts on the outage itself. Failed Claude turns now record the
   provider error they ended on (class, HTTP status and text).
 
 - **A suspended rig or city is left cold.** gc no longer touches the bead
