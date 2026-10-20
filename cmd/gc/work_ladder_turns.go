@@ -92,16 +92,21 @@ func (r rateLimitReading) in(meta map[string]string) bool {
 // rateLimitedTurns reads hist for the rule: how many of its latest ended
 // turns, newest first, the provider refused with a rate limit, up to the
 // first it did not, when the newest of them ended and its error; and when
-// the newest ended turn ended if the provider answered it (completed),
-// whether or not a newer turn is open. A turn still open has no answer yet:
-// no refusal. How long a turn has been open proves nothing (a provider can
-// take minutes to refuse one).
+// the newest turn the provider answered (completed) ended, anywhere in the
+// recent turns and whether or not a newer turn is open: older service never
+// misleads, since every consumer compares it with when its own question
+// began (a canary, a hold, a fresh recycle). A turn still open has no answer
+// yet: no refusal. How long a turn has been open proves nothing (a provider
+// can take minutes to refuse one).
 func rateLimitedTurns(hist runtime.TurnHistory) (refused int, refusedAt time.Time, last runtime.TurnFailure, servedAt time.Time) {
 	if len(hist.Recent) == 0 {
 		return 0, time.Time{}, runtime.TurnFailure{}, time.Time{}
 	}
-	if newest := hist.Recent[0]; newest.Status == runtime.TurnStatusCompleted {
-		servedAt = newest.EndedAt
+	for _, t := range hist.Recent {
+		if t.Status == runtime.TurnStatusCompleted {
+			servedAt = t.EndedAt
+			break
+		}
 	}
 	if hist.Current.Active() {
 		return 0, time.Time{}, runtime.TurnFailure{}, servedAt

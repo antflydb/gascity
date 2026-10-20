@@ -2509,6 +2509,43 @@ func TestWorkLadderServedFreshConversationRefusedLaterIsNotThePool(t *testing.T)
 	}
 }
 
+// Round-6 residue: a served canary that worked past its flight and was
+// refused later shows its service behind its refusals: the newest completed
+// turn anywhere in its recent turns counts, so the refusal is
+// rate_limited_again, not the pool.
+func TestWorkLadderServiceBehindRefusalsCounts(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("served for twenty minutes, then refused")
+	recycled := c.now.Add(-30 * time.Minute)
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	cell := workladder.Record{V: 1, Gen: 7, RecycledGen: 6, Entries: []workladder.Entry{{
+		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungStarted, Since: recycled, Attempts: 1, Last: c.now.Add(-2 * time.Minute),
+		Recycles: 1, FreshRecycled: true, RecycleAt: recycled,
+	}}}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "fresh-1", session.WorkLadderKey: workladder.EncodeLadder(cell)})
+	// Its first turn completed; then it went on, and the provider refused
+	// twice, the newest refusal answering the ladder's nudge.
+	c.lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {
+		return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+			refused := func(at time.Time) runtime.EndedTurn {
+				return runtime.EndedTurn{TurnID: "r" + at.String(), Status: runtime.TurnStatusFailed, EndedAt: at, Failure: runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: poolCooling}}
+			}
+			return runtime.TurnHistory{Recent: []runtime.EndedTurn{
+				refused(c.now.Add(-2*time.Minute + time.Second)), refused(c.now.Add(-3 * time.Minute)),
+				{TurnID: "served", Status: runtime.TurnStatusCompleted, EndedAt: recycled.Add(20 * time.Minute)},
+			}}, nil
+		}
+	}
+	c.pass()
+	alerts := ladderPayloads(c, events.WorkEscalated)
+	if len(alerts) != 1 || alerts[0].Reason != workladder.AlertRateLimitedAgain {
+		t.Fatalf("alerts %+v, want rate_limited_again: the fresh conversation was served", alerts)
+	}
+	if c.lane.canaries.refusing("claude", c.now) {
+		t.Fatal("a served fresh conversation refused later latched the provider")
+	}
+}
+
 // A failed read after the seat moved to a new conversation holds nothing on
 // the old conversation's refusals.
 func TestWorkLadderFailedReadOfANewConversationHoldsNothing(t *testing.T) {
@@ -2606,6 +2643,7 @@ func TestRateLimitedTurns(t *testing.T) {
 	}
 	overloaded := runtime.EndedTurn{TurnID: "o", Status: runtime.TurnStatusFailed, EndedAt: at, Failure: runtime.TurnFailure{Code: "server_error", HTTPStatus: 529}}
 	answered := runtime.EndedTurn{TurnID: "a", Status: runtime.TurnStatusCompleted, EndedAt: at.Add(time.Hour)}
+	servedBefore := runtime.EndedTurn{TurnID: "s", Status: runtime.TurnStatusCompleted, EndedAt: at.Add(-time.Hour)}
 	for _, tc := range []struct {
 		name      string
 		hist      runtime.TurnHistory
@@ -2613,7 +2651,7 @@ func TestRateLimitedTurns(t *testing.T) {
 		refusedAt time.Time
 		servedAt  time.Time
 	}{
-		{"two refusals, newest first", runtime.TurnHistory{Recent: []runtime.EndedTurn{refused(2 * time.Minute), refused(0), answered}}, 2, at.Add(2 * time.Minute), time.Time{}},
+		{"two refusals, newest first, after a served turn", runtime.TurnHistory{Recent: []runtime.EndedTurn{refused(2 * time.Minute), refused(0), servedBefore}}, 2, at.Add(2 * time.Minute), at.Add(-time.Hour)},
 		{"an overload is not a rate limit", runtime.TurnHistory{Recent: []runtime.EndedTurn{overloaded, overloaded, refused(0)}}, 0, time.Time{}, time.Time{}},
 		{"counted up to the first that was not refused", runtime.TurnHistory{Recent: []runtime.EndedTurn{refused(0), overloaded, refused(0)}}, 1, at, time.Time{}},
 		{"a turn still open has no answer yet", runtime.TurnHistory{Current: runtime.TurnState{TurnID: "open"}, Recent: []runtime.EndedTurn{refused(0), refused(0)}}, 0, time.Time{}, time.Time{}},
