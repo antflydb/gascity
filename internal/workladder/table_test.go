@@ -56,7 +56,8 @@ func TestDecisionTable(t *testing.T) {
 		{"not quiet", func(o *Observation) { o.Quiet.State = NotQuiet }},
 		{"runtime dead", func(o *Observation) { o.Runtime = TriFalse }},
 		{"quiet, nudge refused 2x", func(o *Observation) { o.RateLimited, o.RateLimitedAt = 2, o.Now }},
-		{"quiet, nudge refused 2x, fresh held", func(o *Observation) { o.RateLimited, o.RateLimitedAt, o.FreshHeld = 2, o.Now, true }},
+		{"quiet, nudge refused 2x, fresh queued", func(o *Observation) { o.RateLimited, o.RateLimitedAt, o.FreshHold = 2, o.Now, FreshHoldQueued }},
+		{"quiet, nudge refused 2x, fresh standing", func(o *Observation) { o.RateLimited, o.RateLimitedAt, o.FreshHold = 2, o.Now, FreshHoldStanding }},
 		{"quiet, degraded, nudge refused 2x", func(o *Observation) { o.Provider.Degraded, o.RateLimited, o.RateLimitedAt = true, 2, o.Now }},
 	}
 	var b strings.Builder

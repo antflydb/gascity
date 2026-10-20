@@ -344,7 +344,7 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	info, live := sessionInfoFromBead(row), p.observeRuntime(row)
 	live.rateLimit = p.rateLimits(row, info, live, targets, prev.LastNudge)
 	if live.rateLimit.in(row.Metadata) && live.rateLimit.refused >= workladder.DefaultRateLimitThreshold {
-		live.freshHeld = p.freshHeld(row) // only a reading the rule can act on asks: the attach probe is not free
+		live.freshHold = p.freshHold(row) // only a reading the rule can act on asks: the attach probe is not free
 	}
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision
@@ -433,28 +433,35 @@ type ladderRuntime struct {
 	activity time.Time
 	provider workladder.ProviderState
 	// rateLimit is what the seat's turns say its provider did with them, and
-	// freshHeld whether the rule's fresh recycle must wait (freshHeld).
+	// freshHold why the rule's fresh recycle must wait (freshHold).
 	rateLimit rateLimitReading
-	freshHeld bool
+	freshHold workladder.FreshHold
 }
 
-// freshHeld reports whether the rate-limit rule's fresh recycle of row's
-// seat must wait: then the refused seat is paced as degraded meanwhile. A
-// fresh restart stops the seat whatever is attached to it, so a seat a person
-// is attached to (or that cannot be told) waits; so does a seat holding
-// another claim whose seat waits on a person, whose conversation a restart
-// would lose; and so does a seat whose provider's canary is another seat's
-// and in flight, or whose provider refused a canary's fresh conversation
-// (ladderCanaries). The attach probe runs last.
-func (p *ladderPass) freshHeld(row beads.Bead) bool {
+// freshHold is why the rate-limit rule's fresh recycle of row's seat must
+// wait, if it must. A standing hold has no end of its own: a fresh restart
+// stops the seat whatever is attached to it, so a seat a person is attached
+// to (or that cannot be told) must not be restarted, nor a seat holding
+// another claim that waits on a person, whose conversation a restart would
+// lose; such a seat is paced as ever, so its silence still reaches the drain
+// and the alerts. A queued hold ends on its own: the provider's canary is
+// another seat's and in flight, or the provider refused a canary's fresh
+// conversation (ladderCanaries); meanwhile the seat's refused started claims
+// are paced as degraded. Standing wins: a queued pause on a seat that cannot
+// be restarted would never end. The attach probe runs last.
+func (p *ladderPass) freshHold(row beads.Bead) workladder.FreshHold {
 	if p.humanWaits[row.ID] {
-		return true
+		return workladder.FreshHoldStanding
 	}
-	if p.l.canaries.held(strings.TrimSpace(row.Metadata["provider"]), row.ID, p.now) {
-		return true
-	}
+	queued := p.l.canaries.held(strings.TrimSpace(row.Metadata["provider"]), row.ID, p.now)
 	attached, err := runtime.IsAttachedWithError(p.env.SP, strings.TrimSpace(row.Metadata["session_name"]))
-	return runtime.AttachProbeHolds(attached, err)
+	switch {
+	case runtime.AttachProbeHolds(attached, err):
+		return workladder.FreshHoldStanding
+	case queued:
+		return workladder.FreshHoldQueued
+	}
+	return workladder.FreshHoldNone
 }
 
 // rateLimits reads the seat's turns for the rate-limit rule, when the rule
@@ -467,7 +474,9 @@ func (p *ladderPass) freshHeld(row beads.Bead) bool {
 // refusal; a read that fails is logged once per seat and conversation, unless
 // the family records no turns at all.
 func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRuntime, targets []ladderTarget, lastNudge time.Time) rateLimitReading {
-	if p.turns == nil || rt.running != workladder.TriTrue || rt.quiet.State != workladder.Quiescent ||
+	provider := strings.TrimSpace(row.Metadata["provider"])
+	canary := p.l.canaries.inFlight(provider, row.ID, rowGeneration(row.Metadata), p.now)
+	if p.turns == nil || rt.running != workladder.TriTrue || (rt.quiet.State != workladder.Quiescent && !canary) ||
 		ladderGate(info, row.Metadata, p.now).Held ||
 		!slices.ContainsFunc(targets, func(t ladderTarget) bool { return t.work.Kind == workladder.KindClaim }) {
 		return rateLimitReading{}
@@ -480,8 +489,11 @@ func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRunt
 		}
 		return rateLimitReading{}
 	}
-	if !r.servedAt.IsZero() {
-		p.l.canaries.served(strings.TrimSpace(row.Metadata["provider"]), r.servedAt)
+	switch {
+	case !r.servedAt.IsZero():
+		p.l.canaries.served(provider, r.servedAt)
+	case !r.openSince.IsZero() && p.now.Sub(r.openSince) >= ladderServedOpen:
+		p.l.canaries.served(provider, p.now) // a turn the provider refused ends in seconds: this one it serves
 	}
 	return r
 }
@@ -540,7 +552,7 @@ func (p *ladderPass) observe(info session.Info, meta map[string]string, prev wor
 	if rt.rateLimit.in(meta) { // a reading of another generation or conversation is not this row's
 		obs.RateLimited, obs.RateLimitedAt = rt.rateLimit.refused, rt.rateLimit.refusedAt
 	}
-	obs.FreshHeld = rt.freshHeld
+	obs.FreshHold = rt.freshHold
 	return obs
 }
 
@@ -723,22 +735,23 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision, rt ladderRuntime
 			switch {
 			case a.Fresh:
 				fresh = true
-				p.l.canaries.recycled(strings.TrimSpace(row.Metadata["provider"]), row.ID, p.now)
+				p.l.canaries.recycled(strings.TrimSpace(row.Metadata["provider"]), row.ID, gen, p.now)
 			case !recycled:
 				recycled = true
 				p.recycle(row, gen)
 			}
 		case workladder.Alert:
-			f := workLadderEventFields{Reason: a.Reason, Message: alertMessage(row, a, rt.rateLimit)}
+			var holdUntil time.Time
+			if a.Reason == workladder.AlertProviderRateLimited {
+				holdUntil = p.l.canaries.refused(strings.TrimSpace(row.Metadata["provider"]), row.ID, p.now)
+			}
+			f := workLadderEventFields{Reason: a.Reason, Message: alertMessage(row, a, rt.rateLimit, holdUntil)}
 			line := fmt.Sprintf("work-ladder: %s: %s on %s", row.ID, a.Reason, a.Key.Bead)
 			if f.Message != "" {
 				line += ": " + f.Message
 			}
 			fmt.Fprintln(p.l.stderr, line) //nolint:errcheck // best-effort stderr
 			p.event(events.WorkEscalated, row, a.Key, gen, f)
-			if a.Reason == workladder.AlertProviderRateLimited {
-				p.l.canaries.refused(strings.TrimSpace(row.Metadata["provider"]), row.ID, p.now)
-			}
 		}
 	}
 	if fresh {
@@ -749,14 +762,16 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision, rt ladderRuntime
 // alertMessage is a rate-limit alert's text for people, "" for any other
 // alert (its reason says it all). It names the provider and quotes its
 // newest refusal, so whoever reroutes the lane sees what the provider said
-// (a pool's cooldown, in its own words).
-func alertMessage(row beads.Bead, a workladder.Alert, r rateLimitReading) string {
+// (a pool's cooldown, in its own words); a pool alert says until when the
+// provider's refused seats wait (holdUntil).
+func alertMessage(row beads.Bead, a workladder.Alert, r rateLimitReading, holdUntil time.Time) string {
 	provider := strings.TrimSpace(row.Metadata["provider"])
 	switch a.Reason {
 	case workladder.AlertRateLimitedRecycled:
 		return fmt.Sprintf("provider %s refused the seat's last %d turns with a rate limit; recycling the seat to a fresh conversation, keeping its claim: %s", provider, r.refused, r.last.Message)
 	case workladder.AlertProviderRateLimited:
-		return fmt.Sprintf("provider %s refused the seat's fresh conversation too (%d turns): its pool is refusing every seat, so the ladder paces its seats as degraded until it serves a turn; reroute the lane: %s", provider, r.refused, r.last.Message)
+		return fmt.Sprintf("provider %s refused the seat's fresh conversation too (%d turns): its pool is refusing every seat, so its refused seats keep their conversations until %s or until it serves a turn; reroute the lane: %s",
+			provider, r.refused, holdUntil.UTC().Format(time.RFC3339), r.last.Message)
 	case workladder.AlertRateLimitedUnrecycled:
 		return fmt.Sprintf("provider %s refused the seat's last %d turns with a rate limit, and its one recycle already went to a drain that resumed the same conversation: reset the seat (gc session reset) or reroute the lane: %s", provider, r.refused, r.last.Message)
 	}

@@ -61,11 +61,23 @@ type sim struct {
 	activity time.Time // the seat's last activity: it works now and then
 	lastStep time.Duration
 	churn    int // 0: a calm seat that only gains work; 1: everything flips
+	// refusing: a calm seat its provider refuses throughout, under a hold
+	// that does not end (FreshHoldStanding): it answers every nudge with a
+	// refused turn a second later.
+	refusing bool
 }
 
 var simKeys = []ClaimKey{key("a"), key("b"), key("c")}
 
 const maxStep = 20 * time.Minute
+
+// livenessBound is the longest a started claim may go unheard (no alert, no
+// recycle) while it could be heard: the started rung's schedule from its
+// grace (Grace, then Base doubling for the threshold's nudges, then Cap),
+// with each of its seven acts late by up to three passes (the seat's one
+// nudge slot shared by three entries, at the sim's longest step). It
+// catches a claim silenced for good, which the sim's calm seats outlive.
+const livenessBound = DefaultGrace + DefaultBase*(1+2+4+8+16) + DefaultCap + 7*3*maxStep
 
 func newSim(seed uint64) *sim {
 	s := &sim{
@@ -75,6 +87,9 @@ func newSim(seed uint64) *sim {
 	s.obs = Observation{StartedRead: true, Runtime: TriTrue, Quiet: Quiet{State: Quiescent}}
 	if s.chance(70) {
 		s.churn = 1
+	} else if s.chance(40) {
+		s.refusing = true
+		s.obs.RateLimited, s.obs.RateLimitedAt, s.obs.FreshHold = 3, t0.Add(-time.Hour), FreshHoldStanding
 	}
 	return s
 }
@@ -140,7 +155,7 @@ func (s *sim) step() Observation {
 		s.obs.RateLimitedAt = s.now.Add(-time.Duration(s.rng.IntN(int(maxStep))))
 	}
 	if flip(5) {
-		s.obs.FreshHeld = !s.obs.FreshHeld
+		s.obs.FreshHold = FreshHold(s.rng.IntN(3))
 	}
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
@@ -216,6 +231,7 @@ func runSequence(seed uint64) error {
 	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
 	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
 	poolAlerts := map[ClaimKey]int{}       // rate-limit alerts while the entry lives
+	quietSince := map[ClaimKey]time.Time{} // liveness: since when a started claim has gone unheard while it could be heard
 	for i := range 90 {
 		prev := s.rec
 		prevCopy := prev
@@ -224,6 +240,20 @@ func runSequence(seed uint64) error {
 		d := Decide(prev, o, p)
 		fail := func(format string, a ...any) error {
 			return fmt.Errorf("step %d at %v: %s\nprev %s\nobs %+v\nnext %s\nacts %+v", i, o.Now.Sub(t0), fmt.Sprintf(format, a...), EncodeLadder(prevCopy), o, EncodeLadder(d.Next), d.Actions)
+		}
+
+		// queuedFor: k is a started claim the rule would recycle fresh but
+		// for a queued hold: it must be paced paused (never counted, never
+		// recycled) until its turn comes.
+		queuedFor := func(k ClaimKey) bool {
+			pe, ok := entryOf(prev, k)
+			e, now := entryOf(d.Next, k)
+			if ok {
+				pe = p.progressReset(pe, o) // progress since its last nudge restarts its count first, as Decide does
+			}
+			return ok && now && o.FreshHold == FreshHoldQueued && !o.Provider.Degraded && o.RateLimited >= DefaultRateLimitThreshold &&
+				prev.Gen == o.Gen && pe.Kind == KindClaim && e.Kind == KindClaim && pe.Rung >= RungStarted && pe.Recycles < DefaultMaxRecycles &&
+				pe.Attempts+pe.Paused > 0 && o.RateLimitedAt.After(pe.Last) && !o.Hold[k] && (prev.Release == nil || prev.Release.Key != k)
 		}
 
 		// WL7: pure and deterministic.
@@ -272,8 +302,8 @@ func runSequence(seed uint64) error {
 				if o.Provider.Degraded && !a.Paused {
 					return fail("WL4: counted nudge while degraded")
 				}
-				if o.FreshHeld && o.RateLimited >= DefaultRateLimitThreshold && !a.Paused {
-					return fail("a counted nudge to a refused seat whose fresh recycle is held")
+				if queuedFor(a.Key) && !a.Paused {
+					return fail("a counted nudge of %v, a started claim queued for its fresh recycle", a.Key)
 				}
 				// WL3: one nudge per seat per Base, whatever the work.
 				if !lastSeatNudge.IsZero() && o.Now.Sub(lastSeatNudge) < DefaultBase {
@@ -300,8 +330,8 @@ func runSequence(seed uint64) error {
 				if o.Provider.Degraded {
 					return fail("WL4: recycle while degraded")
 				}
-				if o.FreshHeld && o.RateLimited >= DefaultRateLimitThreshold {
-					return fail("a recycle of a refused seat whose fresh recycle is held (fresh %v)", a.Fresh)
+				if queuedFor(a.Key) {
+					return fail("a recycle of %v, a started claim queued for its fresh recycle (fresh %v)", a.Key, a.Fresh)
 				}
 				if a.Fresh {
 					fresh = true
@@ -309,8 +339,8 @@ func runSequence(seed uint64) error {
 					// seat refused at least RateLimitThreshold times in a row,
 					// the newest answering the ladder's own nudge, and never
 					// while fresh recycles are held.
-					if o.RateLimited < DefaultRateLimitThreshold || !a.KeepClaim || o.FreshHeld {
-						return fail("a fresh recycle of %v with %d refusals (held %v)", a.Key, o.RateLimited, o.FreshHeld)
+					if o.RateLimited < DefaultRateLimitThreshold || !a.KeepClaim || o.FreshHold != FreshHoldNone {
+						return fail("a fresh recycle of %v with %d refusals (hold %v)", a.Key, o.RateLimited, o.FreshHold)
 					}
 					if e, ok := entryOf(d.Next, a.Key); !ok || e.Kind != KindClaim || e.Rung < RungStarted || !e.FreshRecycled {
 						return fail("a fresh recycle of %v, not a started claim", a.Key)
@@ -391,6 +421,39 @@ func runSequence(seed uint64) error {
 			}
 		}
 
+		// Liveness: a started claim of an open, live, quiet seat, on a
+		// provider that is not degraded and not queued for a fresh recycle,
+		// hears an alert or a recycle within the ladder's own schedule (the
+		// started rung's nudges, then Cap), until it is escalated: no hold
+		// that has no end of its own silences it.
+		for _, e := range d.Next.Entries {
+			k := e.Key
+			open := o.Gate.Held == false && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Provider.Degraded &&
+				o.FreshHold != FreshHoldQueued && !o.Hold[k] && prev.Gen == o.Gen && (d.Next.Release == nil || d.Next.Release.Key != k)
+			switch {
+			case e.Kind != KindClaim || e.Rung < RungStarted || e.Escalated || e.RateLimitAlerted || !open:
+				delete(quietSince, k)
+				continue
+			case quietSince[k].IsZero() || o.LastActivity.After(quietSince[k]):
+				quietSince[k] = o.Now
+			}
+			for _, a := range d.Actions {
+				switch a := a.(type) {
+				case Recycle:
+					if a.Key == k {
+						quietSince[k] = o.Now
+					}
+				case Alert:
+					if a.Key == k {
+						quietSince[k] = o.Now
+					}
+				}
+			}
+			if o.Now.Sub(quietSince[k]) > livenessBound {
+				return fail("liveness: started claim %v quiet for %v with no alert or recycle (hold %v, refused %d)", k, o.Now.Sub(quietSince[k]), o.FreshHold, o.RateLimited)
+			}
+		}
+
 		// The lane: commit through the cell's text, then finish releases:
 		// mostly released, else kept (ReleaseUnfinished), else (a crash)
 		// left pending; and some nudges are refused (NudgeRefused).
@@ -400,6 +463,13 @@ func runSequence(seed uint64) error {
 				return fail("the cell does not decode: %v", err)
 			}
 			s.rec = r
+		}
+		if s.refusing {
+			for _, a := range d.Actions {
+				if _, ok := a.(Nudge); ok {
+					s.obs.RateLimitedAt = o.Now.Add(time.Second)
+				}
+			}
 		}
 		for _, a := range d.Actions {
 			if n, ok := a.(Nudge); ok && !n.Paused && s.event(10) { // only a counted nudge is refused (the lane's rule)

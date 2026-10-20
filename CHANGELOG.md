@@ -292,16 +292,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept) instead of after six unanswered nudges. That is the one recycle a
   started claim gets. Refusals already in a transcript when the ladder first
   sees it recycle nothing. Only one seat per provider is recycled fresh at a
-  time; if that fresh conversation is refused too, the provider's pool is
-  refusing: one `work.escalated` event with reason `provider_rate_limited`
-  names the provider, and its other refused seats keep their conversations
-  for up to an hour (or until it serves a turn) before the next may try. A
-  refused seat whose fresh recycle must wait, and a seat that a person is
-  attached to or that also holds a claim waiting on a person, is paced as on
-  a degraded provider meanwhile: nudged every 10 minutes, counting toward
-  nothing, so it is never drained back into the conversation that refuses
-  it. Seats on the provider that are not refused are paced as usual. If a
-  claim's one recycle already went to a drain that
+  time (the canary); if that fresh conversation is refused too, the
+  provider's pool is refusing: one `work.escalated` event with reason
+  `provider_rate_limited` names the provider and says until when its other
+  refused seats keep their conversations: an hour, doubling with each
+  refused canary in a row up to a day, or until it serves a turn. A refused
+  started claim waiting its turn is paced as on a degraded provider (nudged
+  every 10 minutes, counting toward nothing), so it is never drained back
+  into the conversation that refuses it; everything else on the seat, and
+  every seat on the provider that is not refused, is paced as usual. A seat
+  that a person is attached to, or that also holds a claim waiting on a
+  person, is never restarted fresh, and is paced as usual, so its silence
+  still reaches the drain and the alerts. If a claim's one recycle already
+  went to a drain that
   resumed the same conversation, `rate_limited_unrecycled` says so instead.
   Every `work.*` payload now carries the seat's `provider`. A claimed step
   whose metadata `gc.awaiting_human` names the seat holding it (the seat

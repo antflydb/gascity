@@ -37,9 +37,16 @@ const (
 	// minutes), short enough that refused seats each get their turn.
 	ladderCanaryFlight = 15 * time.Minute
 	// ladderRefusingFor is how long a provider whose pool refused a canary's
-	// fresh conversation holds fresh recycles on it: then the next refused
-	// seat may try again, one more conversation spent per period at most.
+	// fresh conversation first holds fresh recycles on it; each refusal in a
+	// row doubles it, up to ladderRefusingMax, and a served turn resets it.
+	// Then the next refused seat may try again: over a cooldown of length T,
+	// about log2(T / ladderRefusingFor) conversations are spent, plus one per
+	// ladderRefusingMax.
 	ladderRefusingFor = workladder.DefaultCap
+	ladderRefusingMax = 24 * time.Hour
+	// ladderServedOpen is how long a turn must stay open for the provider to
+	// have served it: a turn it refuses with a rate limit ends in seconds.
+	ladderServedOpen = time.Minute
 )
 
 // ladderTurnReader reads a seat's current and recent turns.
@@ -60,8 +67,10 @@ type rateLimitReading struct {
 	refusedAt time.Time
 	last      runtime.TurnFailure
 	// servedAt is when the newest ended turn ended, when the provider
-	// answered it (it completed); zero otherwise.
-	servedAt time.Time
+	// answered it (it completed); zero otherwise. openSince is when the turn
+	// still open began; zero when none is.
+	servedAt  time.Time
+	openSince time.Time
 	// err is a read that failed: no refusal, until the reading is read again.
 	err error
 }
@@ -125,6 +134,9 @@ func (c *ladderRateLimits) read(ctx context.Context, read ladderTurnReader, row 
 		r.err = err
 	} else {
 		r.refused, r.refusedAt, r.last, r.servedAt = rateLimitedTurns(hist)
+		if hist.Current.Active() {
+			r.openSince = hist.CurrentStart
+		}
 	}
 	c.mu.Lock()
 	if c.last == nil {
@@ -184,14 +196,26 @@ func (c *ladderRateLimits) keep(ids map[string]bool) {
 type ladderCanaries struct {
 	mu sync.Mutex
 	by map[string]providerCanary
+	// streak counts each provider's canaries refused in a row since it last
+	// served a turn, and when the last was: the refusing hold doubles with it.
+	streak map[string]refusalStreak
 }
 
-// providerCanary is a provider's canary seat and when it was recycled, or,
-// refusing, when its fresh conversation was refused too.
+// refusalStreak is a provider's canaries refused in a row, the last at at.
+type refusalStreak struct {
+	n  int
+	at time.Time
+}
+
+// providerCanary is a provider's canary seat, the generation it was
+// recycled from and when, or, refusing, when its fresh conversation was
+// refused too and for how long that holds.
 type providerCanary struct {
 	seat     string
+	gen      int64
 	since    time.Time
 	refusing bool
+	holds    time.Duration
 }
 
 // current is provider's canary at now, forgetting one past its period.
@@ -203,7 +227,7 @@ func (c *ladderCanaries) current(provider string, now time.Time) (providerCanary
 	}
 	period := ladderCanaryFlight
 	if pc.refusing {
-		period = ladderRefusingFor
+		period = pc.holds
 	}
 	if now.Sub(pc.since) >= period {
 		delete(c.by, provider)
@@ -213,12 +237,24 @@ func (c *ladderCanaries) current(provider string, now time.Time) (providerCanary
 }
 
 // refusing reports whether provider's pool refused a canary's fresh
-// conversation within ladderRefusingFor of now, and has served no turn since.
+// conversation and that refusal still holds at now (it has served no turn
+// since).
 func (c *ladderCanaries) refusing(provider string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	pc, ok := c.current(provider, now)
 	return ok && pc.refusing
+}
+
+// inFlight reports whether seat, now at generation gen, is provider's canary
+// in flight: recycled fresh from an earlier generation, its fresh
+// conversation not yet seen served or refused. Such a seat is read even
+// while it works, so a turn served there releases the provider's queue.
+func (c *ladderCanaries) inFlight(provider, seat string, gen int64, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pc, ok := c.current(provider, now)
+	return ok && !pc.refusing && pc.seat == seat && gen > pc.gen
 }
 
 // held reports whether seat's fresh recycle must wait on provider's canary
@@ -230,36 +266,49 @@ func (c *ladderCanaries) held(provider, seat string, now time.Time) bool {
 	return ok && (pc.refusing || pc.seat != seat)
 }
 
-// recycled records seat's fresh recycle at now as provider's canary.
-func (c *ladderCanaries) recycled(provider, seat string, now time.Time) {
+// recycled records seat's fresh recycle from generation gen at now as
+// provider's canary.
+func (c *ladderCanaries) recycled(provider, seat string, gen int64, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.by == nil {
 		c.by = make(map[string]providerCanary)
 	}
 	if pc, ok := c.current(provider, now); !ok || !pc.refusing {
-		c.by[provider] = providerCanary{seat: seat, since: now}
+		c.by[provider] = providerCanary{seat: seat, gen: gen, since: now}
 	}
 }
 
 // refused records, at now, that provider refused a canary's fresh
-// conversation too.
-func (c *ladderCanaries) refused(provider, seat string, now time.Time) {
+// conversation too, and returns until when that holds its refused seats'
+// fresh recycles: ladderRefusingFor, doubled for each refusal in a row since
+// it last served a turn, up to ladderRefusingMax.
+func (c *ladderCanaries) refused(provider, seat string, now time.Time) time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.by == nil {
 		c.by = make(map[string]providerCanary)
 	}
-	c.by[provider] = providerCanary{seat: seat, since: now, refusing: true}
+	if c.streak == nil {
+		c.streak = make(map[string]refusalStreak)
+	}
+	n := c.streak[provider].n
+	holds := min(ladderRefusingFor<<min(n, 10), ladderRefusingMax)
+	c.streak[provider] = refusalStreak{n: n + 1, at: now}
+	c.by[provider] = providerCanary{seat: seat, since: now, refusing: true, holds: holds}
+	return now.Add(holds)
 }
 
-// served records a turn provider served that ended at at: a canary or a
-// refusal recorded before it is over.
+// served records a turn provider served at at: a canary or a refusal
+// recorded before it is over, and the refusals in a row start again.
 func (c *ladderCanaries) served(provider string, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if pc, ok := c.by[provider]; ok && at.After(pc.since) {
 		delete(c.by, provider)
+	}
+	if st, ok := c.streak[provider]; ok && at.After(st.at) {
+		delete(c.streak, provider)
 	}
 }
 

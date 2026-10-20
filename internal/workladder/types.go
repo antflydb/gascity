@@ -134,12 +134,32 @@ type Observation struct {
 	// ladder first sees it recycle nothing (WL8).
 	RateLimited   int
 	RateLimitedAt time.Time
-	// FreshHeld holds the rate-limit rule's fresh recycle back, by the
-	// caller's evidence: the seat is attached, or waits on a person for
-	// another claim, or its provider's one fresh-recycle canary is in flight
-	// or was refused too. The seat is paced as ever meanwhile.
-	FreshHeld bool
+	// FreshHold holds the rate-limit rule's fresh recycle back, by the
+	// caller's evidence, and says how the claims it holds are paced.
+	FreshHold FreshHold
 }
+
+// FreshHold is why the rate-limit rule's fresh recycle of a seat must wait.
+type FreshHold uint8
+
+// The fresh holds.
+const (
+	// FreshHoldNone: the fresh recycle may go ahead.
+	FreshHoldNone FreshHold = iota
+	// FreshHoldQueued: the seat waits its turn, a wait that ends on its own
+	// (another seat is the provider's fresh-recycle canary, or the provider
+	// refused a canary's fresh conversation, for a bounded time). Meanwhile
+	// each started claim the rule would recycle is paced as on a degraded
+	// provider, counting nothing, so it keeps its one recycle for the fresh
+	// conversation rather than spend it on a drain that resumes the refused
+	// one.
+	FreshHoldQueued
+	// FreshHoldStanding: the seat must not be restarted fresh, by a hold with
+	// no end of its own (a person is, or may be, attached; it waits on a
+	// person for another claim). Its claims are paced as ever, so its silence
+	// still reaches the drain and the alerts.
+	FreshHoldStanding
+)
 
 // Policy is the ladder's pacing. DefaultPolicy is OD7's.
 type Policy struct {

@@ -67,10 +67,19 @@ func TestDecideRateLimited(t *testing.T) {
 			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 2}},
 		},
 		{
-			name: "fresh recycles held (canary in flight, an attached seat): paced as ever",
+			name: "fresh recycle queued (another seat is the canary): nothing before its due time",
 			e:    notDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 1}),
 			obs: func(o Observation) Observation {
-				o.FreshHeld = true
+				o.FreshHold = FreshHoldQueued
+				return rateLimited(o, 2, answered)
+			},
+			want: []Action{},
+		},
+		{
+			name: "fresh recycle held standing (an attached seat): nothing before its due time",
+			e:    notDue(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 1}),
+			obs: func(o Observation) Observation {
+				o.FreshHold = FreshHoldStanding
 				return rateLimited(o, 2, answered)
 			},
 			want: []Action{},
@@ -335,33 +344,60 @@ func TestDecideRateLimitedTracksTheLastRecycle(t *testing.T) {
 	wantEffects(t, d, Alert{Key: key("x"), Reason: AlertRateLimitedUnrecycled})
 }
 
-// A refused seat whose fresh recycle is held (another seat is the provider's
-// canary, the provider refused a fresh conversation, a person is attached)
-// is paced as degraded: paused nudges that count toward nothing, so it never
-// spends its one recycle on a drain that resumes the refused conversation,
-// and never escalates for silence it cannot help (re-review R2).
-func TestDecideRateLimitedHeldSeatIsPacedPaused(t *testing.T) {
+// A refused started claim whose fresh recycle is queued (another seat is
+// the provider's canary, or the provider refused a canary's fresh
+// conversation: a wait that ends on its own) is paced as degraded: paused
+// nudges that count toward nothing, so it never spends its one recycle on a
+// drain that resumes the refused conversation (re-review R2). Under a
+// standing hold (a person attached, a wait on a person), it is paced as
+// ever: its silence still reaches the drain and the alerts (re-review M1).
+func TestDecideRateLimitedHeldClaims(t *testing.T) {
 	now := t0.Add(5 * time.Hour)
-	for name, e := range map[string]Entry{
-		"at the drain threshold": {Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 6, Last: t0},
-		"below it":               {Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0},
-	} {
-		t.Run(name, func(t *testing.T) {
-			o := rateLimited(startedBy1(quiet(now, 1, claim("x")), "x", SrcAgent), 3, t0.Add(time.Second))
-			o.FreshHeld = true
-			d := Decide(rec(1, e), o, p)
-			wantEffects(t, d, Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: e.Attempts, Paused: true})
-			if got := entry(t, d, "x"); got.Attempts != e.Attempts || got.Recycles != 0 || got.Paused != 1 {
-				t.Fatalf("entry %+v, want a paused nudge that counts nothing", got)
-			}
-			if got, want := p.dueAt(entry(t, d, "x"), true), now.Add(DefaultPausedCap); !got.Equal(want) {
-				t.Fatalf("next due %v, want PausedCap", got)
-			}
-		})
+	refused := func(e Entry, hold FreshHold, n int, at time.Time) Decision {
+		o := rateLimited(startedBy1(quiet(now, 1, claim("x")), "x", SrcAgent), n, at)
+		o.FreshHold = hold
+		return Decide(rec(1, e), o, p)
 	}
-	// Refused once only: not yet the rule's, so not held either.
-	o := rateLimited(startedBy1(quiet(now, 1, claim("x")), "x", SrcAgent), 1, t0.Add(time.Second))
-	o.FreshHeld = true
-	d := Decide(rec(1, Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0}), o, p)
-	wantEffects(t, d, Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 3})
+	atThreshold := Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 6, Last: t0}
+	below := Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0}
+	answered := t0.Add(time.Second)
+	t.Run("queued, at the drain threshold: a paused nudge, no drain", func(t *testing.T) {
+		d := refused(atThreshold, FreshHoldQueued, 3, answered)
+		wantEffects(t, d, Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 6, Paused: true})
+		if got := entry(t, d, "x"); got.Attempts != 6 || got.Recycles != 0 || got.Paused != 1 {
+			t.Fatalf("entry %+v, want a paused nudge that counts nothing", got)
+		}
+	})
+	t.Run("queued, below it: a paused nudge", func(t *testing.T) {
+		wantEffects(t, refused(below, FreshHoldQueued, 3, answered), Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 2, Paused: true})
+	})
+	t.Run("standing, at the drain threshold: the drain and its alert", func(t *testing.T) {
+		wantEffects(t, refused(atThreshold, FreshHoldStanding, 3, answered), Recycle{Key: key("x"), KeepClaim: true}, Alert{Key: key("x"), Reason: AlertStartedRecycled})
+	})
+	t.Run("standing, below it: a counted nudge", func(t *testing.T) {
+		wantEffects(t, refused(below, FreshHoldStanding, 3, answered), Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 3})
+	})
+	t.Run("queued, but the refusal answered no nudge (a wedge after it): counted", func(t *testing.T) {
+		e := below
+		e.Last = t0.Add(time.Hour) // nudged an hour after the refusal, no answer since
+		wantEffects(t, refused(e, FreshHoldQueued, 3, t0.Add(time.Minute)), Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 3})
+	})
+	t.Run("refused once only: not the rule's, so not queued", func(t *testing.T) {
+		wantEffects(t, refused(below, FreshHoldQueued, 1, answered), Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 3})
+	})
+	t.Run("queued pauses only the claim it queues: an unstarted claim is released", func(t *testing.T) {
+		o := rateLimited(startedBy1(quiet(now, 1, claim("x"), claim("u")), "x", SrcAgent), 3, answered)
+		o.FreshHold = FreshHoldQueued
+		prev := rec(1, below, Entry{Key: key("u"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 3, Last: t0})
+		d := Decide(prev, o, p)
+		var released bool
+		for _, a := range d.Actions {
+			if r, ok := a.(Release); ok && r.Key == key("u") {
+				released = true
+			}
+		}
+		if !released {
+			t.Fatalf("actions %#v: the unstarted claim's release was paused with the queued claim", d.Actions)
+		}
+	})
 }
