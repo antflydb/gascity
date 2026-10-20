@@ -40,6 +40,10 @@ evidence from tests, source, an issue, or a commit.
   extraction candidates unless they are tests, fixtures, or migration/doctor
   repair code.
 - Keep provider-specific runtime behavior behind `internal/runtime`.
+- Deferred submits go through the Manager's `DeferredSubmitQueue`
+  (`WithDeferredSubmitQueue`); no non-test session file touches the
+  state.json nudge queue directly. Enforced by
+  `TestSessionReachesTheNudgeQueueOnlyThroughDeferredSubmitQueue`.
 - Keep production CLI session creation and lifecycle operations on the
   `internal/worker/handle.go` boundary unless root `AGENTS.md` names an active
   exception.
@@ -87,7 +91,10 @@ provider with a session-id flag whose row is `creating` without a key: that
 start's conversation has no key yet. Families without `SupportsIDLookup`
 (Codex, Gemini, OpenCode, MiMo, ZCode) still fall back to work-directory
 discovery after a keyed miss, as does `SessionLogAdapter.DiscoverTranscript`;
-see `SESSION-HISTORY-EXACT-KEY`.
+see `SESSION-HISTORY-EXACT-KEY`. OpenCode and ZCode still prefer a keyed hit
+(the mirrored export is named for the session key) before that fallback. The
+model-usage paths in `internal/worker` resolve OpenCode by key only and never
+take the fallback.
 
 ## Manual Close During Reconciliation
 

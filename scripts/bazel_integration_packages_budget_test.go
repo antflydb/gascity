@@ -16,9 +16,9 @@ import (
 
 // integrationPackagesShards: //test:integration_packages' test targets and
 // each one's shard_count (1 when unsharded), i.e. the integration-packages
-// lane's test actions, one per target shard. aquery-verified (81 TestRunner
-// actions) at 2d2b85656c with beads_test at 13 shards, plus the one //test/dolttest
-// action this branch adds (82); recompute with
+// lane's test actions, one per target shard. aquery-verified (80 TestRunner
+// actions) with beads_test at 11 shards (gascity #8083), including
+// //test/dolttest:dolttest_test; recompute with
 //
 //	T=$(bazel query 'tests(//test:integration_packages)' | paste -sd+ | sed 's/+/ + /g')
 //	bazel aquery --define=gotags=integration "mnemonic(\"TestRunner\", $T)" --output=text |
@@ -37,7 +37,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/api:api_test":                                    6,
 	"//internal/bdflags:bdflags_test":                            1,
 	"//internal/beads/exec:exec_test":                            1,
-	"//internal/beads:beads_test":                                13,
+	"//internal/beads:beads_test":                                11,
 	"//internal/credentialprovider:credentialprovider_test":      1,
 	"//internal/orders:orders_test":                              1,
 	"//internal/processgroup:processgroup_test":                  1,
@@ -219,14 +219,14 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // first scheduling wave. Farm owner maintainer-city-c3's before/after found
 // no lane gain and a farm guard regression (OSS queue-wait p95 8.9s->22.9s),
 // so #7795 was reverted and the lane is back to running in two waves under
-// the inherited --jobs=64. 82 test actions (aquery-verified, see
+// the inherited --jobs=64. 81 test actions (aquery-verified, see
 // integrationPackagesShards above) is accepted as a known, pinned exception
 // so the budget check still catches further growth. If the count grows
 // above this pin, that is this lane asking for a bigger second-wave tail,
 // not a smaller one; split it instead of raising --jobs again (e.g. shard
 // out //cmd/gc:gc_test's long tail) — see beads closed PR #7542 and gascity
 // #7795's before/after for what that tail costs.
-const integrationPackagesTwoWaveExceptionPinned = 82
+const integrationPackagesTwoWaveExceptionPinned = 81
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may

@@ -136,6 +136,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionUndrained:               AuthorWorker,
 	SessionWorkQueryFailed:         AuthorWorker,
 	SessionDrainFenceUnavailable:   AuthorWorker,
+	WorkStartedUnrecorded:          AuthorWorker,
 	SessionDemandClaimDivergence:   AuthorWorker,
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
@@ -206,8 +207,18 @@ var builtinAuthorship = map[string]Authorship{
 	BeadDeadAssigneeReopened: AuthorController,
 	// Also recorded by gc rig add, a city-host admin command (rule 4).
 	BeadsBlockedRecomputed: AuthorController,
+	// The API server and the controller's op sweeper, both in the
+	// controller process; the CLI warns on stderr instead (DES-O0API D13).
+	OpsRecordingDegraded:   AuthorController,
 	ExecutionStepCompleted: AuthorController,
 	ExecutionStepStalled:   AuthorController,
+	// The work ladder's facts: the v2 lane step records them (rule 4).
+	WorkNudged:            AuthorController,
+	WorkNudgeFailed:       AuthorController,
+	WorkRecycleRequested:  AuthorController,
+	WorkReleased:          AuthorController,
+	WorkReleaseUnfinished: AuthorController,
+	WorkEscalated:         AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc
@@ -223,6 +234,7 @@ var builtinAuthorship = map[string]Authorship{
 	OrderCompleted:                AuthorController,
 	OrderSuppressed:               AuthorController,
 	OrderSkipped:                  AuthorController,
+	OrderInapplicable:             AuthorController,
 	RequestResultCityCreate:       AuthorController,
 	RequestResultCityUnregister:   AuthorController,
 	RequestResultSessionCreate:    AuthorController,

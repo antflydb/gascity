@@ -162,6 +162,10 @@ const (
 	executionHoldSnapshotError = "snapshot_error"
 )
 
+// executionClaimNudgeLabel names the execution backstop in its log lines and
+// its planner notices.
+const executionClaimNudgeLabel = "execution-claim-nudge"
+
 // executionStalledLatchRetryAfter bounds how long a latch silences
 // re-escalation of the SAME incarnation. The drain it requested normally
 // finishes within defaultDrainTimeout; a latch this old whose session is still
@@ -198,7 +202,7 @@ func nudgeStalledPoolExecution(
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
 	}
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "execution-claim-nudge", poolExecutionBackstop{
+	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, executionClaimNudgeLabel, poolExecutionBackstop{
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
@@ -478,16 +482,16 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 }
 
 // content is the agent's configured claim nudge. A seat whose stamp shows the
-// marker's claim started this incarnation gets the pool default when none is
-// configured (stalledPoolClaimNudgeFor, the claim backstop's fallback): its
-// escalation is vetoed, so with nothing to send it would wait at its prompt
-// forever. A seat seen started on a pass whose stamp write failed gets no
+// marker's claim started this incarnation gets the held-claim default when
+// none is configured (heldClaimNudgeFor: the started-rung text, which names
+// the claim and carries no --drain-ack, mc-ilr3b): its escalation is vetoed, so with nothing to
+// send it would wait at its prompt forever. A seat seen started on a pass whose stamp write failed gets no
 // default; escalatesNext holds it until the stamp lands. A started seat whose
 // template names no configured agent gets no default either, and is held as
 // executing, as in the stamp-failure case.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
 	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
-		return stalledPoolClaimNudgeFor(p.cfg, s)
+		return heldClaimNudgeFor(p.cfg, s, s.Metadata[executionClaimNudgeWorkKey])
 	}
 	return claimNudgeFor(p.cfg, s)
 }
@@ -497,22 +501,29 @@ func (p poolExecutionBackstop) content(s beads.Bead) string {
 // CachingStore-backed, so a plain read can still show a claim the agent finished
 // seconds ago. A failed read HOLDS: it is not proof the claim went away.
 func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolution {
+	res, _ := revalidateExecutionClaim(target)
+	return res
+}
+
+// revalidateExecutionClaim is revalidate's verdict on target, with the
+// claim as the live read found it (the zero bead when it held).
+func revalidateExecutionClaim(target backstopTarget) (backstopResolution, beads.Bead) {
 	if target.Store == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
-	return backstopResolutionOutstanding
+	return backstopResolutionOutstanding, current
 }
 
 // executionEvidenceTailBytes bounds how far back the execution-evidence read
@@ -569,8 +580,15 @@ func (p poolExecutionBackstop) markedStarted(s beads.Bead, beadID string) bool {
 // markStarted stamps the row's execution evidence for its incarnation and
 // beadID, and reports whether the evidence holds (it does even when the write
 // fails: the sighting is this pass's evidence, and the next pass reads again).
+// Once the stamp lands, the backstop's open notices are withdrawn, and so is
+// the slot's warm-bind claim notice (withdrawWarmBindNotice): they carry the
+// unstarted claim text, whose --drain-ack a started seat must not run
+// (mc-ilr3b), and the next attempt carries the held-claim text.
 func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
-	writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout)
+	if writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout) {
+		withdrawBackstopNotices(p.store, s, executionClaimNudgeLabel, "the claimed step started", p.stdout)
+		withdrawWarmBindNotice(p.store, s, "the claimed step started", p.stdout)
+	}
 	return true
 }
 
@@ -661,7 +679,7 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	if !writeSessionMetadata(store, s, map[string]string{
 		executionClaimNudgeStalledKey:      p.now.UTC().Format(time.RFC3339),
 		executionClaimNudgeStalledTokenKey: strings.TrimSpace(s.Metadata["instance_token"]),
-	}, "execution-claim-nudge", stdout) {
+	}, executionClaimNudgeLabel, stdout) {
 		return
 	}
 	// Report the attempts actually DELIVERED, not the cap. An agent with no
@@ -710,8 +728,8 @@ func (p poolExecutionBackstop) emitStepStalled(s *beads.Bead, beadID string, att
 	})
 }
 
-func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	clearExecutionClaimMarker(store, s, stdout)
+func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
+	return clearExecutionClaimMarker(store, s, stdout)
 }
 
 func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
@@ -722,14 +740,14 @@ func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstop
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
 		executionClaimNudgeTokenKey:    strings.TrimSpace(s.Metadata["instance_token"]),
-	}, "execution-claim-nudge", stdout)
+	}, executionClaimNudgeLabel, stdout)
 }
 
 // clearExecutionClaimMarker wipes the state machine — including the escalation
 // latch and the hold breadcrumb — so the next claim this slot takes starts a
-// fresh window. No-op when there is nothing to clear, so steady-state ticks
-// stay write-free.
-func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+// fresh window, and reports whether it wiped any. No-op when there is nothing
+// to clear, so steady-state ticks stay write-free.
+func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
 	keys := []string{
 		executionClaimNudgeWorkKey,
 		executionClaimNudgeRootKey,
@@ -749,18 +767,19 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		}
 	}
 	if !dirty {
-		return
+		return false
 	}
 	kvs := make(map[string]string, len(keys))
 	for _, key := range keys {
 		kvs[key] = ""
 	}
-	if !writeSessionMetadata(store, s, kvs, "execution-claim-nudge", stdout) {
-		return
+	if !writeSessionMetadata(store, s, kvs, executionClaimNudgeLabel, stdout) {
+		return false
 	}
 	for _, key := range keys {
 		delete(s.Metadata, key)
 	}
+	return true
 }
 
 // writeSessionMetadata persists a marker patch and mirrors it into the in-memory

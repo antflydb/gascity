@@ -391,6 +391,18 @@ func sameLifecycleFacts(a, b Info) bool {
 	return reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
 }
 
+// mintPremiseHolds is MintIncarnation's premise on one fresh read of the row
+// (meta its metadata): fresh still carries the lifecycle facts, the
+// generation and the token expect was read with, and still records lease (a
+// nil lease checks none). LifecycleInput holds no generation or token, so the
+// lifecycle facts alone would let a retry after a lost fence mint a stale g+1.
+func mintPremiseHolds(expect, fresh Info, lease *RuntimeLease, meta map[string]string) bool {
+	return sameLifecycleFacts(expect, fresh) &&
+		strings.TrimSpace(fresh.Generation) == strings.TrimSpace(expect.Generation) &&
+		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(expect.InstanceToken) &&
+		(lease == nil || lease.HoldsMeta(meta))
+}
+
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
 // refreshed Info as a LOCAL fold — info.ApplyPatch(patch) — never a re-Get. It
 // is the write-returns-Info chokepoint the reconciler routes its direct
@@ -486,7 +498,12 @@ const operatorSuspendAttempts = 8
 // attempt writes nothing and returns an error to retry. It returns what it
 // wrote, for a failed stop's rollback.
 func (s *Store) OperatorSuspend(id string, now time.Time) (DispositionWrite, error) {
-	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
+	return s.operatorSuspend(id, now, operatorSuspendLife)
+}
+
+// operatorSuspend is OperatorSuspend with life as the suspend's lifecycle.
+func (s *Store) operatorSuspend(id string, now time.Time, life DispositionLife) (DispositionWrite, error) {
+	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, life, now)
 	switch {
 	case err != nil:
 		return DispositionWrite{}, err
@@ -505,6 +522,17 @@ func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
 	patch["state"] = string(StateSuspended)
 	patch["slept_at"] = ""
 	patch["sleep_reason"] = ""
+	return patch
+}
+
+// operatorSuspendStopLife is the lifecycle of an operator's suspend that
+// stops the runtime itself (Manager.Suspend): operatorSuspendLife, with the
+// wake stamp cleared in the same write, so the runtime's death is no rapid
+// crash or churn of that wake, which would discard the conversation the next
+// wake resumes. A managed suspend leaves the stamp to its drain.
+func operatorSuspendStopLife(was, next Disposition, info Info) MetadataPatch {
+	patch := operatorSuspendLife(was, next, info)
+	patch["last_woke_at"] = ""
 	return patch
 }
 
