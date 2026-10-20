@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 const (
@@ -30,9 +31,15 @@ const (
 	// ladder's last nudge to it moves; the bound catches the rest, such as a
 	// refusal tmux's activity clock discounts (output right after a nudge).
 	ladderReadMaxAge = 5 * time.Minute
-	// ladderCanaryFlight is how long a provider's fresh-recycle canary may
-	// stay unresolved before another seat on the provider may try its own.
-	ladderCanaryFlight = 30 * time.Minute
+	// ladderCanaryFlight is how long a provider's fresh-recycle canary holds
+	// the provider's other refused seats: long enough to see its fresh
+	// conversation refused (a restart, the grace, one nudge: about 5
+	// minutes), short enough that refused seats each get their turn.
+	ladderCanaryFlight = 15 * time.Minute
+	// ladderRefusingFor is how long a provider whose pool refused a canary's
+	// fresh conversation holds fresh recycles on it: then the next refused
+	// seat may try again, one more conversation spent per period at most.
+	ladderRefusingFor = workladder.DefaultCap
 )
 
 // ladderTurnReader reads a seat's current and recent turns.
@@ -165,12 +172,14 @@ func (c *ladderRateLimits) keep(ids map[string]bool) {
 // helps a seat whose refusal sticks to its conversation (2026-10-19: fresh
 // seats on the cooling GLM pool were served) and nothing when the provider's
 // whole pool refuses; then it only loses the seat's context. So one seat per
-// provider at a time is recycled fresh, the provider's canary; other refused
-// seats on the provider wait while it is in flight. If the canary's fresh
-// conversation is refused too, the provider is refusing: its seats are paced
-// as on a degraded provider (WL4: nudged at PausedCap, uncounted, never
-// escalated or recycled) until a seat on it is served again. A turn served on
-// the provider after the canary ends it either way. The state lives in
+// provider at a time is recycled fresh, the provider's canary: the
+// provider's other refused seats are held (Observation.FreshHeld) while it
+// is in flight, ladderCanaryFlight. If the canary's fresh conversation is
+// refused too, the provider is refusing, and its refused seats stay held for
+// ladderRefusingFor. A held refused seat is paced as degraded (workladder:
+// paused nudges, counting nothing), keeping its conversation; a seat on the
+// provider that is not refused is paced as usual. A turn served on the
+// provider after the canary ends the hold either way. The state lives in
 // memory: a controller restart costs at most one more canary per provider.
 type ladderCanaries struct {
 	mu sync.Mutex
@@ -185,30 +194,40 @@ type providerCanary struct {
 	refusing bool
 }
 
-// refusing reports whether provider's pool refused a fresh conversation and
-// has served no turn since.
-func (c *ladderCanaries) refusing(provider string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.by[provider].refusing
+// current is provider's canary at now, forgetting one past its period.
+// The caller holds c.mu.
+func (c *ladderCanaries) current(provider string, now time.Time) (providerCanary, bool) {
+	pc, ok := c.by[provider]
+	if !ok {
+		return providerCanary{}, false
+	}
+	period := ladderCanaryFlight
+	if pc.refusing {
+		period = ladderRefusingFor
+	}
+	if now.Sub(pc.since) >= period {
+		delete(c.by, provider)
+		return providerCanary{}, false
+	}
+	return pc, true
 }
 
-// held reports whether seat's fresh recycle must wait on provider's canary:
-// another seat's is in flight, or the provider is refusing.
+// refusing reports whether provider's pool refused a canary's fresh
+// conversation within ladderRefusingFor of now, and has served no turn since.
+func (c *ladderCanaries) refusing(provider string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pc, ok := c.current(provider, now)
+	return ok && pc.refusing
+}
+
+// held reports whether seat's fresh recycle must wait on provider's canary
+// at now: the provider is refusing, or another seat's canary is in flight.
 func (c *ladderCanaries) held(provider, seat string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	pc, ok := c.by[provider]
-	switch {
-	case !ok:
-		return false
-	case pc.refusing:
-		return true
-	case now.Sub(pc.since) >= ladderCanaryFlight:
-		delete(c.by, provider)
-		return false
-	}
-	return pc.seat != seat
+	pc, ok := c.current(provider, now)
+	return ok && (pc.refusing || pc.seat != seat)
 }
 
 // recycled records seat's fresh recycle at now as provider's canary.
@@ -218,7 +237,7 @@ func (c *ladderCanaries) recycled(provider, seat string, now time.Time) {
 	if c.by == nil {
 		c.by = make(map[string]providerCanary)
 	}
-	if !c.by[provider].refusing {
+	if pc, ok := c.current(provider, now); !ok || !pc.refusing {
 		c.by[provider] = providerCanary{seat: seat, since: now}
 	}
 }

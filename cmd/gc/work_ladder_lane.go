@@ -343,7 +343,9 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	}
 	info, live := sessionInfoFromBead(row), p.observeRuntime(row)
 	live.rateLimit = p.rateLimits(row, info, live, targets, prev.LastNudge)
-	live.freshHeld = p.freshHeld(row)
+	if live.rateLimit.in(row.Metadata) && live.rateLimit.refused >= workladder.DefaultRateLimitThreshold {
+		live.freshHeld = p.freshHeld(row) // only a reading the rule can act on asks: the attach probe is not free
+	}
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision
 	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
@@ -437,11 +439,13 @@ type ladderRuntime struct {
 }
 
 // freshHeld reports whether the rate-limit rule's fresh recycle of row's
-// seat must wait. A fresh restart stops the seat whatever is attached to it,
-// so a seat a person is attached to (or that cannot be told) waits; so does a
-// seat holding another claim whose seat waits on a person, whose conversation
-// a restart would lose; and so does a seat whose provider's canary is another
-// seat's, still in flight, or was refused too (ladderCanaries).
+// seat must wait: then the refused seat is paced as degraded meanwhile. A
+// fresh restart stops the seat whatever is attached to it, so a seat a person
+// is attached to (or that cannot be told) waits; so does a seat holding
+// another claim whose seat waits on a person, whose conversation a restart
+// would lose; and so does a seat whose provider's canary is another seat's
+// and in flight, or whose provider refused a canary's fresh conversation
+// (ladderCanaries). The attach probe runs last.
 func (p *ladderPass) freshHeld(row beads.Bead) bool {
 	if p.humanWaits[row.ID] {
 		return true
@@ -489,12 +493,8 @@ func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRunt
 func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 	var rt ladderRuntime
 	name := strings.TrimSpace(row.Metadata["session_name"])
-	provider := strings.TrimSpace(row.Metadata["provider"])
-	switch healthy, present := p.health.check(provider); {
-	case present && !healthy:
+	if healthy, present := p.health.check(strings.TrimSpace(row.Metadata["provider"])); present && !healthy {
 		rt.provider = workladder.ProviderState{Degraded: true, Reason: "provider-health"}
-	case p.l.canaries.refusing(provider): // its pool refused a fresh conversation too
-		rt.provider = workladder.ProviderState{Degraded: true, Reason: "rate-limited"}
 	}
 	sp := p.env.SP
 	if sp == nil {

@@ -294,10 +294,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sees it recycle nothing. Only one seat per provider is recycled fresh at a
   time; if that fresh conversation is refused too, the provider's pool is
   refusing: one `work.escalated` event with reason `provider_rate_limited`
-  names the provider, and its seats are paced as on a degraded provider
-  (keeping their conversations) until it serves a turn again. A seat that a
-  person is attached to, or that also holds a claim waiting on a person, is
-  never recycled fresh. If a claim's one recycle already went to a drain that
+  names the provider, and its other refused seats keep their conversations
+  for up to an hour (or until it serves a turn) before the next may try. A
+  refused seat whose fresh recycle must wait, and a seat that a person is
+  attached to or that also holds a claim waiting on a person, is paced as on
+  a degraded provider meanwhile: nudged every 10 minutes, counting toward
+  nothing, so it is never drained back into the conversation that refuses
+  it. Seats on the provider that are not refused are paced as usual. If a
+  claim's one recycle already went to a drain that
   resumed the same conversation, `rate_limited_unrecycled` says so instead.
   Every `work.*` payload now carries the seat's `provider`. A claimed step
   whose metadata `gc.awaiting_human` names the seat holding it (the seat

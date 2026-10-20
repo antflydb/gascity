@@ -267,9 +267,13 @@ func runSequence(seed uint64) error {
 				if o.Gate.Held || o.Hold[a.Key] {
 					return fail("WL5: nudge under a hold")
 				}
-				// WL4: no counted nudge while degraded.
+				// WL4: no counted nudge while degraded, nor for a refused seat
+				// whose fresh recycle is held.
 				if o.Provider.Degraded && !a.Paused {
 					return fail("WL4: counted nudge while degraded")
+				}
+				if o.FreshHeld && o.RateLimited >= DefaultRateLimitThreshold && !a.Paused {
+					return fail("a counted nudge to a refused seat whose fresh recycle is held")
 				}
 				// WL3: one nudge per seat per Base, whatever the work.
 				if !lastSeatNudge.IsZero() && o.Now.Sub(lastSeatNudge) < DefaultBase {
@@ -295,6 +299,9 @@ func runSequence(seed uint64) error {
 			case Recycle:
 				if o.Provider.Degraded {
 					return fail("WL4: recycle while degraded")
+				}
+				if o.FreshHeld && o.RateLimited >= DefaultRateLimitThreshold {
+					return fail("a recycle of a refused seat whose fresh recycle is held (fresh %v)", a.Fresh)
 				}
 				if a.Fresh {
 					fresh = true

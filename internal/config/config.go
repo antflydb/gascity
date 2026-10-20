@@ -2846,9 +2846,10 @@ type DaemonConfig struct {
 	// unanswered nudge. A seat whose provider refused its answer to the
 	// ladder's nudge with a rate limit (HTTP 429, as its own transcript records
 	// it; two refusals in a row) has that one recycle at once, to a fresh
-	// conversation, one seat per provider at a time; if the fresh seat is
-	// refused too, an alert names the provider and its seats are paced as
-	// degraded until it serves a turn. A claim whose metadata
+	// conversation, one seat per provider at a time (refused seats waiting
+	// their turn are paced as on a degraded provider); if the fresh seat is
+	// refused too, an alert names the provider and its refused seats wait up
+	// to an hour, or until it serves a turn. A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
 	// their decision) is not nudged, recycled or released. "off" runs the
 	// three backstops it replaced (idle-claim, continuation, execution)

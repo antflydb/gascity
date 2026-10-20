@@ -1754,24 +1754,30 @@ func TestWorkLadderRecyclesARateLimitedSeatFresh(t *testing.T) {
 			if e := c.entry(id); e.Rung != workladder.RungEscalated || !e.RateLimitAlerted || e.Recycles != 1 {
 				t.Fatalf("entry %+v, want escalated with the pool alert raised", e)
 			}
-			// The provider is refusing: its seats are paced as degraded (WL4),
-			// a paused nudge every PausedCap, never another alert or recycle.
-			c.run(2*time.Hour, time.Minute, turns.refuseNudges(c, moves))
-			paused := 0
+			// The provider is refusing: the refused seat is paced as degraded
+			// (paused nudges every PausedCap, counting nothing), never another
+			// alert or recycle.
+			c.run(40*time.Minute, time.Minute, turns.refuseNudges(c, moves))
+			paused, counted := 0, 0
 			for _, ev := range ladderPayloads(c, events.WorkNudged) {
 				if ev.Generation == 8 && ev.Paused {
 					paused++
+				} else if ev.Generation == 8 {
+					counted++
 				}
 			}
-			if paused < 10 || len(ladderPayloads(c, events.WorkEscalated)) != 2 || len(c.events(events.WorkRecycleRequested)) != 1 {
-				t.Fatalf("%d paused nudges, %d alerts, %d recycles in 2h of a refusing pool: want paced as degraded and nothing more",
-					paused, len(ladderPayloads(c, events.WorkEscalated)), len(c.events(events.WorkRecycleRequested)))
+			if paused < 3 || counted > 1 || len(ladderPayloads(c, events.WorkEscalated)) != 2 || len(c.events(events.WorkRecycleRequested)) != 1 {
+				t.Fatalf("%d paused and %d counted nudges, %d alerts, %d recycles in 40 min of a refusing pool: want paced as degraded and nothing more",
+					paused, counted, len(ladderPayloads(c, events.WorkEscalated)), len(c.events(events.WorkRecycleRequested)))
 			}
-			// The pool serves a turn again: the seat is paced as usual.
+			if !c.lane.canaries.refusing("claude", c.now) {
+				t.Fatal("the provider is not refusing after its canary's fresh conversation was refused")
+			}
+			// The pool serves a turn again: the provider is no longer refusing.
 			turns.serve("conv-2", c.now)
-			c.sp.SetActivity(ladderSeatName, c.now)
-			c.run(10*time.Minute, time.Minute, nil)
-			if c.lane.canaries.refusing("claude") {
+			c.sp.SetActivity(ladderSeatName, c.now.Add(-2*time.Minute))
+			c.run(5*time.Minute, time.Minute, nil)
+			if c.lane.canaries.refusing("claude", c.now) {
 				t.Fatal("the provider stays refusing after it served a turn")
 			}
 			_ = before
@@ -1976,8 +1982,9 @@ func (c *ladderCity) addSeat(name string) string {
 	return row.ID
 }
 
-// claimFor adds an in_progress claim held by seat, returning its ID.
-func (c *ladderCity) claimFor(seat, title string) string {
+// claimFor adds an in_progress claim held by seat, and makes it the seat's
+// current claim.
+func (c *ladderCity) claimFor(seat, title string) {
 	c.t.Helper()
 	b, err := c.work.Create(beads.Bead{Title: title, Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", beadmeta.CurrentClaimBeadIDMetadataKey: ""}})
 	if err != nil {
@@ -1989,94 +1996,188 @@ func (c *ladderCity) claimFor(seat, title string) string {
 	}
 	c.claims = append(c.claims, b.ID)
 	casSetRow(c.t, c.sessions, seat, map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: b.ID})
-	return b.ID
 }
 
-// F4: one canary per provider. When two seats on one provider are refused,
-// one is recycled fresh and the other waits while that canary is in flight.
-// The canary's fresh conversation is refused too: the pool itself. The
-// waiting seat is never recycled (its conversation is kept), the provider's
-// seats are paced as degraded, and one alert names the provider. A turn the
-// provider serves afterwards ends it: the waiting seat may then be recycled.
-func TestWorkLadderOneFreshCanaryPerProvider(t *testing.T) {
+// refusingSeats answers, a second later on the ladder clock, every nudge
+// the ladder delivers to the named seats with a turn the provider refuses
+// (keys maps a seat's runtime name to its row ID); a seat whose current
+// conversation key is in served answers with a served turn instead, and
+// keeps working (its activity moves). It is a pass callback.
+func refusingSeats(c *ladderCity, turns *ladderTurns, names map[string]string, served map[string]bool) func() {
+	seen := map[string]int{}
+	return func() {
+		for name, id := range names {
+			row, err := c.sessions.Get(id)
+			if err != nil {
+				c.t.Fatal(err)
+			}
+			key := row.Metadata["session_key"]
+			if served[key] {
+				c.sp.SetActivity(name, c.now) // working on its fresh conversation
+				continue
+			}
+			for n := c.sp.CountCalls("Nudge", name); seen[name] < n; seen[name]++ {
+				turns.refuse(key, c.now.Add(time.Second))
+			}
+		}
+	}
+}
+
+// restartFresh applies a fresh recycle the ladder requested on seat id, as
+// A13 would: a new generation and conversation, the request cleared.
+func restartFresh(c *ladderCity, id, key string) {
+	c.t.Helper()
+	b, err := c.sessions.Get(id)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	gen := rowGeneration(b.Metadata) + 1
+	casSetRow(c.t, c.sessions, id, map[string]string{
+		"generation": fmt.Sprint(gen), "instance_token": fmt.Sprintf("tok-%s-%d", id, gen), "session_key": key,
+		"restart_requested": "", "continuation_reset_pending": "",
+	})
+}
+
+// F4/R2: one canary per provider, and the seats it holds are never drained.
+// Eight seats on one provider are refused in their own conversations; a
+// fresh conversation is served (the refusal stuck to the conversation). One
+// seat at a time is recycled fresh, the others paced paused meanwhile, so
+// every seat gets its fresh conversation and none is drained back into the
+// conversation that refuses it (no A16 recycle, no rate_limited_unrecycled).
+func TestWorkLadderCanaryQueueNeverDrainsAHeldSeat(t *testing.T) {
 	c := newLadderCity(t)
 	idA := c.claim("seat a's step")
-	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: idA, "session_key": "conv-a"})
-	seatB := c.addSeat("seat-b")
-	idB := c.claimFor(seatB, "seat b's step")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: idA, "session_key": "conv-" + ladderSeatName})
+	names := map[string]string{ladderSeatName: c.seat}
+	for i := range 7 {
+		name := fmt.Sprintf("seat-%d", i)
+		id := c.addSeat(name)
+		c.claimFor(id, name+"'s step")
+		names[name] = id
+	}
 	turns := newLadderTurns()
-	turns.refuse("conv-a", c.now.Add(-time.Hour))
+	for name := range names {
+		turns.refuse("conv-"+name, c.now.Add(-time.Hour))
+	}
+	turns.install(c)
+	served := map[string]bool{}
+	answer := refusingSeats(c, turns, names, served)
+	recycledFresh := map[string]bool{}
+	c.run(4*time.Hour, 30*time.Second, func() {
+		answer()
+		for _, id := range names {
+			if b, _ := c.sessions.Get(id); b.Metadata["restart_requested"] == "true" {
+				recycledFresh[id] = true
+				key := "fresh-" + id
+				served[key] = true
+				restartFresh(c, id, key)
+			}
+		}
+	})
+	if len(recycledFresh) != len(names) {
+		t.Fatalf("%d of %d seats got their fresh conversation in 4h", len(recycledFresh), len(names))
+	}
+	if len(c.posted) != 0 {
+		t.Fatalf("drained %+v back into the conversations that refused them", c.posted)
+	}
+	for _, a := range ladderPayloads(c, events.WorkEscalated) {
+		if a.Reason == workladder.AlertRateLimitedUnrecycled || a.Reason == workladder.AlertProviderRateLimited {
+			t.Fatalf("alert %+v: no seat should have spent its recycle on a drain, and the pool served fresh conversations", a)
+		}
+	}
+	counted := 0
+	for _, n := range ladderPayloads(c, events.WorkNudged) {
+		if !n.Paused {
+			counted++
+		}
+	}
+	if counted > 2*len(names) {
+		t.Fatalf("%d counted nudges to %d refused seats: held seats must be paced paused", counted, len(names))
+	}
+}
+
+// F4/R1: when the provider refuses a canary's fresh conversation too, its
+// other refused seats keep their conversations (held, paced paused) for
+// ladderRefusingFor, then the next refused seat may try; one alert names the
+// provider. A seat on the provider that is not refused (a seat wedged by a
+// 524, the W3 wedge) is paced as usual meanwhile: counted nudges, its recycle.
+func TestWorkLadderRefusingProviderHoldsOnlyRefusedSeats(t *testing.T) {
+	c := newLadderCity(t)
+	idA := c.claim("seat a's step")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: idA, "session_key": "conv-" + ladderSeatName})
+	idB := c.addSeat("seat-b")
+	c.claimFor(idB, "seat b's step")
+	idW := c.addSeat("seat-w") // wedged, not refused
+	c.claimFor(idW, "seat w's step")
+	names := map[string]string{ladderSeatName: c.seat, "seat-b": idB}
+	turns := newLadderTurns()
+	turns.refuse("conv-"+ladderSeatName, c.now.Add(-time.Hour))
 	turns.refuse("conv-seat-b", c.now.Add(-time.Hour))
 	turns.install(c)
-	// Every nudge, to either seat, is refused a second later.
-	refuseAll := func() {
-		for _, n := range c.events(events.WorkNudged) {
-			var p events.WorkLadderPayload
-			_ = json.Unmarshal(n.Payload, &p)
-			key := "conv-a"
-			if p.SessionID == seatB {
-				key = "conv-seat-b"
-			}
-			if at := n.Ts.Add(time.Second); at.After(turns.at[key]) {
-				turns.refuse(key, at)
-			}
-		}
-	}
-	freshOf := func(seat string) int {
-		n := 0
-		for _, p := range ladderPayloads(c, events.WorkRecycleRequested) {
-			if p.SessionID == seat && p.Reason == "rate_limited" {
-				n++
+	answer := refusingSeats(c, turns, names, map[string]bool{})
+	var canary string
+	c.run(time.Hour, 30*time.Second, func() {
+		answer()
+		for _, id := range names {
+			if b, _ := c.sessions.Get(id); b.Metadata["restart_requested"] == "true" {
+				if canary != "" {
+					t.Fatalf("a second fresh recycle (%s after %s) while the provider refuses", id, canary)
+				}
+				canary = id
+				restartFresh(c, id, "fresh-"+id) // its fresh conversation is refused too
+				turns.refuse("fresh-"+id, c.now)
 			}
 		}
-		return n
+	})
+	if canary == "" || !c.lane.canaries.refusing("claude", c.now) {
+		t.Fatalf("canary %q, refusing %v: want one canary refused and the provider latched", canary, c.lane.canaries.refusing("claude", c.now))
 	}
-	c.run(15*time.Minute, 30*time.Second, refuseAll)
-	if a, b := freshOf(c.seat), freshOf(seatB); a+b != 1 {
-		t.Fatalf("fresh recycles: seat a %d, seat b %d; want exactly one canary for the provider", a, b)
-	}
-	canary, waiting, waitingClaim := c.seat, seatB, idB
-	if freshOf(seatB) == 1 {
-		canary, waiting, waitingClaim = seatB, c.seat, idA
-	}
-	// The canary restarts on a new conversation, and the pool refuses that too.
-	newKey := "conv-canary-fresh"
-	casSetRow(t, c.sessions, canary, map[string]string{"generation": "9", "instance_token": "tok-9", "session_key": newKey, "restart_requested": "", "continuation_reset_pending": ""})
-	turns.refuse(newKey, c.now)
-	refuseCanary := func() {
-		for _, n := range c.events(events.WorkNudged) {
-			var p events.WorkLadderPayload
-			_ = json.Unmarshal(n.Payload, &p)
-			if p.SessionID == canary && p.Generation == 9 && n.Ts.Add(time.Second).After(turns.at[newKey]) {
-				turns.refuse(newKey, n.Ts.Add(time.Second))
-			}
-		}
-		refuseAll()
-	}
-	c.run(30*time.Minute, 30*time.Second, refuseCanary)
-	alerts := ladderPayloads(c, events.WorkEscalated)
 	pool := 0
-	for _, a := range alerts {
+	for _, a := range ladderPayloads(c, events.WorkEscalated) {
 		if a.Reason == workladder.AlertProviderRateLimited {
 			pool++
 		}
 	}
-	if pool != 1 || !c.lane.canaries.refusing("claude") {
-		t.Fatalf("alerts %+v; want one provider_rate_limited and the provider refusing", alerts)
+	if pool != 1 {
+		t.Fatalf("%d provider_rate_limited alerts, want 1", pool)
 	}
-	if freshOf(waiting) != 0 {
-		t.Fatalf("the waiting seat was recycled fresh on a refusing pool: its conversation is lost for nothing")
+	waiting := idB
+	if canary == idB {
+		waiting = c.seat
 	}
-	if b, _ := c.work.Get(waitingClaim); b.Status != "in_progress" {
-		t.Fatalf("the waiting seat's claim is %q", b.Status)
+	for _, n := range ladderPayloads(c, events.WorkNudged) {
+		if n.SessionID == waiting && n.Attempt > 1 && !n.Paused {
+			t.Fatalf("the held refused seat got counted nudge %+v", n)
+		}
 	}
-	_ = idB
+	wNudges := 0
+	for _, n := range ladderPayloads(c, events.WorkNudged) {
+		if n.SessionID == idW {
+			if n.Paused {
+				t.Fatalf("the wedged seat, not refused, was paced paused: %+v", n)
+			}
+			wNudges++
+		}
+	}
+	if wNudges < 4 {
+		t.Fatalf("the wedged seat got %d counted nudges in an hour, want the ladder's pace", wNudges)
+	}
+	// The refusal holds for ladderRefusingFor, then the next refused seat
+	// may try its own fresh conversation.
+	c.run(ladderRefusingFor, 30*time.Second, answer)
+	if c.lane.canaries.refusing("claude", c.now) {
+		t.Fatal("the provider is still refusing past ladderRefusingFor")
+	}
+	if b, _ := c.sessions.Get(waiting); b.Metadata["restart_requested"] != "true" && len(ladderPayloads(c, events.WorkRecycleRequested)) < 2 {
+		t.Fatal("the waiting seat never got its own fresh recycle after the refusal ran out")
+	}
 }
 
 // A fresh restart stops a seat whatever is attached to it, so a seat a
 // person is attached to is not recycled fresh; nor is a seat holding another
 // claim that waits on a person, whose conversation a restart would lose.
-// Both are paced as usual.
+// Once refused, both are paced paused (nudged every PausedCap, counting
+// nothing), so neither is drained either.
 func TestWorkLadderFreshRecycleSparesAttachedAndWaitingSeats(t *testing.T) {
 	for name, setup := range map[string]func(*ladderCity){
 		"attached": func(c *ladderCity) { c.sp.SetAttached(ladderSeatName, true) },
@@ -2099,10 +2200,70 @@ func TestWorkLadderFreshRecycleSparesAttachedAndWaitingSeats(t *testing.T) {
 			if v := c.row().Metadata["restart_requested"]; v != "" || len(c.events(events.WorkRecycleRequested)) != 0 {
 				t.Fatalf("restart_requested %q: a fresh restart of a seat it must spare", v)
 			}
-			if len(c.nudgedAt) < 3 {
-				t.Fatalf("nudges %v: want it paced as usual", c.nudgedAt)
+			if want := []time.Duration{workladder.DefaultGrace, workladder.DefaultGrace + workladder.DefaultPausedCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+				t.Fatalf("nudges %v, want %v: the first counted, then paused at PausedCap", c.nudgedAt, want)
+			}
+			for _, n := range ladderPayloads(c, events.WorkNudged) {
+				if n.Attempt > 1 || (n.Attempt == 1 && n.Paused && len(c.nudgedAt) < 2) {
+					t.Fatalf("nudge %+v: after its refusal the seat's nudges count nothing", n)
+				}
 			}
 		})
+	}
+}
+
+// The attach probe answers only for a seat the rule could recycle: one never
+// refused is never probed; and a probe that cannot tell holds the fresh
+// recycle (a person may be attached), pacing the seat paused instead.
+func TestWorkLadderAttachProbe(t *testing.T) {
+	t.Run("not refused, not probed", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("quiet")
+		c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "conv-1"})
+		newLadderTurns().install(c)
+		c.run(30*time.Minute, 30*time.Second, nil)
+		if n := c.sp.CountCalls("IsAttachedWithError", ladderSeatName); n != 0 {
+			t.Fatalf("%d attach probes of a seat its provider never refused", n)
+		}
+	})
+	t.Run("a probe that cannot tell holds", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("refused")
+		c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "conv-1"})
+		c.sp.AttachedErrors[ladderSeatName] = fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable)
+		turns := newLadderTurns()
+		turns.refuse("conv-1", c.now.Add(-time.Hour))
+		turns.install(c)
+		c.run(20*time.Minute, 30*time.Second, turns.refuseNudges(c, true))
+		if v := c.row().Metadata["restart_requested"]; v != "" {
+			t.Fatalf("restart_requested %q on a seat whose attachment cannot be told", v)
+		}
+		if c.sp.CountCalls("IsAttachedWithError", ladderSeatName) == 0 {
+			t.Fatal("the refused seat was never probed")
+		}
+	})
+}
+
+// A quiet seat the ladder does not nudge is read again at least every
+// ladderReadMaxAge: a refusal the activity clock misses is still seen.
+func TestWorkLadderReadingAges(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("escalated, nudged hourly")
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	c.setRow(map[string]string{
+		beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "conv-1",
+		session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, LastNudge: c.now, Entries: []workladder.Entry{{
+			Key: key, Kind: workladder.KindClaim, Rung: workladder.RungEscalated, Since: c.now.Add(-5 * time.Hour), Attempts: 9, Recycles: 1, Escalated: true, Last: c.now,
+		}}}),
+	})
+	turns := newLadderTurns()
+	turns.install(c)
+	c.run(30*time.Minute, 30*time.Second, nil) // no nudge is due for an hour
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v: the fixture should be between hourly nudges", c.nudgedAt)
+	}
+	if want := int(30*time.Minute/ladderReadMaxAge) - 1; turns.reads < want || turns.reads > want+2 {
+		t.Fatalf("%d reads in 30 minutes of an unmoving seat, want one per %v (~%d)", turns.reads, ladderReadMaxAge, want+1)
 	}
 }
 
@@ -2139,7 +2300,7 @@ func TestRateLimitedTurns(t *testing.T) {
 func TestLadderCanaries(t *testing.T) {
 	now := time.Date(2026, 10, 19, 7, 0, 0, 0, time.UTC)
 	var c ladderCanaries
-	if c.held("glm", "a", now) || c.refusing("glm") {
+	if c.held("glm", "a", now) || c.refusing("glm", now) {
 		t.Fatal("no canary yet holds nothing")
 	}
 	c.recycled("glm", "a", now)
@@ -2151,19 +2312,24 @@ func TestLadderCanaries(t *testing.T) {
 		t.Fatal("a turn served before the canary ended it")
 	}
 	if c.held("glm", "b", now.Add(ladderCanaryFlight)) {
-		t.Fatal("a canary unresolved past its flight still holds")
+		t.Fatal("a canary past its flight still holds")
 	}
 	c.recycled("glm", "a", now)
 	c.refused("glm", "a", now.Add(5*time.Minute))
-	if !c.refusing("glm") || !c.held("glm", "a", now.Add(2*time.Hour)) {
-		t.Fatal("a refusing provider holds every seat, however long")
+	if !c.refusing("glm", now.Add(time.Hour)) || !c.held("glm", "a", now.Add(time.Hour)) || !c.held("glm", "b", now.Add(time.Hour)) {
+		t.Fatal("a refusing provider holds every seat within ladderRefusingFor")
 	}
 	c.recycled("glm", "b", now.Add(10*time.Minute)) // a recycle does not end a refusal
-	if !c.refusing("glm") {
+	if !c.refusing("glm", now.Add(10*time.Minute)) {
 		t.Fatal("a recycle ended the refusal")
 	}
-	c.served("glm", now.Add(6*time.Minute))
-	if c.refusing("glm") || c.held("glm", "b", now.Add(7*time.Minute)) {
+	if c.refusing("glm", now.Add(5*time.Minute+ladderRefusingFor)) || c.held("glm", "b", now.Add(5*time.Minute+ladderRefusingFor)) {
+		t.Fatal("a refusal past ladderRefusingFor still holds")
+	}
+	c.recycled("glm", "a", now.Add(2*time.Hour))
+	c.refused("glm", "a", now.Add(2*time.Hour+5*time.Minute))
+	c.served("glm", now.Add(2*time.Hour+6*time.Minute))
+	if c.refusing("glm", now.Add(2*time.Hour+7*time.Minute)) || c.held("glm", "b", now.Add(2*time.Hour+7*time.Minute)) {
 		t.Fatal("a turn served after the refusal did not end it")
 	}
 }

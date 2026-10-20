@@ -87,8 +87,18 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	// 7. The rate-limit rule. Never while the provider is degraded (WL4):
 	// the provider's health gate owns that outage and alerts on it.
 	degraded := obs.Provider.Degraded
-	if !degraded && obs.RateLimited >= p.RateLimitThreshold && p.rateLimited(&d, obs) {
-		return p.settle(d, prev) // the seat is being restarted: nothing else this pass
+	if !degraded && obs.RateLimited >= p.RateLimitThreshold {
+		if p.rateLimited(&d, obs) {
+			return p.settle(d, prev) // the seat is being restarted: nothing else this pass
+		}
+		// A seat its provider refuses whose fresh recycle must wait is paced
+		// as on a degraded provider (WL4): its nudges are delivered but count
+		// toward nothing, so it never spends its one recycle on a drain that
+		// resumes the refused conversation, nor escalates for a silence it
+		// cannot help.
+		if obs.FreshHeld {
+			degraded = true
+		}
 	}
 
 	// 8. Quiet: act on the due entries, earliest first.

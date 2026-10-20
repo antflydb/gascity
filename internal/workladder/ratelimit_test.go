@@ -334,3 +334,34 @@ func TestDecideRateLimitedTracksTheLastRecycle(t *testing.T) {
 	d = Decide(d.Next, o, pol)
 	wantEffects(t, d, Alert{Key: key("x"), Reason: AlertRateLimitedUnrecycled})
 }
+
+// A refused seat whose fresh recycle is held (another seat is the provider's
+// canary, the provider refused a fresh conversation, a person is attached)
+// is paced as degraded: paused nudges that count toward nothing, so it never
+// spends its one recycle on a drain that resumes the refused conversation,
+// and never escalates for silence it cannot help (re-review R2).
+func TestDecideRateLimitedHeldSeatIsPacedPaused(t *testing.T) {
+	now := t0.Add(5 * time.Hour)
+	for name, e := range map[string]Entry{
+		"at the drain threshold": {Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 6, Last: t0},
+		"below it":               {Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := rateLimited(startedBy1(quiet(now, 1, claim("x")), "x", SrcAgent), 3, t0.Add(time.Second))
+			o.FreshHeld = true
+			d := Decide(rec(1, e), o, p)
+			wantEffects(t, d, Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: e.Attempts, Paused: true})
+			if got := entry(t, d, "x"); got.Attempts != e.Attempts || got.Recycles != 0 || got.Paused != 1 {
+				t.Fatalf("entry %+v, want a paused nudge that counts nothing", got)
+			}
+			if got, want := p.dueAt(entry(t, d, "x"), true), now.Add(DefaultPausedCap); !got.Equal(want) {
+				t.Fatalf("next due %v, want PausedCap", got)
+			}
+		})
+	}
+	// Refused once only: not yet the rule's, so not held either.
+	o := rateLimited(startedBy1(quiet(now, 1, claim("x")), "x", SrcAgent), 1, t0.Add(time.Second))
+	o.FreshHeld = true
+	d := Decide(rec(1, Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0}), o, p)
+	wantEffects(t, d, Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 3})
+}
