@@ -134,6 +134,10 @@ type Observation struct {
 	// ladder first sees it recycle nothing (WL8).
 	RateLimited   int
 	RateLimitedAt time.Time
+	// ServedAt is when the seat's newest completed turn ended: the provider
+	// answered it, positive evidence of service. Zero when its newest ended
+	// turn did not complete, or its turns were not read.
+	ServedAt time.Time
 	// FreshHold holds the rate-limit rule's fresh recycle back, by the
 	// caller's evidence, and says how the claims it holds are paced.
 	FreshHold FreshHold
@@ -239,9 +243,10 @@ const (
 	// the lane.
 	AlertRateLimitedUnrecycled = "rate_limited_unrecycled"
 	// AlertRateLimitedAgain: the provider refuses the claim's seat with a
-	// rate limit again, long (more than Cap) after its one recycle gave it a
-	// fresh conversation: no evidence about the provider's pool, only that
-	// this claim is stuck again. A human must reset the seat or reroute.
+	// rate limit again after its one recycle gave it a fresh conversation
+	// the provider served, or long (more than Cap) after that recycle: no
+	// evidence about the provider's pool, only that this claim is stuck
+	// again. A human must reset the seat or reroute.
 	AlertRateLimitedAgain = "rate_limited_again"
 )
 
@@ -297,6 +302,10 @@ type Entry struct {
 	// FreshRecycled: the entry's last recycle restarted its seat to a fresh
 	// conversation (the rate-limit rule's), not a drain that resumes it.
 	FreshRecycled bool
+	// FreshServed: the provider served that fresh conversation (a turn of
+	// the seat completed after the recycle). A refusal of it afterwards says
+	// nothing about the provider refusing fresh conversations.
+	FreshServed bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

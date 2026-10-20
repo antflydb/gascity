@@ -315,7 +315,12 @@ func TestCodecKeepsTheRateLimitFields(t *testing.T) {
 	if !got.Entries[0].RateLimitAlerted || !got.Entries[0].FreshRecycled {
 		t.Fatalf("decoded %+v lost the rate-limit fields", got.Entries[0])
 	}
-	for _, mut := range []func(*Entry){func(e *Entry) { e.RateLimitAlerted = false }, func(e *Entry) { e.FreshRecycled = false }} {
+	r.Entries[0].FreshServed = true
+	got, err = DecodeLadder(EncodeLadder(r))
+	if err != nil || !got.Entries[0].FreshServed {
+		t.Fatalf("decoded %+v (%v) lost fresh_served", got.Entries, err)
+	}
+	for _, mut := range []func(*Entry){func(e *Entry) { e.RateLimitAlerted = false }, func(e *Entry) { e.FreshRecycled = false }, func(e *Entry) { e.FreshServed = false }} {
 		o := Record{V: 1, Gen: 3, Entries: []Entry{r.Entries[0]}}
 		mut(&o.Entries[0])
 		if sameRecord(r, o) {
@@ -429,5 +434,37 @@ func TestDecideRateLimitedAgainLongAfterItsFreshRecycle(t *testing.T) {
 				t.Fatalf("entry %+v, want alerted once and escalated", got)
 			}
 		})
+	}
+}
+
+// A fresh conversation the provider served (a completed turn after the
+// fresh recycle) and refused later says nothing about fresh conversations
+// being refused: rate_limited_again, which holds no other seat, however
+// soon (round-5 review S1). The mark is sticky: once served, always again.
+func TestDecideRateLimitedFreshConversationServedThenRefused(t *testing.T) {
+	now := t0.Add(30 * time.Hour)
+	recycled := now.Add(-10 * time.Minute)
+	e := Entry{
+		Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: recycled, Attempts: 1, Last: now.Add(-time.Minute),
+		Recycles: 1, FreshRecycled: true, RecycleAt: recycled,
+	}
+	// The fresh conversation completes a turn: the mark is recorded, whatever
+	// else the pass does.
+	served := startedBy1(quiet(now.Add(-5*time.Minute), 2, claim("x")), "x", SrcAgent)
+	served.Quiet = Quiet{State: NotQuiet, Reason: "working"}
+	served.ServedAt = recycled.Add(3 * time.Minute)
+	d := Decide(rec(2, e), served, p)
+	if got := entry(t, d, "x"); !got.FreshServed || !d.Changed {
+		t.Fatalf("entry %+v changed %v: want the served mark recorded", got, d.Changed)
+	}
+	// Refused later, within Cap of the recycle: not the pool.
+	o := rateLimited(startedBy1(quiet(now, 2, claim("x")), "x", SrcAgent), 2, now.Add(-time.Minute+time.Second))
+	d = Decide(d.Next, o, p)
+	wantEffects(t, d, Alert{Key: key("x"), Reason: AlertRateLimitedAgain})
+	// A turn served before the recycle is not the fresh conversation's.
+	before := startedBy1(quiet(now, 2, claim("x")), "x", SrcAgent)
+	before.ServedAt = recycled.Add(-time.Minute)
+	if got := entry(t, Decide(rec(2, e), before, p), "x"); got.FreshServed {
+		t.Fatalf("entry %+v: a turn served before the fresh recycle marked it served", got)
 	}
 }

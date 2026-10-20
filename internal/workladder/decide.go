@@ -56,6 +56,9 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 		}
 		e = p.progressReset(e, obs)
+		if e.FreshRecycled && !e.FreshServed && obs.ServedAt.After(e.RecycleAt) {
+			e.FreshServed = true // its fresh conversation was served
+		}
 		entries = append(entries, e)
 	}
 	next := Record{V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now), RecycledGen: prev.RecycledGen}
@@ -187,7 +190,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 			nudge(false)
 		case e.Recycles < p.MaxRecycles:
-			e.Recycles, e.FreshRecycled = e.Recycles+1, false
+			e.Recycles, e.FreshRecycled, e.FreshServed = e.Recycles+1, false, false
 			e.RecycleAt, e.Last, d.Next.RecycledGen = now, now, obs.Gen
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true}, Alert{Key: e.Key, Reason: AlertStartedRecycled})
 		default:
@@ -242,18 +245,19 @@ func (p Policy) rateLimited(d *Decision, obs Observation) (recycled bool, queued
 			case FreshHoldStanding:
 				continue // paced as ever: its silence reaches the drain and the alerts
 			}
-			e.Recycles, e.FreshRecycled = e.Recycles+1, true
+			e.Recycles, e.FreshRecycled, e.FreshServed = e.Recycles+1, true, false
 			e.RecycleAt, e.Last, d.Next.RecycledGen = obs.Now, obs.Now, obs.Gen
 			recycled = true
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true, Fresh: true}, Alert{Key: e.Key, Reason: AlertRateLimitedRecycled})
 		case !e.RateLimitAlerted && d.Next.RecycledGen != obs.Gen:
-			// Only a fresh conversation refused soon after its restart says
-			// the provider's pool refuses fresh conversations.
+			// Only a fresh conversation refused soon after its restart, and
+			// never served, says the provider's pool refuses fresh
+			// conversations.
 			reason := AlertProviderRateLimited
 			switch {
 			case !e.FreshRecycled:
 				reason = AlertRateLimitedUnrecycled
-			case obs.Now.Sub(e.RecycleAt) > p.Cap:
+			case e.FreshServed || obs.Now.Sub(e.RecycleAt) > p.Cap:
 				reason = AlertRateLimitedAgain
 			}
 			e.RateLimitAlerted, e.Rung, e.Escalated = true, RungEscalated, true
@@ -339,7 +343,7 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || x.RateLimitAlerted != y.RateLimitAlerted || x.FreshRecycled != y.FreshRecycled ||
+			x.Refused != y.Refused || x.RateLimitAlerted != y.RateLimitAlerted || x.FreshRecycled != y.FreshRecycled || x.FreshServed != y.FreshServed ||
 			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}

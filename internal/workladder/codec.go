@@ -84,6 +84,7 @@ type wireEntry struct {
 	// the same on a build that predates it.
 	RateLimitAlerted bool `json:"rate_limit_alerted,omitempty"`
 	FreshRecycled    bool `json:"fresh_recycled,omitempty"`
+	FreshServed      bool `json:"fresh_served,omitempty"`
 }
 
 type wireRelease struct {
@@ -124,7 +125,7 @@ func EncodeLadder(r Record) string {
 			Since: fmtTime(e.Since), Attempts: e.Attempts, Paused: e.Paused, Last: fmtTime(e.Last),
 			Next: fmtTime(e.Next), Recycles: e.Recycles, Escalated: e.Escalated, Seed: seed,
 			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased, Refused: e.Refused,
-			RateLimitAlerted: e.RateLimitAlerted, FreshRecycled: e.FreshRecycled,
+			RateLimitAlerted: e.RateLimitAlerted, FreshRecycled: e.FreshRecycled, FreshServed: e.FreshServed,
 		})
 	}
 	if r.Release != nil {
@@ -164,7 +165,7 @@ func DecodeLadder(raw string) (Record, error) {
 		e := Entry{
 			Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles,
 			Escalated: we.Escalated, Unreleased: we.Unreleased, Refused: we.Refused, RateLimitAlerted: we.RateLimitAlerted,
-			FreshRecycled: we.FreshRecycled,
+			FreshRecycled: we.FreshRecycled, FreshServed: we.FreshServed,
 		}
 		if e.Key.Bead == "" {
 			return bad("entry %d: empty bead", i)

@@ -157,6 +157,9 @@ func (s *sim) step() Observation {
 	if flip(5) {
 		s.obs.FreshHold = FreshHold(s.rng.IntN(3))
 	}
+	if flip(6) { // now and then the provider answers a turn
+		s.obs.ServedAt = s.now.Add(-time.Duration(s.rng.IntN(int(maxStep))))
+	}
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
 		s.activity = s.now.Add(-time.Duration(s.rng.IntN(120)) * time.Second)
@@ -379,7 +382,7 @@ func runSequence(seed uint64) error {
 						return fail("a rate-limit alert for %v raised %d times in its life", a.Key, poolAlerts[a.Key])
 					}
 					e, _ := entryOf(d.Next, a.Key)
-					recent := e.FreshRecycled && o.Now.Sub(e.RecycleAt) <= DefaultCap
+					recent := e.FreshRecycled && !e.FreshServed && o.Now.Sub(e.RecycleAt) <= DefaultCap
 					if (a.Reason == AlertProviderRateLimited) != recent || (a.Reason == AlertRateLimitedUnrecycled) == e.FreshRecycled {
 						return fail("%s for %v whose last recycle was fresh=%v %v ago", a.Reason, a.Key, e.FreshRecycled, o.Now.Sub(e.RecycleAt))
 					}

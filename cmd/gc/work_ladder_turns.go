@@ -77,8 +77,9 @@ type rateLimitReading struct {
 	err error
 	// unknown: this read failed, and the last good reading of the same
 	// conversation, younger than ladderUnknownFor, showed the provider
-	// refusing the seat: whether the ladder's last nudge was refused too
-	// cannot be told, so the seat's claims wait the pass out.
+	// refusing the seat (as often as the rule needs): whether the ladder's
+	// last nudge was refused too cannot be told, so the seat's claims wait
+	// the pass out.
 	unknown bool
 }
 
@@ -173,7 +174,7 @@ func (c *ladderRateLimits) orGood(id string, r rateLimitReading, now time.Time) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	g, ok := c.good[id]
-	return rateLimitReading{unknown: ok && g.gen == r.gen && g.key == r.key && g.refused > 0 && now.Sub(g.readAt) < ladderUnknownFor}
+	return rateLimitReading{unknown: ok && g.gen == r.gen && g.key == r.key && g.refused >= workladder.DefaultRateLimitThreshold && now.Sub(g.readAt) < ladderUnknownFor}
 }
 
 // firstFailure records that row's turns could not be read (err), and

@@ -489,8 +489,10 @@ func (p *ladderPass) rateLimits(row beads.Bead, info session.Info, rt ladderRunt
 		return rateLimitReading{}
 	}
 	r, err := p.l.rateLimits.read(p.ctx, p.turns, row, rt.activity, lastNudge, p.now)
-	// A family that records no turns is not the rule's: nothing to report.
-	if err != nil && !errors.Is(err, runtime.ErrTurnIdentityUnsupported) && p.l.rateLimits.firstFailure(row, err) {
+	// A family that records no turns is not the rule's, and a canary just
+	// restarted may not have written its transcript yet: nothing to report.
+	quietMiss := errors.Is(err, runtime.ErrTurnIdentityUnsupported) || (canary && errors.Is(err, runtime.ErrRuntimeUnavailable))
+	if err != nil && !quietMiss && p.l.rateLimits.firstFailure(row, err) {
 		fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its turns for the rate-limit rule: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
 	}
 	if !r.servedAt.IsZero() {
@@ -551,7 +553,7 @@ func (p *ladderPass) observe(info session.Info, meta map[string]string, prev wor
 	}
 	obs.Started, obs.StartedRead = ladderStarted(meta, prev, gen, targets)
 	if rt.rateLimit.in(meta) { // a reading of another generation or conversation is not this row's
-		obs.RateLimited, obs.RateLimitedAt = rt.rateLimit.refused, rt.rateLimit.refusedAt
+		obs.RateLimited, obs.RateLimitedAt, obs.ServedAt = rt.rateLimit.refused, rt.rateLimit.refusedAt, rt.rateLimit.servedAt
 	}
 	obs.FreshHold = rt.freshHold
 	return obs

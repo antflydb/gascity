@@ -306,7 +306,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still reaches the drain and the alerts. If a claim's one recycle already
   went to a drain that
   resumed the same conversation, `rate_limited_unrecycled` says so instead. A claim refused again long (more
-  than an hour) after its fresh recycle gets `rate_limited_again`, which
+  than an hour) after its fresh recycle, or after the provider served its
+  fresh conversation, gets `rate_limited_again`, which
   says nothing about the pool and holds no other seat. Only a completed turn
   counts as the provider serving a seat; a failed read of a refused seat's
   turns has its claims wait up to 10 minutes rather than count a nudge.

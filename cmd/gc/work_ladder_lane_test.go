@@ -2469,6 +2469,109 @@ func TestWorkLadderFailingReadsDoNotSilence(t *testing.T) {
 	}
 }
 
+// Round-5 S1: a canary whose fresh conversation the provider served (a
+// completed turn) and refused later, within the hour, raises
+// rate_limited_again, not the pool alert: it holds no other seat, and the
+// provider's other refused seat gets its own fresh conversation at once.
+func TestWorkLadderServedFreshConversationRefusedLaterIsNotThePool(t *testing.T) {
+	c := newLadderCity(t)
+	idA := c.claim("seat a's step")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: idA, "session_key": "conv-" + ladderSeatName})
+	turns := newLadderTurns()
+	turns.refuse("conv-"+ladderSeatName, c.now.Add(-time.Hour))
+	turns.install(c)
+	answer := refusingSeats(c, turns, map[string]string{ladderSeatName: c.seat}, map[string]bool{})
+	c.run(10*time.Minute, 30*time.Second, func() {
+		answer()
+		if c.row().Metadata["restart_requested"] == "true" {
+			restartFresh(c, c.seat, "fresh-a")
+			turns.serve("fresh-a", c.now.Add(30*time.Second)) // served: a completed turn
+			c.sp.SetActivity(ladderSeatName, c.now)
+		}
+	})
+	if c.row().Metadata["session_key"] != "fresh-a" {
+		t.Fatalf("seat a was not recycled fresh: %v", c.row().Metadata)
+	}
+	// Then the provider refuses the fresh conversation too, within the hour.
+	turns.refuse("fresh-a", c.now)
+	turns.refused["fresh-a"] = 1
+	c.sp.SetActivity(ladderSeatName, c.now.Add(-2*time.Minute))
+	c.run(15*time.Minute, 30*time.Second, answer)
+	var reasons []string
+	for _, a := range ladderPayloads(c, events.WorkEscalated) {
+		reasons = append(reasons, a.Reason)
+	}
+	if fmt.Sprint(reasons) != fmt.Sprint([]string{workladder.AlertRateLimitedRecycled, workladder.AlertRateLimitedAgain}) {
+		t.Fatalf("alerts %v, want the fresh recycle's, then rate_limited_again", reasons)
+	}
+	if c.lane.canaries.refusing("claude", c.now) {
+		t.Fatal("a served fresh conversation refused later latched the provider")
+	}
+}
+
+// A failed read after the seat moved to a new conversation holds nothing on
+// the old conversation's refusals.
+func TestWorkLadderFailedReadOfANewConversationHoldsNothing(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("restarted")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "conv-1"})
+	turns := newLadderTurns()
+	turns.refuse("conv-1", c.now.Add(-time.Hour))
+	turns.refuse("conv-1", c.now.Add(-time.Minute))
+	turns.install(c)
+	c.pass() // a good reading of conv-1: refused twice
+	c.setRow(map[string]string{"session_key": "conv-2"})
+	turns.err = fmt.Errorf("not written yet: %w", runtime.ErrRuntimeUnavailable)
+	c.now = c.now.Add(2 * time.Minute)
+	c.pass()
+	if len(c.nudgedAt) != 1 {
+		t.Fatalf("nudges %v: the new conversation's claim was held on the old conversation's refusals", c.nudgedAt)
+	}
+}
+
+// A failed read holds a seat's claims only when its last good reading met
+// the rule's threshold: one refusal is not the rule's.
+func TestWorkLadderFailedReadAfterOneRefusalHoldsNothing(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("refused once")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "conv-1"})
+	turns := newLadderTurns()
+	turns.refuse("conv-1", c.now.Add(-time.Minute))
+	turns.install(c)
+	c.pass()
+	turns.err = fmt.Errorf("busy: %w", runtime.ErrRuntimeUnavailable)
+	c.now = c.now.Add(ladderReadMaxAge + time.Minute) // the good reading aged out of the cache, not of ladderUnknownFor
+	c.pass()
+	if turns.reads != 2 {
+		t.Fatalf("%d reads: the failed read did not happen", turns.reads)
+	}
+	if len(c.nudgedAt) != 1 {
+		t.Fatalf("nudges %v: one refusal held the seat's claims on a failed read", c.nudgedAt)
+	}
+}
+
+// A canary just restarted may not have written its transcript yet: its
+// failed read is not reported.
+func TestWorkLadderNewCanaryUnreadIsQuiet(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("just restarted fresh")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "session_key": "fresh-1"})
+	c.lane.canaries.recycled("claude", c.seat, 6, c.now) // recycled from generation 6; the row is at 7
+	var stderr strings.Builder
+	c.lane.stderr = &stderr
+	turns := newLadderTurns()
+	turns.err = fmt.Errorf("no single transcript of conversation fresh-1 found: %w", runtime.ErrRuntimeUnavailable)
+	turns.install(c)
+	c.sp.SetActivity(ladderSeatName, c.now) // working: read as the canary
+	c.pass()
+	if turns.reads == 0 {
+		t.Fatal("the in-flight canary was not read while it works")
+	}
+	if strings.Contains(stderr.String(), "reading its turns") {
+		t.Fatalf("a just-restarted canary's missing transcript was reported:\n%s", stderr.String())
+	}
+}
+
 // Round-4 M2: a claim recycled fresh a day ago, refused again now, says
 // nothing about the provider's pool: rate_limited_again, and no hold on the
 // provider's other seats.

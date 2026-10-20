@@ -46,6 +46,9 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/escalated, recycled fresh just now", ent(KindClaim, RungEscalated, 9, func(e *Entry) {
 			e.Recycles, e.Escalated, e.FreshRecycled, e.RecycleAt = 1, true, true, now.Add(-5*time.Minute)
 		})},
+		{"claim/escalated, recycled fresh just now, served since", ent(KindClaim, RungEscalated, 9, func(e *Entry) {
+			e.Recycles, e.Escalated, e.FreshRecycled, e.FreshServed, e.RecycleAt = 1, true, true, true, now.Add(-5*time.Minute)
+		})},
 		{"claim/escalated, rate limit alerted", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.RateLimitAlerted = 1, true, true })},
 	}
 	type col struct {
