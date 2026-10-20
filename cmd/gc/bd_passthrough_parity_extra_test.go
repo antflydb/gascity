@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -95,9 +96,16 @@ func makeBundledCacheUnhealable(t *testing.T, cacheDir string) {
 	})
 }
 
+// unlinkedCacheEntry matches the entry in an "unlinkat <cache>/<entry>: <reason>"
+// clause: the cache directory is group 1, the entry is everything up to the
+// ": " that starts the reason.
+var unlinkedCacheEntry = regexp.MustCompile(`(unlinkat \$GC_HOME/cache/repos/[^/]+)/[^:\n]*: `)
+
 // withoutUnlinkedCacheEntry returns msg with the entry os.RemoveAll named
 // first dropped from an "unlinkat <cache>/<entry>: <reason>" clause.
-func withoutUnlinkedCacheEntry(msg string) string { return msg }
+func withoutUnlinkedCacheEntry(msg string) string {
+	return unlinkedCacheEntry.ReplaceAllString(msg, "${1}/<entry>: ")
+}
 
 // TestUnlinkedCacheEntryIsNotPartOfTheErrorIdentity pins the comparison the
 // two unhealable-cache parity tests rely on. os.RemoveAll reports the first
@@ -158,7 +166,7 @@ func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
 	if !strings.Contains(stderr, "$GC_HOME/cache/repos/") {
 		t.Fatalf("the error does not name the cache under GC_HOME: %q", stderr)
 	}
-	if code != legacyCode || stderr != legacyStderr {
+	if code != legacyCode || withoutUnlinkedCacheEntry(stderr) != withoutUnlinkedCacheEntry(legacyStderr) {
 		t.Fatalf("unhealable cache differs from the full load:\n legacy:  %d %q\n trimmed: %d %q", legacyCode, legacyStderr, code, stderr)
 	}
 	if got.fallbacks != 1 || got.passes != 1 {
@@ -339,6 +347,8 @@ func TestGcBdPassthroughTrimsKeepRoutingMore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			legacy := runBdParityArm(t, true, tc.opts, tc.setup)
 			trimmed := runBdParityArm(t, false, tc.opts, tc.setup)
+			legacy.stderr = withoutUnlinkedCacheEntry(legacy.stderr)
+			trimmed.stderr = withoutUnlinkedCacheEntry(trimmed.stderr)
 			if legacy != trimmed {
 				t.Fatalf("routing changed:\nlegacy:  code=%d\n stdout=%q\n stderr=%q\n bd=%s\ntrimmed: code=%d\n stdout=%q\n stderr=%q\n bd=%s",
 					legacy.code, legacy.stdout, legacy.stderr, legacy.bd,
