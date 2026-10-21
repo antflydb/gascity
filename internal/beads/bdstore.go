@@ -3128,13 +3128,34 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierWisps
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list wisps tier", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+}
 
-	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
+// tierPairResult is what listTierPair read from each tier.
+type tierPairResult struct {
+	list         []Bead
+	listErr      error
+	ephemeral    []Bead
+	ephemeralErr error
+}
+
+// listTierPair reads one two-tier List's two halves at once: listQ through
+// bd list and ephemeralQ through bd query. They are independent reads, each its
+// own bd subprocess, so read one after the other a two-tier List costs every
+// caller two bd round trips in series instead of one (ga-3js1ayv).
+func (s *BdStore) listTierPair(listQ, ephemeralQ ListQuery) tierPairResult {
+	var r tierPairResult
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ephemeral, r.ephemeralErr = s.listEphemeral(ephemeralQ)
+	}()
+	r.list, r.listErr = s.listViaBDList(listQ)
+	<-done
+	return r
 }
 
 // listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
@@ -3343,13 +3364,10 @@ func isBareBdQueryValue(value string) bool {
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierBoth
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
-
-	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list both tiers", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
 }
 
 func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {

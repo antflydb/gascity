@@ -61,7 +61,7 @@ type gcSeatHookShape struct {
 func TestGcSeatHookLatencyBudget(t *testing.T) {
 	requireDoltIntegration(t)
 
-	env := newIsolatedCommandEnv(t, true)
+	env := newIsolatedCommandEnvDirectBD(t)
 	root, err := os.MkdirTemp("/tmp", "gsh-*")
 	if err != nil {
 		t.Fatalf("mktemp: %v", err)
