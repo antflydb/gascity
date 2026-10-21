@@ -255,7 +255,8 @@ func TestStartRuntimeOnlyDefersWhenOrphanScanNeverFinishes(t *testing.T) {
 		defer sp.unwedge()
 		mgr, info := seedSuspendedTargetWithProvider(t, sp)
 
-		err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		by := runtimeOnlyActor(t, mgr, info.ID)
+		err := mgr.StartRuntimeOnly(context.Background(), by, info.ID, mintUnder(t, mgr, by.Lease, info.ID), BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 
 		assertDeferredByUnfinishedScan(t, sp, err)
 		if !strings.Contains(err.Error(), "pre-start orphan cleanup") {

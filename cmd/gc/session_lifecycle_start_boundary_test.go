@@ -460,12 +460,18 @@ func TestExecutePreparedStartWaveDefersUnfinishedOrphanScan(t *testing.T) {
 					"state":         "asleep",
 					"last_woke_at":  clk.Now().Format(time.RFC3339),
 					"wake_attempts": "2",
+					// A recorded incarnation: the runtime-only start refuses a row without one
+					// before it ever reaches the orphan scan.
+					"generation":         "1",
+					"continuation_epoch": "1",
+					"instance_token":     "tok-1",
 				},
 			})
 			if err != nil {
 				t.Fatalf("Create session: %v", err)
 			}
 			ctx, build := tc.run()
+			info := sessiontest.SeedBead(t, bead)
 			sp := &startErrProvider{Fake: runtime.NewFake(), build: build}
 			// The runtime-only start runs under the candidate's lease.
 			cityPath := t.TempDir()
@@ -479,9 +485,10 @@ func TestExecutePreparedStartWaveDefersUnfinishedOrphanScan(t *testing.T) {
 				ctx,
 				[]preparedStart{{
 					candidate: startCandidate{
-						info:  sessiontest.SeedBead(t, bead),
+						info:  info,
 						tp:    TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"},
 						lease: lease,
+						inc:   sessionpkg.RecordedIncarnationForTest(info),
 					},
 					cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 				}},
@@ -540,11 +547,17 @@ func TestDefersUnfinishedOrphanScanWhenStartDeadlineEndsIt(t *testing.T) {
 			"state":         "asleep",
 			"last_woke_at":  clk.Now().Format(time.RFC3339),
 			"wake_attempts": "2",
+			// A recorded incarnation: the runtime-only start refuses a row without one
+			// before it ever reaches the orphan scan.
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "tok-1",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Create session: %v", err)
 	}
+	info := sessiontest.SeedBead(t, bead)
 	// The start's own deadline is SHORTER than the scan budget, so the wait ends
 	// on the start context's deadline, not the scan's budget.
 	sp := &ctxStartErrProvider{Fake: runtime.NewFake(), build: func(ctx context.Context) error {
@@ -565,9 +578,10 @@ func TestDefersUnfinishedOrphanScanWhenStartDeadlineEndsIt(t *testing.T) {
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{
-				info:  sessiontest.SeedBead(t, bead),
+				info:  info,
 				tp:    TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"},
 				lease: lease,
+				inc:   sessionpkg.RecordedIncarnationForTest(info),
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		}},
