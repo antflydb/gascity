@@ -86,6 +86,10 @@ type controllerState struct {
 	// reconcile from the next tick on, with no reload: any bd read restarts
 	// the rig's retired proxy.
 	suspendedRigs atomic.Pointer[map[string]bool]
+	// laneHost is the conversation lane host the API's producer routes
+	// reach; nil when no host was started (conversation_lane_api.go).
+	laneHost atomic.Pointer[conversationLaneHost]
+
 	// pendingPoke pokes the city runtime's pending-interaction lane; nil
 	// when the lane is not running (pending_interaction_lane.go).
 	pendingPoke atomic.Pointer[func(sessionID string)]
@@ -3526,6 +3530,21 @@ func (cs *controllerState) Enqueue(keys ...reconcilekey.Key) {
 	}
 	cs.wakeOf().Enqueue(wakeReasonAPI, keys...)
 }
+
+// ResetSessionCircuitBreaker clears a configured named session's respawn
+// circuit breaker after an API kill (api.SessionKillHooks): the clear the
+// controller socket performs for `gc session kill`, in this process.
+func (cs *controllerState) ResetSessionCircuitBreaker(sessionID, identity string) error {
+	return resetSessionCircuitBreakerState(cs.SessionsBeadStore().Store, sessionID, identity, defaultSessionCircuitBreaker())
+}
+
+// RecordSessionKillStop records an API kill's stop metric, as `gc session
+// kill` does (api.SessionKillHooks).
+func (cs *controllerState) RecordSessionKillStop(info session.Info) {
+	recordSessionKillStop(info, nil, cs.Config())
+}
+
+var _ api.SessionKillHooks = (*controllerState)(nil)
 
 // WaitForSessionCommandable waits until the controller has reconciled an async
 // session create into a lifecycle state that can accept normal commands.

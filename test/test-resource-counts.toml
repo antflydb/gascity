@@ -918,6 +918,11 @@ resource = "listener_helper"
 calls = 4
 
 [[count]]
+path = "cmd/gc/op_record_content_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
 path = "cmd/gc/op_record_verbs_matrix_test.go"
 resource = "net_listen"
 calls = 1
@@ -1356,6 +1361,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "examples/bd/dolt/stale_db_close_reason_real_bd_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "examples/bd/dolt/stale_db_formula_test.go"
 resource = "subprocess"
 calls = 11
@@ -1597,7 +1608,7 @@ calls = 10
 [[count]]
 path = "internal/api/handler_sessions_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 8
 
 [[count]]
 path = "internal/api/handler_sessions_test.go"
@@ -2976,6 +2987,36 @@ tagged = true
 path = "test/containerhost/docker_session_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x2_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x6_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x8_test.go"
+resource = "fixed_sleep"
+calls = 2
 tagged = true
 
 [[count]]

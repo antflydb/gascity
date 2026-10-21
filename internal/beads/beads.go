@@ -80,6 +80,17 @@ var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 // TierAvailability.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
 
+// ErrWriteUnconfirmed marks a write the store reported committed whose
+// read-back did not show it before the store stopped waiting. It is not a
+// failed write: the write may well have landed and become visible a moment
+// later, so the caller must neither report it as failed nor replay it blindly.
+// Re-read the row to learn the outcome. When it wraps the error of a
+// multi-write operation (a staged BdStore Tx), the operation may also be
+// incomplete: the writes after the unconfirmed one did not run. Its producer
+// is BdStore's staged Tx apply, which reads each update back before the next
+// write (waitForUpdateProjection). Check with errors.Is.
+var ErrWriteUnconfirmed = errors.New("bead write committed but its read-back was not confirmed")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
@@ -269,6 +280,42 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+	// UnsetMetadata removes these metadata keys. It is bd's
+	// `update --unset-metadata` and has bd's semantics: it is applied AFTER
+	// every Metadata set (so a key named in both ends up absent), and removing
+	// a key the bead does not carry is a no-op rather than an error.
+	//
+	// It is served by the unconditional Update of MemStore (and FileStore),
+	// SQLiteStore (and its Tx), BdStore (and the ProxiedStore and
+	// DoltliteReadStore that delegate to it), and a CachingStore over any of
+	// them. Every revision-guarded path refuses it
+	// (validateConditionalUpdateOpts). A write path that cannot remove a key
+	// (NativeDoltStore, the BdStore Tx, the exec protocol) refuses it with
+	// ErrUnsetMetadataUnsupported rather than silently keeping the key.
+	UnsetMetadata []string
+}
+
+// ErrUnsetMetadataUnsupported reports an UpdateOpts.UnsetMetadata write on a
+// path that cannot remove a metadata key. It is a refusal, never a partial
+// write: the whole update is rejected before anything is applied.
+var ErrUnsetMetadataUnsupported = errors.New("unsetting metadata keys is not supported on this write path")
+
+// refuseUnsetMetadata is the fail-closed guard for write paths that do not
+// implement UpdateOpts.UnsetMetadata. A path that ignored the field would
+// report success while the key stayed set.
+func refuseUnsetMetadata(path string, opts UpdateOpts) error {
+	if len(opts.UnsetMetadata) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", path, ErrUnsetMetadataUnsupported)
+}
+
+// unsetMetadataKeys deletes opts.UnsetMetadata from metadata in place. It runs
+// after the Metadata sets, matching bd's set-then-unset order.
+func unsetMetadataKeys(metadata map[string]string, keys []string) {
+	for _, key := range keys {
+		delete(metadata, key)
+	}
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
@@ -515,6 +562,8 @@ func validateConditionalUpdateOpts(o UpdateOpts, labelsGuarded bool) error {
 	switch {
 	case o.ParentID != nil:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
+	case len(o.UnsetMetadata) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "unset_metadata"}
 	case !labelsGuarded && len(o.Labels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
 	case !labelsGuarded && len(o.RemoveLabels) > 0:
