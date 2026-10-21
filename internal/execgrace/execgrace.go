@@ -177,12 +177,13 @@ type Monitor struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	idle time.Duration
-	last atomic.Int64 // UnixNano of the most recent output (or start)
+	clock Clock
+	idle  time.Duration
+	last  atomic.Int64 // UnixNano of the most recent output (or start)
 
 	mu        sync.Mutex
-	idleTimer *time.Timer
-	ceilTimer *time.Timer
+	idleTimer Timer
+	ceilTimer Timer
 	stopped   bool
 }
 
@@ -195,20 +196,7 @@ type Monitor struct {
 // Callers must arrange for [Monitor.Stop] to run once the command finishes
 // (typically via defer) to release the Monitor's timers.
 func NewMonitor(parent context.Context, idle, ceiling time.Duration) *Monitor {
-	m := &Monitor{idle: idle}
-	if idle <= 0 && ceiling <= 0 {
-		m.ctx = parent
-		return m
-	}
-	m.ctx, m.cancel = context.WithCancelCause(parent)
-	m.last.Store(time.Now().UnixNano())
-	if idle > 0 {
-		m.idleTimer = time.AfterFunc(idle, m.checkIdle)
-	}
-	if ceiling > 0 {
-		m.ceilTimer = time.AfterFunc(ceiling, func() { m.cancel(ErrCeiling) })
-	}
-	return m
+	return NewMonitorWithClock(parent, idle, ceiling, nil)
 }
 
 // Clock is the time source a [Monitor] reads. The zero choice, nil, means the
@@ -228,10 +216,33 @@ type Timer interface {
 	Reset(d time.Duration) bool
 }
 
+// realClock is the [Clock] over the [time] package.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+func (realClock) AfterFunc(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) }
+
 // NewMonitorWithClock is [NewMonitor] reading time from clk; a nil clk means
 // the real clock.
-func NewMonitorWithClock(parent context.Context, idle, ceiling time.Duration, _ Clock) *Monitor {
-	return NewMonitor(parent, idle, ceiling)
+func NewMonitorWithClock(parent context.Context, idle, ceiling time.Duration, clk Clock) *Monitor {
+	if clk == nil {
+		clk = realClock{}
+	}
+	m := &Monitor{clock: clk, idle: idle}
+	if idle <= 0 && ceiling <= 0 {
+		m.ctx = parent
+		return m
+	}
+	m.ctx, m.cancel = context.WithCancelCause(parent)
+	m.last.Store(clk.Now().UnixNano())
+	if idle > 0 {
+		m.idleTimer = clk.AfterFunc(idle, m.checkIdle)
+	}
+	if ceiling > 0 {
+		m.ceilTimer = clk.AfterFunc(ceiling, func() { m.cancel(ErrCeiling) })
+	}
+	return m
 }
 
 // Context returns the monitored context. Pass it to
@@ -284,7 +295,7 @@ func (m *Monitor) Stop() {
 // timer was armed re-arms it for the remainder; true silence cancels with
 // [ErrIdle].
 func (m *Monitor) checkIdle() {
-	since := time.Since(time.Unix(0, m.last.Load()))
+	since := m.clock.Now().Sub(time.Unix(0, m.last.Load()))
 	if since >= m.idle {
 		m.cancel(ErrIdle)
 		return
@@ -303,6 +314,6 @@ type activityWriter struct {
 }
 
 func (w *activityWriter) Write(p []byte) (int, error) {
-	w.m.last.Store(time.Now().UnixNano())
+	w.m.last.Store(w.m.clock.Now().UnixNano())
 	return w.inner.Write(p)
 }
