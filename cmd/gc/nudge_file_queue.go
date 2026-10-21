@@ -1249,3 +1249,191 @@ func (q *fileNudgeQueue) DispatchSkips() (map[string]int64, error) {
 func (q *fileNudgeQueue) RepinClaims(ids []string, batch string) error {
 	return pinQueuedNudgeClaims(q.cityPath, ids, batch)
 }
+
+// migrationCandidates reads the queue without the lock and returns the live
+// items the queue-mode shim may move out of it, grouped into whole delivery
+// batches: pending items and in-flight items whose lease has run out. A batch
+// any live member of which holds an unexpired lease waits. Dead letters, and
+// items past their deliver-by deadline, are not live and never move.
+func (q *fileNudgeQueue) migrationCandidates(now time.Time) (nudgeMigrationCandidates, error) {
+	state, err := nudgequeue.LoadState(q.cityPath)
+	if err != nil {
+		return nudgeMigrationCandidates{}, err
+	}
+	live := make([]nudgequeue.Item, 0, len(state.Pending)+len(state.InFlight))
+	for _, bucket := range [][]nudgequeue.Item{state.Pending, state.InFlight} {
+		for _, item := range bucket {
+			if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
+				continue
+			}
+			live = append(live, item)
+		}
+	}
+	return groupNudgeMigrationBatches(live, func(item nudgequeue.Item) bool {
+		return nudgeLeaseHeld(item, now)
+	}), nil
+}
+
+// removeMigrated removes, under the lock, one batch the shim moved, whole or
+// not at all. Each item is matched by (ID, CreatedAt), as WithdrawWaitNudges
+// matches, in pending or in flight; an item an old binary re-added meanwhile
+// under the same id with a new creation time is a different item and stays.
+// If any matched item holds an unexpired lease (a process still writing this
+// queue claimed it meanwhile), nothing is removed, so the queue never keeps
+// only part of a pinned batch. It returns the items it left in place: all of
+// them when one was claimed, or else the ones already gone.
+func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) ([]nudgequeue.Item, error) {
+	want := make(map[nudgeMigrationKey]bool, len(items))
+	for _, item := range items {
+		want[nudgeMigrationKeyOf(item)] = true
+	}
+	removed := make(map[nudgeMigrationKey]bool, len(items))
+	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+			for _, item := range bucket {
+				if want[nudgeMigrationKeyOf(item)] && nudgeLeaseHeld(item, now) {
+					return nil
+				}
+			}
+		}
+		take := func(bucket []queuedNudge) []queuedNudge {
+			filtered := bucket[:0]
+			for _, item := range bucket {
+				key := nudgeMigrationKeyOf(item)
+				if want[key] {
+					removed[key] = true
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			return filtered
+		}
+		state.Pending = take(state.Pending)
+		state.InFlight = take(state.InFlight)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var kept []nudgequeue.Item
+	for _, item := range items {
+		if !removed[nudgeMigrationKeyOf(item)] {
+			kept = append(kept, item)
+		}
+	}
+	return kept, nil
+}
+
+// importMigrated appends, under the lock, the items the shim moves into the
+// queue, as pending, with the claim and the delivery batch cleared and every
+// other field kept (nudgeItemForMove) but BeadID. This queue's wait readers and
+// Ack read an item's gc:nudge shadow, which a beads-born item never had and a
+// beads-mode sweep may have closed, so each appended item gets an open shadow,
+// saved as Enqueue saves one, and BeadID names it. With the zero store it opens
+// its own, and fails if none opens: an item queued without its shadow is one
+// the wait readers never see. The shadows it created are rolled back if the
+// queue write fails.
+//
+// Each item is matched by (ID, CreatedAt), as removeMigrated matches. One the
+// queue already holds live is skipped, shadow and all, so a re-run imports
+// nothing twice. One it holds as a dead letter is skipped and reported Dead.
+// An id it holds under another creation time names a different nudge, and the
+// queue keeps one item per id, so that item is skipped and reported Collided.
+func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) (nudgeImportSkips, error) {
+	store := q.store
+	if store.Store == nil {
+		opened, handle, err := openNudgeBeadStoreOwned(q.cityPath)
+		if err != nil {
+			return nudgeImportSkips{}, err
+		}
+		defer closeBeadStoreHandle(handle) //nolint:errcheck // best-effort
+		store = opened
+	}
+	var skips nudgeImportSkips
+	var created []string
+	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		skips = nudgeImportSkips{}
+		live, dead := heldNudgeKeys(state)
+		for _, item := range items {
+			key := nudgeMigrationKeyOf(item)
+			switch {
+			case live[key]:
+				continue
+			case dead[key]:
+				skips.Dead = append(skips.Dead, item.ID)
+				continue
+			case queuedNudgeExists(state, item.ID):
+				skips.Collided = append(skips.Collided, item.ID)
+				continue
+			}
+			moved, createdID, err := shadowMovedNudge(store, item)
+			if err != nil {
+				return err
+			}
+			if createdID != "" {
+				created = append(created, createdID)
+			}
+			state.Pending = append(state.Pending, moved)
+		}
+		sortQueuedNudges(state)
+		return nil
+	})
+	if err != nil {
+		return nudgeImportSkips{}, rollbackNudgeShadows(store, created, err)
+	}
+	return skips, nil
+}
+
+// heldNudgeKeys returns the keys of the items state holds live, pending or in
+// flight, and of those it holds as dead letters.
+func heldNudgeKeys(state *nudgeQueueState) (live, dead map[nudgeMigrationKey]bool) {
+	live = make(map[nudgeMigrationKey]bool, len(state.Pending)+len(state.InFlight))
+	for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+		for _, item := range bucket {
+			live[nudgeMigrationKeyOf(item)] = true
+		}
+	}
+	dead = make(map[nudgeMigrationKey]bool, len(state.Dead))
+	for _, item := range state.Dead {
+		dead[nudgeMigrationKeyOf(item)] = true
+	}
+	return live, dead
+}
+
+// shadowMovedNudge is the copy of item importMigrated queues: nudgeItemForMove,
+// with BeadID naming the open shadow Save finds or creates for it. A Save that
+// names no shadow fails, since the copy would point at a shadow that does not
+// exist. It also returns the shadow's id when Save created it, for the
+// rollback.
+func shadowMovedNudge(store beads.NudgesStore, item nudgequeue.Item) (nudgequeue.Item, string, error) {
+	moved := nudgeItemForMove(item)
+	beadID, created, err := ensureQueuedNudgeBead(store, moved)
+	if err != nil {
+		return moved, "", fmt.Errorf("saving the shadow of moved nudge %q: %w", item.ID, err)
+	}
+	if beadID == "" {
+		return moved, "", fmt.Errorf("saving the shadow of moved nudge %q: no nudges store is open", item.ID)
+	}
+	moved.BeadID = beadID
+	if !created {
+		return moved, "", nil
+	}
+	return moved, beadID, nil
+}
+
+// rollbackNudgeShadows closes the shadows created for a queue write that failed
+// with err, through the front door's rollback as Enqueue closes its own, and
+// joins any rollback failure onto err so a leaked open shadow is diagnosable.
+//
+// Like Enqueue's rollback, it runs after the lock is released, which leaves a
+// window open (ga-w68ksk): an Enqueue of the same nudge id in between reuses
+// the open shadow and commits an item whose BeadID names the shadow this then
+// closes.
+func rollbackNudgeShadows(store beads.NudgesStore, beadIDs []string, err error) error {
+	for _, beadID := range beadIDs {
+		if rbErr := nudgeFrontDoor(store).RollbackEnqueue(beadID); rbErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback nudge bead %q: %w", beadID, rbErr))
+		}
+	}
+	return err
+}
