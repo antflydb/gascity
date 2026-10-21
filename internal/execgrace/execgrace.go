@@ -211,6 +211,29 @@ func NewMonitor(parent context.Context, idle, ceiling time.Duration) *Monitor {
 	return m
 }
 
+// Clock is the time source a [Monitor] reads. The zero choice, nil, means the
+// real clock; tests inject their own to drive the idle window deterministically.
+type Clock interface {
+	// Now reports the current time.
+	Now() time.Time
+	// AfterFunc waits d on this clock, then calls f in its own goroutine, as
+	// [time.AfterFunc] does.
+	AfterFunc(d time.Duration, f func()) Timer
+}
+
+// Timer is the part of [time.Timer] a [Monitor] uses; a [*time.Timer]
+// satisfies it.
+type Timer interface {
+	Stop() bool
+	Reset(d time.Duration) bool
+}
+
+// NewMonitorWithClock is [NewMonitor] reading time from clk; a nil clk means
+// the real clock.
+func NewMonitorWithClock(parent context.Context, idle, ceiling time.Duration, _ Clock) *Monitor {
+	return NewMonitor(parent, idle, ceiling)
+}
+
 // Context returns the monitored context. Pass it to
 // [os/exec.CommandContext]. For an inert Monitor this is the parent context
 // itself.
