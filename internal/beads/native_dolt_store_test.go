@@ -270,6 +270,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			if bead.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
+			if bead.SourceStatus != string(tt.upstream) {
+				t.Fatalf("SourceStatus = %q, want bd's %q", bead.SourceStatus, tt.upstream)
+			}
 		})
 	}
 }
@@ -2555,7 +2558,9 @@ type nativeDoltMemStorage struct {
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
-	return &nativeDoltMemStorage{store: NewMemStore()}
+	store := NewMemStore()
+	store.storageOnly = true // the native store above it reports each write
+	return &nativeDoltMemStorage{store: store}
 }
 
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {

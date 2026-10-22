@@ -759,6 +759,14 @@ The step `timeout` applies as a general bound on the check script; a
 `children` wraps each iteration in a scope bead whose members default to
 `gc.on_fail = "abort_scope"` (section 3.5).
 
+**A hard failure ends the loop.** When an iteration closes
+`gc.outcome = fail` with `gc.failure_class = hard` — the iteration's own work
+bead, or, for a check step with `children`, the member whose hard failure
+aborted the iteration scope — the orchestrator closes the check step failed in
+that iteration without running the check script: `gc.failure_class = hard`, the
+member's `gc.failure_reason`, and `gc.final_disposition = hard_fail`. A
+transient or missing class leaves the loop to iterate while attempts remain.
+
 `check` must not be combined with `loop`, `on_complete`, `gate`, `expand`,
 `assignee`, or `retry`.
 
@@ -899,6 +907,17 @@ at runtime.
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
 
+A `blocks` edge is satisfied by its predecessor's close whatever
+`gc.outcome` that close carries, but a drain does not expand when a direct
+blocking predecessor in the same workflow closed with a failed outcome: it
+reserves no members, creates no unit convoys or item roots, and closes with
+`gc.outcome = fail` and `gc.failure_reason = predecessor_failed`, naming the
+predecessor in `gc.failure_subject`. The steps that need it and
+`workflow-finalize` still run, and they see the failure: a drain chained
+behind it does not expand either, and the run finalizes `fail` with its
+source bead left open. A drain inside a scope aborts the scope, like any
+failed scope member.
+
 ```toml
 formula = "review-batch"
 description = "Run a work formula for each convoy member"
@@ -932,6 +951,13 @@ each element of a collection in its output. The compiler marks such steps
 `gc.output_json_required` and injects a `<step>-fanout` control step (kind
 `fanout`) carrying `gc.for_each`, `gc.bond`, the fan-out mode
 (`parallel` | `sequential`), and any bond variable bindings.
+
+The `<step>-fanout` control converges the spawned children: it blocks on the
+source step and closes only after the fan-out work completes. Every downstream
+`needs` / `depends_on` reference to the source is rewritten to the fan-out
+control (for a scoped source, its minted `<step>-scope-check` also blocks on
+the fan-out control), so downstream work waits for the spawned children instead
+of racing them.
 
 | Key | Purpose |
 |---|---|
@@ -992,7 +1018,10 @@ metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "
 value of `gc.on_fail`. When a scoped member fails, the orchestrator skips
 all remaining open scope members, propagates non-`gc.*` member metadata
 onto the scope body (so diagnostics survive), and closes the body with
-`gc.outcome = fail`. The worker-result contract for `abort_scope` members
+`gc.outcome = fail`. When the failing member closed with
+`gc.failure_class = hard`, the body also keeps that failure record:
+`gc.failure_class = hard`, the member's `gc.failure_reason`, and
+`gc.failure_subject` naming the member. The worker-result contract for `abort_scope` members
 is **fail-closed**: a member that closes with `gc.outcome = fail` counts
 as failed, and so does a member that declared `abort_scope` and closed
 with a missing or unknown `gc.outcome` — only `pass` and `skipped` do not

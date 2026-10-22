@@ -2477,7 +2477,7 @@ func TestApplyAttemptRecipeScopeChecksSkipsDrain(t *testing.T) {
 		},
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	applyAttemptRecipeScopeChecks(recipe, nil)
 
 	stepByID := make(map[string]formula.RecipeStep, len(recipe.Steps))
 	for _, step := range recipe.Steps {
@@ -2647,9 +2647,9 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
 	// gastownhall/gascity#5246: a plain child (no Retry/Ralph/Drain) must still
-	// get a default gc.kind, mirroring the root's unconditional stamp above —
-	// otherwise it matches isWorkRecordGatedBead's (Type=="task" && gc.kind=="")
-	// test and gets wrongly swept into the ADR-0009 work-record close gate.
+	// get a default gc.kind, mirroring the root's unconditional stamp above, so
+	// its control-plane identity remains explicit and it stays out of the
+	// ADR-0009 work-record close gate.
 	if applyStep.Metadata["gc.kind"] != "task" {
 		t.Errorf("apply gc.kind = %q, want task", applyStep.Metadata["gc.kind"])
 	}
@@ -3594,6 +3594,79 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	}
 	if !foundFanoutDep {
 		t.Fatalf("missing fanout blocks dependency on source; deps = %+v", recipe.Deps)
+	}
+}
+
+// TestBuildAttemptRecipeRalphChildOnCompleteGatesDownstreamSibling mirrors the
+// compile-time fanout-gating fix in the retry/ralph re-spawn path: a sibling
+// that needs an on_complete child must block on the child's minted fanout
+// control, and the child's minted scope-check must also wait on that fanout
+// control so the iteration scope finalizes behind the spawned children.
+func TestBuildAttemptRecipeRalphChildOnCompleteGatesDownstreamSibling(t *testing.T) {
+	t.Parallel()
+
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "dc-members",
+				Title: "List design council members",
+				Type:  "task",
+				OnComplete: &formula.OnCompleteSpec{
+					ForEach: "output.members",
+					Bond:    "review-member",
+				},
+			},
+			{
+				ID:    "synthesize",
+				Title: "Synthesize",
+				Type:  "task",
+				Needs: []string{"dc-members"},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-fanout",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-review.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	sourceID := "mol-review.review-loop.iteration.2.dc-members"
+	synthID := "mol-review.review-loop.iteration.2.synthesize"
+
+	var siblingWaitsOnFanout, siblingWaitsOnSource bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID != synthID {
+			continue
+		}
+		switch dep.DependsOnID {
+		case sourceID + "-fanout":
+			siblingWaitsOnFanout = true
+		case sourceID:
+			siblingWaitsOnSource = true
+		}
+	}
+	if !siblingWaitsOnFanout {
+		t.Fatalf("synthesize does not block on %s-fanout; deps = %+v", sourceID, recipe.Deps)
+	}
+	if siblingWaitsOnSource {
+		t.Fatalf("synthesize still blocks on raw fanout source %s; deps = %+v", sourceID, recipe.Deps)
+	}
+
+	var scopeCheckWaitsOnFanout bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID == sourceID+"-scope-check" && dep.DependsOnID == sourceID+"-fanout" {
+			scopeCheckWaitsOnFanout = true
+		}
+	}
+	if !scopeCheckWaitsOnFanout {
+		t.Fatalf("dc-members scope-check does not wait on %s-fanout; deps = %+v", sourceID, recipe.Deps)
 	}
 }
 
