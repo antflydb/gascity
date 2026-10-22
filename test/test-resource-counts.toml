@@ -217,7 +217,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 8
 
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
