@@ -1352,6 +1352,22 @@ type Workspace struct {
 	// Default (empty): "{{.Agent}}" — just the sanitized agent name. Per-city
 	// tmux socket isolation makes a city prefix unnecessary.
 	SessionTemplate string `toml:"session_template,omitempty"`
+	// ImplicitAgentIsolation selects the working-directory isolation for
+	// injected implicit provider agents: "shared" (default, also when empty)
+	// or "worktree". "shared" keeps today's behavior — every numbered
+	// instance of a rig-scoped implicit pool resolves to the rig root,
+	// which parallel git work can clobber (gc doctor's
+	// pool-workdir-isolation check warns). "worktree" gives each
+	// rig-scoped implicit instance its own git worktree at
+	// .gc/worktrees/<rig>/<slot>: the session cwd moves there, commits land
+	// on the per-slot branch gc-<provider>-<n>-<hash12> (recorded as
+	// gc.work_branch / gc.work_commit by mol-do-work), merging that branch
+	// back is the user's or a pack's job, and files the rig's .gitignore
+	// ignores (.env, node_modules, venvs) do not exist in a fresh worktree.
+	// Enabling it restarts implicit sessions once (pre_start joins the
+	// config fingerprint) and requires the core pack and a runtime that
+	// runs pre_start on the host (tmux, herdr).
+	ImplicitAgentIsolation string `toml:"implicit_agent_isolation,omitempty" jsonschema:"enum=shared,enum=worktree"`
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
@@ -1381,6 +1397,18 @@ type Workspace struct {
 	// agent, and patch env. Use for cross-cutting variables like
 	// GC_TARGET_BRANCH that every agent should inherit.
 	Env map[string]string `toml:"env,omitempty"`
+}
+
+// Values of [Workspace.ImplicitAgentIsolation].
+const (
+	ImplicitAgentIsolationShared   = "shared"
+	ImplicitAgentIsolationWorktree = "worktree"
+)
+
+// ImplicitAgentWorktreeIsolation reports whether rig-scoped implicit agents
+// run in per-instance git worktrees instead of the shared rig root.
+func (w *Workspace) ImplicitAgentWorktreeIsolation() bool {
+	return w.ImplicitAgentIsolation == ImplicitAgentIsolationWorktree
 }
 
 // LegacyIncludes returns the compatibility-only city.toml include list.
