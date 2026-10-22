@@ -5132,11 +5132,16 @@ func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
 // TierWisps carve-out on listViaBDList's fan-out: the runner refuses every
 // --assignee flag, so a wisps-tier bd list leg that fanned out fails here.
 func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+	var callsMu sync.Mutex
+	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
+		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
+		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+			t.Errorf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+			return nil, fmt.Errorf("unexpected --assignee read: %s", gotCmd)
 		}
 		if strings.Contains(gotCmd, "--limit 1") {
 			return []byte(`[{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
@@ -5158,8 +5163,16 @@ func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	callsMu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	callsMu.Unlock()
+	if len(gotCalls) == 0 {
+		t.Fatal("runner never called")
+	}
+	for _, c := range gotCalls {
+		if !strings.Contains(c, "--limit 0") {
+			t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", c)
+		}
 	}
 	if len(got) != 1 || got[0].ID != "bd-wisp-b" {
 		t.Fatalf("got = %+v, want first matching wisp after client filter", got)

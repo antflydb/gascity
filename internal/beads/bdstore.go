@@ -28,6 +28,8 @@ const (
 
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
+// A runner must be safe for concurrent use: a two-tier List calls it from two
+// goroutines at once (see listTierPair).
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
 var (
@@ -3145,7 +3147,8 @@ type tierPairResult struct {
 // listTierPair reads one two-tier List's two halves at once: listQ through
 // bd list and ephemeralQ through bd query. They are independent reads, each its
 // own bd subprocess, so read one after the other a two-tier List costs every
-// caller two bd round trips in series instead of one (ga-3js1ayv).
+// caller two bd round trips in series instead of one (ga-3js1ayv). Both halves
+// call the store's CommandRunner, so the two reads can run it concurrently.
 func (s *BdStore) listTierPair(listQ, ephemeralQ ListQuery) tierPairResult {
 	var r tierPairResult
 	done := make(chan struct{})
