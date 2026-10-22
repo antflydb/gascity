@@ -145,6 +145,7 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 				"PUSH_GATE_MAX_CONCURRENT",
 				"PUSH_GATE_MAX_WAIT_SECONDS",
 				"PUSH_GATE_POLL_SECONDS",
+				"LOCAL_TEST_LOG_DIR",
 			} {
 				wantForwarding := key + `="${` + key + `-}"`
 				if !strings.Contains(command, wantForwarding) {
@@ -153,6 +154,55 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			}
 			if strings.Contains(command, "PUSH_GATE_UNRELATED_SENTINEL") {
 				t.Fatalf("test-fast-parallel must keep unrelated ambient variables out of TEST_ENV:\n%s", command)
+			}
+		})
+	}
+}
+
+// TestTestFastParallelForwardsCallerLogDir runs the real test-fast-parallel
+// recipe with the runner swapped for a probe, so TEST_ENV's env -i is what the
+// probe sees. A caller-pinned LOCAL_TEST_LOG_DIR must reach the runner, which
+// keeps the per-shard logs only when it is set; an unset one must stay empty so
+// the runner still allocates and cleans its own mktemp dir.
+func TestTestFastParallelForwardsCallerLogDir(t *testing.T) {
+	repoRoot := repoRoot(t)
+	const runner = "./scripts/test-local-parallel fast"
+	cmd := exec.Command("make", "-n", "test-fast-parallel")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make -n test-fast-parallel failed: %v\n%s", err, out)
+	}
+	recipe := strings.TrimSpace(string(out))
+	if strings.Count(recipe, runner) != 1 {
+		t.Fatalf("test-fast-parallel recipe should dispatch %q exactly once:\n%s", runner, recipe)
+	}
+	probe := strings.Replace(recipe, runner, `/bin/sh -c 'printf "VALUE=<%s>\n" "$LOCAL_TEST_LOG_DIR"'`, 1)
+
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "caller dir survives env -i", env: []string{"LOCAL_TEST_LOG_DIR=/var/tmp/caller-pinned-logs"}, want: "VALUE=</var/tmp/caller-pinned-logs>"},
+		{name: "unset stays empty so the runner allocates its own dir", want: "VALUE=<>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			probeCmd := exec.Command("bash", "-c", probe)
+			probeCmd.Dir = repoRoot
+			for _, entry := range os.Environ() {
+				if !strings.HasPrefix(entry, "LOCAL_TEST_LOG_DIR=") {
+					probeCmd.Env = append(probeCmd.Env, entry)
+				}
+			}
+			probeCmd.Env = append(probeCmd.Env, tt.env...)
+			got, err := probeCmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe through test-fast-parallel env failed: %v\n%s", err, got)
+			}
+			if !strings.Contains(string(got), tt.want) {
+				t.Fatalf("runner env = %q, want it to contain %q", strings.TrimSpace(string(got)), tt.want)
 			}
 		})
 	}
