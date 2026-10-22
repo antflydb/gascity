@@ -19,7 +19,11 @@ name:
 - `gc dolt logs` shows `RESTORED '<dbname>' from backup …` or
   `NOT auto-recovering '<dbname>'` for each database it touched. The same lines are in the
   managed log, because a successful start discards the provider's stderr.
-- A failed auto-recovery is part of the `gc start` error, with the per-database manual
+- A restored database gets back the backups its corrupt store had registered, because
+  `dolt backup restore` leaves the copy with none: `gc dolt logs` shows
+  `re-registered backup …`, or the command to run when that failed.
+- A failed auto-recovery (no usable backup, or a restore that failed) is part of the
+  `gc start` error, with the database's registered backups and the per-database manual
   steps to run.
 - The pre-corruption store is preserved under
   `<city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>/` — never deleted.
@@ -40,7 +44,8 @@ a single database's export — that is how live databases vanish (#1979).
 
 Use this runbook when:
 - `gc start` fails with a journal/noms error and `gc dolt logs` shows
-  `NOT auto-recovering '<dbname>'` (auto-recovery found no usable backup)
+  `NOT auto-recovering '<dbname>'` (no usable backup) or
+  `backup restore failed for '<dbname>'`
 - `gc doctor` reports `dolt-journal-size` at error level AND the server will not start
 - You need to recover a managed Dolt database that fails to open
 
@@ -64,7 +69,12 @@ ls -lh <data_dir>/<dbname>/.dolt/noms/*.journal
 
 # 3. Stop everything (gc stop also stops the dolt pack's server)
 gc stop
+```
 
+Then recover `<dbname>` with **one** of 4a or 4b, never both. 4b is only for a bead scope
+whose database has no usable backup.
+
+```bash
 # 4a. Restore one database from its backup (preferred)
 # WARNING: all changes after the last backup sync are lost
 jq .backups <data_dir>/<dbname>/.dolt/repo_state.json
@@ -73,19 +83,32 @@ mkdir -p <city>/.gc/runtime/packs/dolt/corrupt-aside
 mv <data_dir>/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>
 cd <data_dir>
 dolt backup restore <backup-url> <dbname>
+# register again each backup jq listed (a restored copy has none)
+cd <data_dir>/<dbname>
+dolt backup add <name> <url>
+```
 
-# 4b. Reconstruct one bead scope from the JSONL archive (fallback)
+```bash
+# 4b. Rebuild one bead scope from the JSONL archive (no usable backup)
 # WARNING: reconstructs from the passive 15-minute export; open/in-progress
 #          bead state may be partially stale compared to the last committed Dolt state
 mkdir -p <city>/.gc/runtime/packs/dolt/corrupt-aside
 mv <data_dir>/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>
-gc bd init --recreate-missing
-gc bd import .gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
+cd <city>
+# for a rig scope, add --rig <rig> to each gc bd command below
+gc bd init --reinit-local -p <prefix> --skip-hooks --skip-agents
+# the default archive path; Step 4 (fallback) lists the others
+gc bd import <city>/.gc/runtime/packs/core/jsonl-archive/<sql_name>/issues.jsonl
+gc bd backup status --json | jq -r '.dolt.backup_url // empty'
+# if that printed a URL, register it again (a re-created database has none)
+gc bd backup init <backup_url>
+```
 
-# 5. Verify
-dolt --host 127.0.0.1 --port "$GC_DOLT_PORT" --user root sql -q "SELECT active_branch()"
-gc doctor
+```bash
+# 5. Start the city and verify
 gc start
+gc dolt status
+gc doctor
 ```
 
 ---
@@ -167,6 +190,12 @@ mv <data_dir>/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<tim
 # Restore from the backup URL, re-creating the database inside the data dir
 cd <data_dir>
 dolt backup restore <backup-url> <dbname>
+
+# Register the backups again, once per name jq listed above. A restored copy
+# has none, while bd still reports its destination as configured, so the
+# backup order would never register it and every later sync would fail.
+cd <data_dir>/<dbname>
+dolt backup add <name> <url>
 ```
 
 **bd-owned proxied scopes** (the default for new cities; `dolt_mode` is
@@ -189,7 +218,7 @@ If no backup is configured or the backup itself is corrupt, proceed to Step 4b.
 
 ---
 
-## Step 4 (fallback): Reconstruct One Scope From JSONL Export
+## Step 4 (fallback): Rebuild One Scope From the JSONL Archive
 
 > **[WARNING]** The JSONL archive snapshot is **passive**: the core `jsonl-export` order
 > writes it every 15 minutes. Any bead changes after the last export are not reflected, and
@@ -197,24 +226,53 @@ If no backup is configured or the backup itself is corrupt, proceed to Step 4b.
 > import. A **non-bead** database has no JSONL archive at all — restore it from its own
 > backup instead.
 
+This step rebuilds the database of one bead scope (the city, or one rig) on the city's
+managed Dolt server: a scope whose `.beads/metadata.json` has `"dolt_mode": "server"`.
+Run it after Step 3, from the city directory, and only for a database with no usable
+backup. For a rig scope, add `--rig <rig>` to every `gc bd` command below.
+
 ```bash
 # Move only this scope's corrupt store aside, outside the data dir
 # (never delete it — it is the postmortem evidence)
 mkdir -p <city>/.gc/runtime/packs/dolt/corrupt-aside
 mv <data_dir>/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>
 
-# Re-create only this scope's database: run from the scope root (the city,
-# or add --rig <rig>); --recreate-missing authorizes re-creating a missing
-# server-mode database
-gc bd init --recreate-missing
+# Re-create only this scope's database, empty, under the scope's own identity
+cd <city>
+gc bd init --reinit-local -p <prefix> --skip-hooks --skip-agents
 
-# Import the latest JSONL archive snapshot of this database (written by the
-# core jsonl-export order in bd export format)
-gc bd import .gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
+# Import the scope's last JSONL export (bd export format)
+gc bd import <archive>/<sql_name>/issues.jsonl
+
+# A re-created database has no backup registered while bd still reports its
+# destination: register again the URL this prints (nothing when the scope
+# never had one)
+gc bd backup status --json | jq -r '.dolt.backup_url // empty'
+gc bd backup init <backup_url>
 
 # Inspect open/in-progress beads and correct state if needed
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
+
+- `--reinit-local` is how the pinned bd release (v1.3.1) re-creates the database of a scope
+  that is already initialized; a plain `gc bd init` refuses. It acts on this scope's
+  database only (`dolt_database` in `.beads/metadata.json`) and keeps the project id that
+  file records, which `gc start` checks against `.beads/identity.toml`. Run it only after
+  the move above: against a database that still exists it is bd's destructive reinit.
+  Newer bd (after v1.3.1) refuses `--reinit-local` for a missing database; pass
+  `--recreate-missing` in its place there.
+- `<prefix>` is the scope's issue prefix as `gc rig list --json` shows it (the city scope
+  is the entry with `"hq": true`). Without `-p`, bd names the prefix after the directory;
+  without `--skip-hooks --skip-agents`, it writes hooks and agent instruction files into
+  the scope.
+- Do not leave the re-creation to `gc start`: the database it creates gets a new project
+  id, and the start then fails with `PROJECT IDENTITY MISMATCH`.
+- `<archive>` is the core `jsonl-export` order's archive,
+  `<city>/.gc/runtime/packs/core/jsonl-archive`. A city migrated from the gastown
+  maintenance pack keeps `<city>/.gc/runtime/packs/maintenance/jsonl-archive` (or
+  `<city>/.gc/jsonl-archive` from before packs), and `GC_JSONL_ARCHIVE_REPO` overrides
+  them all. `<sql_name>` is the database name Dolt serves: `<dbname>` with each `-`
+  replaced by `_`. A failed `gc start` names the exact file in its manual steps.
 
 ---
 
@@ -223,18 +281,14 @@ gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 Confirm the database starts cleanly and the city is healthy before resuming work:
 
 ```bash
-# Offline Dolt check: start the server in isolation
-gc dolt start
+# Start the city; gc start brings up the managed Dolt server first
+gc start
 
-# Confirm the SQL interface responds
-dolt --host "${GC_DOLT_HOST:-127.0.0.1}" --port "${GC_DOLT_PORT:-28231}" \
-  --user "${GC_DOLT_USER:-root}" sql -q "SELECT active_branch(), @@GLOBAL.max_connections"
+# Confirm the managed server is running
+gc dolt status
 
 # Run the full doctor scan
 gc doctor
-
-# Start the city
-gc start
 ```
 
 If `gc doctor` still shows `dolt-journal-size` at warning or error level after recovery,
@@ -251,8 +305,9 @@ gc dolt compact
 - [ ] Dolt server starts and responds to SQL queries
 - [ ] `gc doctor` passes with no errors (warnings on non-critical checks are acceptable)
 - [ ] `gc start` brings all configured sessions online
-- [ ] Backup remote is registered (`jq .backups <data_dir>/<dbname>/.dolt/repo_state.json`)
-      and `<city>/.dolt-backup/<dbname>` holds a recent artifact
+- [ ] The recovered database has its backups registered again (`jq .backups
+      <data_dir>/<dbname>/.dolt/repo_state.json` lists what the corrupt store listed) and
+      `<city>/.dolt-backup/<dbname>` holds a recent artifact
 - [ ] Preserved corrupt store under `.gc/runtime/packs/dolt/corrupt-aside/` (reported
       by the `dolt-corrupt-aside` doctor check) reviewed and removed once the live
       database is confirmed
