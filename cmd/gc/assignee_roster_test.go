@@ -376,3 +376,18 @@ func TestAssigneeRosterIgnoresUndeclaredBindingQualifier(t *testing.T) {
 		}
 	}
 }
+
+func TestAssigneeRosterGeneratedNamesHonorQualifiers(t *testing.T) {
+	roster := newAssigneeRosterAt(rosterCityWithPrefixes(), "")
+
+	for _, assignee := range []string{"research/worker-auto-3", "research/repo-adhoc-1a2b3c"} {
+		if !roster.Resolves(assignee) {
+			t.Errorf("generated name %q under a declared rig was rejected", assignee)
+		}
+	}
+	for _, assignee := range []string{"wrongrig/worker-auto-3", "wrongrig/repo-adhoc-1a2b3c", "/srv/city/worker-auto-1"} {
+		if roster.Resolves(assignee) {
+			t.Errorf("generated name %q resolved although its qualifier is undeclared", assignee)
+		}
+	}
+}

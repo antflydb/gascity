@@ -13,12 +13,16 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
+// assigneeResolvesCheck reports open beads whose assignee resolves to no
+// configured agent, named session or live session.
 type assigneeResolvesCheck struct {
 	cfg      *config.City
 	cityPath string
 	newStore func(string) (beads.Store, error)
 }
 
+// newAssigneeResolvesCheck returns an assignee-resolves check that opens bead
+// stores with newStore.
 func newAssigneeResolvesCheck(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) *assigneeResolvesCheck {
 	return &assigneeResolvesCheck{cfg: cfg, cityPath: cityPath, newStore: newStore}
 }

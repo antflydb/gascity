@@ -7,10 +7,14 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
+// configLoadCheck reports whether the config-dependent checks were registered.
+// On a failed load it overlaps with expanded-config-load on purpose.
 type configLoadCheck struct {
 	err error
 }
 
+// newConfigLoadCheck returns a config-load check for the registration-time
+// load error err.
 func newConfigLoadCheck(err error) *configLoadCheck { return &configLoadCheck{err: err} }
 
 func (c *configLoadCheck) Name() string { return "config-load" }

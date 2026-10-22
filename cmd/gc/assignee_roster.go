@@ -10,6 +10,8 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// assigneeRoster is the set of names an open bead's assignee may route to,
+// built from the loaded config and live session beads.
 type assigneeRoster struct {
 	exact      map[string]struct{}
 	poolStems  map[string]struct{}
@@ -24,10 +26,14 @@ var generatedSessionShape = regexp.MustCompile(`^.*-(?:adhoc-[0-9a-f]{6,}|auto-\
 
 var beadIDSuffix = regexp.MustCompile(`^(?:[0-9]+|[0-9a-z]{4,})$`)
 
+// reservedAssignees are accepted without a roster entry. "human" is bd's
+// assignee convention for human-owned work, not a gc role.
 var reservedAssignees = map[string]struct{}{
 	"human": {},
 }
 
+// newAssigneeRosterAt builds the roster from cfg, resolving tmux aliases
+// against cityPath. A nil cfg yields an empty roster.
 func newAssigneeRosterAt(cfg *config.City, cityPath string) *assigneeRoster {
 	r := &assigneeRoster{
 		exact:      map[string]struct{}{},
@@ -104,6 +110,7 @@ func (r *assigneeRoster) addSessionIdentities(infos []session.Info) {
 	}
 }
 
+// Empty reports whether the roster holds no agent or named-session names.
 func (r *assigneeRoster) Empty() bool {
 	return len(r.exact) == 0 && len(r.poolStems) == 0
 }
@@ -115,6 +122,8 @@ func (r *assigneeRoster) addExact(name string) {
 	}
 }
 
+// Resolves reports whether assignee names a reserved, configured, live or
+// runtime-minted target. A qualifier is honored only when it is declared.
 func (r *assigneeRoster) Resolves(assignee string) bool {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
@@ -124,7 +133,7 @@ func (r *assigneeRoster) Resolves(assignee string) bool {
 		return true
 	}
 	for _, candidate := range r.pathCandidates(assignee) {
-		if generatedSessionShape.MatchString(candidate) {
+		if !strings.Contains(candidate, "/") && generatedSessionShape.MatchString(candidate) {
 			return true
 		}
 		if r.looksLikeBeadID(candidate) {
