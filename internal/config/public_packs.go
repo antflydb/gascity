@@ -48,7 +48,7 @@ const (
 	// trees; bump the pin (and append the old value to
 	// SupersededBundledPackImportVersions) when cutting a release whose
 	// bundled core/bd/dolt content changed.
-	BundledPackImportVersion = "sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"
+	BundledPackImportVersion = "sha:2e643dc2eb5ff84d9853ecaa6961a87a8e4043ae"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
@@ -71,6 +71,9 @@ var SupersededBundledPackImportVersions = []string{
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
 	// The hotfix/1.5.1 pin before #7498 changed the bundled core reaper.
 	"sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5",
+	// The hotfix/1.5.1 pin before the LEGO backports (#8219, #8224, #8230,
+	// #8218, #8215, #8232) changed the bundled core, bd and dolt packs.
+	"sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the
