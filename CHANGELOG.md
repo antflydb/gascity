@@ -23,17 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on SIGINT's default action (e.g. Python `KeyboardInterrupt`/`finally`) must
   handle SIGTERM explicitly. The bundled `scripts/gc-session-docker` already
   traps `TERM`.
-- **Upgrade Beads (`bd`) to v1.3.2-rc.2 for this release candidate.** This
-  build pins and is tested against bd v1.3.2-rc.2 (`deps.env` `BD_VERSION`
+- **Upgrade Beads (`bd`) to v1.3.2-rc.3 for this release candidate.** This
+  build pins and is tested against bd v1.3.2-rc.3 (`deps.env` `BD_VERSION`
   and the go.mod library): v1.3.1 plus the `bd purge` live-dependent fix
-  (beads#7031), the backup watermark fix (beads#7032) and the blocked-state
-  recheck publication fix (beads#6876, backported in beads#7146), with the
-  same schema. The RC pin is temporary: the final gc 1.5.1 pins beads v1.3.2,
-  which is released before the `v1.5.1` tag. v1.3.2-rc.2 is a prerelease and
-  is not on Homebrew: download `bd` from the
-  [v1.3.2-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.2)
+  (beads#7031), the backup watermark fix (beads#7032), the blocked-state
+  recheck publication fix (beads#6876, backported in beads#7146), the skipped
+  no-op `DOLT_CHECKOUT` on fresh connections, so a least-privilege Dolt user
+  works with the native store (beads#7322), batched bulk ID reads, so
+  `bd export` and gc's `jsonl-export` order no longer stall on very large
+  wisp sets (beads#7603), `bd purge` keeping `--limit` in its confirmation
+  hint (beads#7540), and a Go 1.26.10 / x/net / grpc / thrift security
+  rebuild, with the same schema. The RC pin is temporary: the final gc 1.5.1
+  pins beads v1.3.2, which is released before the `v1.5.1` tag and carries
+  the same fixes. v1.3.2-rc.3 is a prerelease and is not on Homebrew:
+  download `bd` from the
+  [v1.3.2-rc.3 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.3)
   or build it without ICU:
-  `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.2`.
+  `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.3`.
   `brew install beads` still installs v1.3.1, which lacks these fixes. A
   proxied city or rig (the default for new cities) always uses the bd CLI, and
   `gc doctor` does not flag bd v1.3.1 there; one that connects to its Dolt
