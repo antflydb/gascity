@@ -32,7 +32,8 @@ import (
 // not hold (until a later ring names the row), and a controller that starts
 // afterwards primes its cache silently. The row stays authoritative: a
 // consumer reads it. The in-band hook pass defers its rings to the end of
-// the drain (deferJournalRings).
+// the drain, and the gc session nudge to the end of its report
+// (deferJournalRings).
 
 // classStoreJournalRing rings the controller of cityPath to refresh the
 // journal rows ids of conversation conv, and reports whether the doorbell
@@ -155,7 +156,8 @@ func (q *journalRingQueue) ring(cityPath string) map[string]bool {
 // the queue its caller rings once it is done (journalRingQueue.ring); nil
 // when store has no emitter. The in-band hook pass defers them so its
 // writes never wait on the controller before the hook's output and
-// bookkeeping are done (hookLaneRing).
+// bookkeeping are done (hookLaneRing); gc session nudge, so its writes ring
+// once, after its report (cliLaneNudge.ring).
 func deferJournalRings(store beads.Store) *journalRingQueue {
 	if inner, _, ok := unwrapBeadPolicyStore(store); ok {
 		store = inner

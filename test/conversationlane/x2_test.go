@@ -78,11 +78,12 @@ func runX2Host(t *testing.T, arm storeArm, stage string, g opjournal.Guarantee) 
 	var id string
 	switch g {
 	case opjournal.GuaranteeAtLeastOnce:
-		// The nudge's own op write rings the lane host before the CLI
-		// reads the op back to report it, so a host that is up serves
-		// the op at once and, on Dolt, can close it before that read
-		// lands. Hold the session busy until the nudge returns: the
-		// host waits for the boundary and delivers after.
+		// The nudge rings the lane host once, after it reports, so a host
+		// that is up cannot serve the op before the CLI has read it back
+		// (the journal-row rings are deferred: deferJournalRings). The
+		// hold stays as a guard: with the session busy until the nudge
+		// returns, the host waits for the boundary and delivers after,
+		// whatever the ring order.
 		if killed != nil {
 			c.setActivityMode(activityLastNudge)
 			c.setActivity(time.Now().Add(time.Hour))

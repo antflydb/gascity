@@ -25,7 +25,10 @@ package main
 //
 // After it reports, a lane-routed nudge rings the controller's lane host
 // (lane:<conversation>:<op id>) once, best effort, so the host refreshes the
-// row in its cache and delivers what waited.
+// row in its cache and delivers what waited. Over a store that rings the
+// controller for each journal row it writes, those rings are deferred to this
+// one: a single doorbell names every row the CLI wrote, and the plain ring
+// follows only when it did not poke the conversation.
 
 import (
 	"context"
@@ -224,8 +227,11 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 }
 
 // run proposes the op, runs the inline pass in a live mode, reports and
-// rings.
+// rings. Over a store whose journal-row writes ring the controller as they
+// land, the rows are queued instead (deferJournalRings) and rung once, after
+// the report, so the writes never wait on the controller.
 func (n *cliLaneNudge) run() int {
+	rows := deferJournalRings(n.sessions)
 	minted := n.key == ""
 	if minted {
 		k, err := legacyop.MintKey()
@@ -267,7 +273,7 @@ func (n *cliLaneNudge) run() int {
 		res, passErr = n.pass(context.Background())
 	}
 	code := n.report(op.ID, !created, res, passErr)
-	n.ring(op.ID)
+	n.ring(op.ID, rows)
 	return code
 }
 
@@ -380,9 +386,17 @@ func (n *cliLaneNudge) warnContractBreach(id string, why any) {
 	n.warnf("the runtime's answer to the delivery of op %s broke the executor contract (%v)", id, why)
 }
 
-// ring rings the lane host for op id once, after the result is written, and
-// warns when the op is still open and no lane host answered.
-func (n *cliLaneNudge) ring(id string) {
+// ring rings the controller once, after the result is written. rows is the
+// queue of journal rows the run wrote (deferJournalRings; nil when its store
+// does not ring): their doorbell refreshes the rows and pokes the
+// conversation's lane host, and when it did, that is the ring. Otherwise
+// (nothing was written, no controller answered, or the store does not ring)
+// it rings the lane host for op id, and warns when the op is still open and no
+// lane host answered.
+func (n *cliLaneNudge) ring(id string, rows *journalRingQueue) {
+	if rows.ring(n.target.cityPath)[n.target.sessionID] {
+		return
+	}
 	reply, err := cliLaneRing(n.target.cityPath, n.target.sessionID, id)
 	if err == nil && reply == "ok" {
 		return
