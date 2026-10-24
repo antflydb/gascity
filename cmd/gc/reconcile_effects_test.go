@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -485,4 +486,58 @@ func TestSwapCancelIsLabeledApartFromShutdown(t *testing.T) {
 	if s := receive(t, posted); s.Cause != causeSwapCancel {
 		t.Fatalf("settlement %+v, want cause %q", s, causeSwapCancel)
 	}
+}
+
+// heldReadClock is clk with every Now read held until proceed closes: the
+// reading goroutine descheduled right after its read, while the simulator's
+// step loop moves the clock (ga-9xg0y13).
+type heldReadClock struct {
+	*fakePlannerClock
+	proceed chan struct{}
+}
+
+func (c heldReadClock) Now() time.Time {
+	now := c.fakePlannerClock.Now()
+	<-c.proceed
+	return now
+}
+
+// TestExecutorSettlesAtTheDeadlineWhenTheClockMovesAfterARead (ga-9xg0y13,
+// ga-shh294r). Kills a deadline settlement armed off a separate clock read:
+// the clock reaching the deadline after the executor read it, before the
+// executor armed its wake, must still settle the effect at the deadline.
+func TestExecutorSettlesAtTheDeadlineWhenTheClockMovesAfterARead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clk := newFakePlannerClock(plannerT0)
+		held := heldReadClock{fakePlannerClock: clk, proceed: make(chan struct{})}
+		posted := make(chan settlement, 4)
+		x := newEffectExecutor(func(s settlement) { posted <- s }, io.Discard)
+		x.clock = held
+		release := make(chan struct{})
+		defer close(release)
+		k := rowKey{Leg: rowLeg, ID: "gc-1"}
+		if err := x.submit(k, hungEffect(intentRowHeal, 1, plannerT0.Add(time.Minute), release)); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait() // Run has started; a read of the executor's clock is held
+		clk.Advance(time.Minute)
+		close(held.proceed)
+		synctest.Wait()
+		select {
+		case s := <-posted:
+			if s.Outcome != settledFailed || s.Cause != causeDeadline || s.Key != k {
+				t.Fatalf("settlement %+v, want %v failed at its deadline", s, k)
+			}
+		default:
+			clk.mu.Lock()
+			var armed []string
+			for _, tm := range clk.timers {
+				if tm.active {
+					armed = append(armed, tm.at.Sub(plannerT0).String())
+				}
+			}
+			clk.mu.Unlock()
+			t.Fatalf("the clock reached the deadline (%s) and no settlement posted; timers still armed at %v", time.Minute, armed)
+		}
+	})
 }
