@@ -33,6 +33,14 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			wantViol: "",
 		},
 		{
+			name: "blocked close with a handoff pointer passes",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+				"gc.handoff_bead_id":            "gc-9",
+			},
+			wantViol: "",
+		},
+		{
 			name: "shipped with reachable commit passes",
 			meta: map[string]string{
 				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,

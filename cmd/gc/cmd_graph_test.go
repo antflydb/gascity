@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
@@ -306,6 +307,150 @@ func TestGraphClosedBlockerIsReady(t *testing.T) {
 	// Summary: 1 done, 1 ready, 0 blocked.
 	if strings.Contains(out, "1 blocked") {
 		t.Errorf("no beads should be blocked:\n%s", out)
+	}
+}
+
+// handoffKey is the optional successor pointer a blocked close may stamp.
+const handoffKey = "gc.handoff_bead_id"
+
+// closeWithWorkOutcome closes gc-1 after stamping gc.work_outcome and, when
+// handoff is non-empty, the gc.handoff_bead_id successor pointer.
+func closeWithWorkOutcome(t *testing.T, store beads.Store, outcome, handoff string) {
+	t.Helper()
+	const id = "gc-1"
+	if err := store.SetMetadata(id, beadmeta.WorkOutcomeMetadataKey, outcome); err != nil {
+		t.Fatalf("SetMetadata(%s, work_outcome): %v", id, err)
+	}
+	if handoff != "" {
+		if err := store.SetMetadata(id, handoffKey, handoff); err != nil {
+			t.Fatalf("SetMetadata(%s, handoff): %v", id, err)
+		}
+	}
+	if err := store.Close(id); err != nil {
+		t.Fatalf("Close(%s): %v", id, err)
+	}
+}
+
+// graphRow returns the table row that starts with id.
+func graphRow(t *testing.T, out, id string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, id+" ") {
+			return line
+		}
+	}
+	t.Fatalf("no row for %s in:\n%s", id, out)
+	return ""
+}
+
+// A blocker closed work_outcome=blocked handed its work off without landing it,
+// so it must not satisfy the dependent here any more than it does in the store
+// backends (ga-a7v0ex).
+func TestGraphBlockedCloseBlockerKeepsDependentBlocked(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "prereq"})    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "main task"}) // gc-2
+	_ = store.DepAdd("gc-2", "gc-1", "blocks")
+	closeWithWorkOutcome(t, store, beadmeta.WorkOutcomeBlocked, "")
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var payload graphJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Summary.Ready != 0 || payload.Summary.Blocked != 1 {
+		t.Fatalf("summary = %+v, want ready=0 blocked=1", payload.Summary)
+	}
+	if got := payload.Nodes[1].OpenBlockers; len(got) != 1 || got[0] != "gc-1" {
+		t.Fatalf("gc-2 open_blockers = %v, want [gc-1]", got)
+	}
+}
+
+// Every other typed outcome still satisfies the edge.
+func TestGraphNonBlockedOutcomesSatisfyDependent(t *testing.T) {
+	for _, outcome := range []string{beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp, beadmeta.WorkOutcomeAbandoned} {
+		t.Run(outcome, func(t *testing.T) {
+			store := beads.NewMemStore()
+			_, _ = store.Create(beads.Bead{Title: "prereq"})    // gc-1
+			_, _ = store.Create(beads.Bead{Title: "main task"}) // gc-2
+			_ = store.DepAdd("gc-2", "gc-1", "blocks")
+			closeWithWorkOutcome(t, store, outcome, "gc-9")
+
+			var stdout, stderr bytes.Buffer
+			if code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "1 ready") {
+				t.Errorf("gc-2 should be ready behind a %s blocker:\n%s", outcome, out)
+			}
+			if strings.Contains(graphRow(t, out, "gc-2"), "handoff") {
+				t.Errorf("a %s blocker must not surface a handoff hint:\n%s", outcome, out)
+			}
+		})
+	}
+}
+
+// The blocker's gc.handoff_bead_id is shown next to it so re-pointing the
+// dependent is a lookup, not an investigation. Nothing is rewired.
+func TestGraphBlockedCloseSurfacesHandoffPointer(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "prereq"})    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "main task"}) // gc-2
+	_ = store.DepAdd("gc-2", "gc-1", "blocks")
+	closeWithWorkOutcome(t, store, beadmeta.WorkOutcomeBlocked, "gc-9")
+
+	var stdout, stderr bytes.Buffer
+	if code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if row := graphRow(t, stdout.String(), "gc-2"); !strings.Contains(row, "gc-1 (handoff: gc-9)") {
+		t.Errorf("gc-2 row should name the handoff successor, got %q", row)
+	}
+
+	stdout.Reset()
+	if code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doGraph --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var payload struct {
+		Nodes []struct {
+			ID             string            `json:"id"`
+			HandoffBeadIDs map[string]string `json:"handoff_bead_ids"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Nodes) != 2 || payload.Nodes[1].ID != "gc-2" {
+		t.Fatalf("nodes = %+v, want gc-1 and gc-2", payload.Nodes)
+	}
+	if got := payload.Nodes[1].HandoffBeadIDs["gc-1"]; got != "gc-9" {
+		t.Errorf("gc-2 handoff_bead_ids = %v, want gc-1 -> gc-9", payload.Nodes[1].HandoffBeadIDs)
+	}
+	deps, err := store.DepList("gc-2", "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != "gc-1" {
+		t.Errorf("graph must not rewire: deps = %v, err = %v", deps, err)
+	}
+}
+
+// The pointer is optional: a blocked close without one shows the blocker alone.
+func TestGraphBlockedCloseWithoutHandoffShowsNoHint(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "prereq"})    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "main task"}) // gc-2
+	_ = store.DepAdd("gc-2", "gc-1", "blocks")
+	closeWithWorkOutcome(t, store, beadmeta.WorkOutcomeBlocked, "")
+
+	var stdout, stderr bytes.Buffer
+	if code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if row := graphRow(t, stdout.String(), "gc-2"); strings.Contains(row, "handoff") {
+		t.Errorf("no pointer was stamped, row should not mention a handoff: %q", row)
 	}
 }
 

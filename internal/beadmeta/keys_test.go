@@ -77,6 +77,20 @@ func TestPinnedValues(t *testing.T) {
 	}
 }
 
+// TestHandoffBeadIDKeyDeclared: gc.handoff_bead_id is the optional successor
+// pointer a gc.work_outcome=blocked close may stamp. It is read by `gc graph`
+// and written by closers, so it belongs to the declared vocabulary rather than
+// staying a pack-private literal.
+func TestHandoffBeadIDKeyDeclared(t *testing.T) {
+	const key = "gc.handoff_bead_id"
+	for _, k := range KnownMetadataKeys {
+		if k == key {
+			return
+		}
+	}
+	t.Errorf("%q is not in KnownMetadataKeys", key)
+}
+
 // TestValidLabel: a label is valid only when bd's CSV parse (pflag's string
 // slice) reads it back unchanged as one field.
 func TestValidLabel(t *testing.T) {
