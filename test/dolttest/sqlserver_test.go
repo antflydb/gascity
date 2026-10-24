@@ -121,6 +121,42 @@ func TestStartSQLServerReportsTheLogTailWhenTheServerExitsEarly(t *testing.T) {
 	}
 }
 
+func TestStartSQLServerDisablesDoltEventFlush(t *testing.T) {
+	// The stand-in reports what it was started with and exits, so the log tail
+	// in the failure carries the environment it saw.
+	dolt := fakeDolt(t, `echo "flush=$DOLT_DISABLE_EVENT_FLUSH keep=$KEEP_ME" >&2; exit 3`)
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "false")
+	t.Setenv("KEEP_ME", "inherited")
+
+	for name, env := range map[string][]string{
+		"inherited environment": nil,
+		"explicit environment":  {"KEEP_ME=explicit", "DOLT_DISABLE_EVENT_FLUSH=false"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			failure := failureOf(t, func(tb testing.TB) {
+				StartSQLServer(tb, SQLServerSpec{
+					Dolt: dolt,
+					Args: func(port int) []string { return []string{strconv.Itoa(port)} },
+					Env:  env,
+				})
+			})
+
+			// A detached `dolt send-metrics` would outlive the server and
+			// write into DOLT_ROOT_PATH while the test's TempDir is removed.
+			if !strings.Contains(failure, "flush=true") {
+				t.Fatalf("failure %q does not show the event flusher disabled", failure)
+			}
+			want := "keep=inherited"
+			if env != nil {
+				want = "keep=explicit"
+			}
+			if !strings.Contains(failure, want) {
+				t.Fatalf("failure %q lost the rest of the environment, want %q", failure, want)
+			}
+		})
+	}
+}
+
 func TestSQLServerStopKillsAProcessThatIgnoresSIGTERM(t *testing.T) {
 	armed := filepath.Join(t.TempDir(), "armed")
 	// The stand-in listens on nothing, so report it as the listener once it has

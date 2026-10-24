@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,7 +58,8 @@ type SQLServerSpec struct {
 	Host string
 	// Dir is the optional working directory.
 	Dir string
-	// Env is the optional environment; nil inherits the test process's.
+	// Env is the optional environment; nil inherits the test process's. The
+	// launch adds DOLT_DISABLE_EVENT_FLUSH=true to either.
 	Env []string
 	// LogPath receives stdout and stderr; "" means a file in t.TempDir().
 	// Each attempt truncates it, so it holds the final server's output.
@@ -172,7 +174,14 @@ func startSQLServerOnPort(t testing.TB, spec SQLServerSpec, host, logPath string
 	}
 	cmd := exec.Command(spec.Dolt, spec.Args(port)...)
 	cmd.Dir = spec.Dir
-	cmd.Env = spec.Env
+	// Dolt flushes usage metrics through a detached `dolt send-metrics` that
+	// outlives the server and writes into DOLT_ROOT_PATH, racing the removal
+	// of a TempDir holding it ("directory not empty").
+	env := spec.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = append(slices.Clone(env), "DOLT_DISABLE_EVENT_FLUSH=true")
 	cmd.SysProcAttr = spec.SysProcAttr
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	startErr := cmd.Start()
