@@ -871,7 +871,7 @@ foreground, low-priority `git repack --geometric=2`:
 
 A geometric repack packs the loose backlog into a new pack and merges only the
 small packs beside it. A large existing pack is left as it is, so a run writes
-a few megabytes where a full `git gc` rewrote the whole archive. The same pass
+only the new pack where a full `git gc` rewrote the whole archive. The same pass
 runs when a run has nothing new to export, so a backlog left by an earlier
 failure is packed on the next run. It needs Git 2.32 or newer; on an older Git
 the pass fails with a message that says so.

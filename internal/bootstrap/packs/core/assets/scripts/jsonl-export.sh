@@ -824,6 +824,7 @@ check_archive_gc_free_space() {
     if [ "$((free_kb - archive_kb))" -ge "$GC_MIN_FREE_KB" ]; then
         return 0
     fi
+    # shellcheck disable=SC2012  # pack names are pack-<hex>.pack
     largest_pack=$(ls -S "$ARCHIVE_REPO"/.git/objects/pack/pack-*.pack 2>/dev/null | head -n 1) || largest_pack=""
     rest_kb="$archive_kb"
     if [ -n "$largest_pack" ]; then
