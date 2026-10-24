@@ -317,6 +317,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
 
+- **`gc dolt sync` needs a second opt-in to push to a non-local remote through
+  `GC_DOLT_REMOTE_<DB>`.** Naming a non-`file://` remote in
+  `GC_DOLT_REMOTE_<DB>` used to be enough on its own; `gc dolt pull` has
+  always also required `GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1` for the same remote,
+  so the write direction was gated more weakly than the read. Sync now fails
+  that database with an error naming `GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1`, and
+  pushes nothing, unless it is set to exactly `1`. A `file://` remote named in
+  `GC_DOLT_REMOTE_<DB>` is unaffected. If you push to a network remote this
+  way, add `GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1` next to the existing
+  `GC_DOLT_REMOTE_<DB>`.
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
