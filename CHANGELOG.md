@@ -23,9 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on SIGINT's default action (e.g. Python `KeyboardInterrupt`/`finally`) must
   handle SIGTERM explicitly. The bundled `scripts/gc-session-docker` already
   traps `TERM`.
-- **Upgrade Beads (`bd`) to v1.3.2-rc.3 for this release candidate.** This
-  build pins and is tested against bd v1.3.2-rc.3 (`deps.env` `BD_VERSION`
-  and the go.mod library): v1.3.1 plus the `bd purge` live-dependent fix
+- **Upgrade Beads (`bd`) to v1.3.2.** gc 1.5.1 pins and is tested against bd
+  v1.3.2 (`deps.env` `BD_VERSION` and the go.mod library), a stable release
+  that keeps bd v1.3.1's schema: v1.3.1 plus the `bd purge` live-dependent fix
   (beads#7031), the backup watermark fix (beads#7032), the blocked-state
   recheck publication fix (beads#6876, backported in beads#7146), the skipped
   no-op `DOLT_CHECKOUT` on fresh connections, so a least-privilege Dolt user
@@ -33,18 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd export` and gc's `jsonl-export` order no longer stall on very large
   wisp sets (beads#7603), `bd purge` keeping `--limit` in its confirmation
   hint (beads#7540), and a Go 1.26.10 / x/net / grpc / thrift security
-  rebuild, with the same schema. The RC pin is temporary: the final gc 1.5.1
-  pins beads v1.3.2, which is released before the `v1.5.1` tag and carries
-  the same fixes. v1.3.2-rc.3 is a prerelease and is not on Homebrew:
-  download `bd` from the
-  [v1.3.2-rc.3 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.3)
-  or build it without ICU:
-  `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.3`.
-  `brew install beads` still installs v1.3.1, which lacks these fixes. A
-  proxied city or rig (the default for new cities) always uses the bd CLI, and
-  `gc doctor` does not flag bd v1.3.1 there; one that connects to its Dolt
-  server directly falls back from its native store to the bd CLI
-  (`version_compat` preflight gate), with a `gc doctor` `beads-store` warning.
+  rebuild. Install it with `brew upgrade beads` (or `brew install beads`),
+  from the
+  [v1.3.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2),
+  or with `go install github.com/steveyegge/beads/cmd/bd@v1.3.2`. Read beads'
+  [v1.3.2 upgrade notes](https://github.com/gastownhall/beads/blob/v1.3.2/CHANGELOG.md#132---2026-10-23)
+  before upgrading scripts that call bd directly. A city that stays on bd
+  v1.3.1 keeps working: a proxied city or rig (the default for new cities)
+  always uses the bd CLI, and `gc doctor` does not flag bd v1.3.1 there; one
+  that connects to its Dolt server directly falls back from its native store
+  to the bd CLI (`version_compat` preflight gate), with a `gc doctor`
+  `beads-store` warning.
 - **A city's first start after a bd upgrade runs `bd recompute-blocked` once
   per scope.** beads migration 0059 wrongly marks some beads blocked across
   relates-to, discovered-from and other non-blocking edges (beads#7037). It
