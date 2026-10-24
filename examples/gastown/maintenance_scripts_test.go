@@ -10722,7 +10722,7 @@ func TestJsonlExportCommitsSnapshotBeforeRepackThatNeverReturns(t *testing.T) {
 
 func TestJsonlExportHaltSendsSpikeAlertBeforeArchiveMaintenance(t *testing.T) {
 	// The [HALT] baseline commit reaches the loose-object limit and the
-	// archive gc fails: the run must still fail, with the spike alert
+	// archive repack fails: the run must still fail, with the spike alert
 	// already sent.
 	f := newArchiveMaintenanceFixture(t, 100, 10)
 	f.limitPackingToSnapshot(t)
@@ -10730,7 +10730,7 @@ func TestJsonlExportHaltSendsSpikeAlertBeforeArchiveMaintenance(t *testing.T) {
 
 	out, err := f.run(t)
 	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the HALT run:\n%s", out)
+		t.Fatalf("expected the failed archive repack to fail the HALT run:\n%s", out)
 	}
 	if !strings.Contains(out, "archive object database maintenance failed") {
 		t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
@@ -10760,7 +10760,7 @@ func TestJsonlExportArchiveMaintenanceRefusesWithoutFreeSpace(t *testing.T) {
 		t.Fatalf("expected the free-space refusal to name its setting:\n%s", out)
 	}
 	if strings.Contains(out, "packing archive object database") {
-		t.Fatalf("archive gc must not start without free space:\n%s", out)
+		t.Fatalf("archive repack must not start without free space:\n%s", out)
 	}
 	if got := readArchiveObjectStats(t, f.archiveRepo).packs; got != seed.packs {
 		t.Fatalf("packs = %d, want no pack written (%d):\n%s", got, seed.packs, out)
@@ -10945,7 +10945,7 @@ func TestJsonlExportPushesSnapshotWhenArchivePackingFails(t *testing.T) {
 
 	out, err := f.run(t)
 	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the run:\n%s", out)
+		t.Fatalf("expected the failed archive repack to fail the run:\n%s", out)
 	}
 	if !strings.Contains(out, "archive object database maintenance failed") {
 		t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
@@ -11030,7 +11030,7 @@ func TestJsonlExportKeepsSpikeAlertWhileArchiveCannotBePacked(t *testing.T) {
 
 	out, err := f.run(t)
 	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the HALT run:\n%s", out)
+		t.Fatalf("expected the failed archive repack to fail the HALT run:\n%s", out)
 	}
 	if subject := f.headSubject(t); !strings.HasPrefix(subject, "[HALT]") {
 		t.Fatalf("HEAD subject = %q, want the [HALT] baseline commit", subject)
@@ -11149,10 +11149,19 @@ func TestJsonlExportPacksBacklogWhenThereIsNothingToExport(t *testing.T) {
 				remoteRepo = f.addOrigin(t)
 				f.exportOnce(t)
 			} else {
+				// The first run pushes, so it clears the pending push; the
+				// second run then has nothing to push either and leaves by
+				// the "No changes." exit. Without an origin the flag is never
+				// cleared and the second run takes the pending-push exit.
 				f = newArchiveMaintenanceFixture(t, 3, 5)
+				remoteRepo = f.addOrigin(t)
 				f.exportOnce(t)
 			}
 			f.seedLargePackAndBacklog(t)
+			if !tc.pendingPush {
+				// The backlog commits must not read as unpushed work.
+				runGit(t, f.archiveRepo, "push", "-q", "origin", "main")
+			}
 			// Any backlog commits sit on top of the unpushed snapshot.
 			headBefore := f.head(t)
 			wantPushed := headBefore
