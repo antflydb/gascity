@@ -30,7 +30,7 @@ func fakeClockExecutor(clk *fakePlannerClock) (*effectExecutor, chan settlement)
 }
 
 // waitTimersAt waits until n of clk's timers are armed for at. Each effect
-// arms two: the executor's settlement timer and its context's deadline.
+// arms one: its context's deadline, which its settlement waits on too.
 func waitTimersAt(t *testing.T, clk *fakePlannerClock, at time.Time, n int) {
 	t.Helper()
 	guard := time.After(plannerTestGuard)
@@ -94,7 +94,7 @@ func TestExecutorSettlesOnceUnderFakeClock(t *testing.T) {
 	if err := x.submit(k, hungEffect(intentStart, 7, plannerT0.Add(70*time.Second), release)); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(70*time.Second), 2) // the settlement timer and Run's deadline
+	waitTimersAt(t, clk, plannerT0.Add(70*time.Second), 1) // Run's deadline, which the settlement waits on too
 	clk.Advance(70 * time.Second)
 	s := receive(t, posted)
 	if s.Outcome != settledFailed || s.Cause != causeDeadline || s.Key != k || s.Kind != intentStart || s.Seq != 7 {
@@ -205,7 +205,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 		if err := x.submitIntent(&effectPass{}, intent{Kind: kind, Key: rowKey{ID: kind}, Deadline: plannerT0.Add(want)}, uint64(i+1)); err != nil {
 			t.Fatal(err)
 		}
-		armed[plannerT0.Add(want)] += 2
+		armed[plannerT0.Add(want)]++
 	}
 	for at, n := range armed {
 		waitTimersAt(t, clk, at, n)
@@ -267,16 +267,16 @@ func TestExecutorCausesCarryTheFinalizePrefix(t *testing.T) {
 			t.Fatalf("%s: cause %q, want %q", c.it.Key.ID, s.Cause, c.want)
 		}
 	}
-	// The effects above share the deadline's instant, and each stops its two
-	// timers only after it posts (its settlement timer) or after Run returns
-	// (its context's). Wait for that teardown, or the count below can match
-	// their stale timers before the next effect arms its own, and Advance
-	// then runs ahead of that effect's timers, which never fire.
+	// The effects above share the deadline's instant, and each stops its
+	// timer (its context's deadline) only after Run returns. Wait for that
+	// teardown, or the count below can match a stale timer before the next
+	// effect arms its own, and Advance then reaches the deadline before that
+	// effect's Run has begun.
 	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 0)
 	if err := x.submitIntent(&effectPass{}, finalize(intentStop, "deadline"), 9); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	if s.Cause != causeFinalizePrefix+causeDeadline {
@@ -315,7 +315,7 @@ func TestEffectContextCarriesTheDeadline(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	receive(t, posted)
 	if err := <-causes; !errors.Is(err, context.DeadlineExceeded) {
@@ -339,7 +339,7 @@ func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	if s := receive(t, posted); s.Cause != causeDeadline {
 		t.Fatalf("settlement %+v, want failed at the deadline", s)
@@ -459,7 +459,7 @@ func TestAmbiguousFinalizeIsPacedByItsOwnBackoff(t *testing.T) {
 	if err := x.submit(k, e); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
