@@ -352,6 +352,11 @@ const (
 	// through any route, an explicit RoutedToMetadataKey included — see
 	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
+	// HandoffBeadIDMetadataKey is the optional successor pointer a closer may
+	// stamp alongside WorkOutcomeMetadataKey = "blocked": the bead that now
+	// carries the blocked work. It is read-only information (`gc graph` shows
+	// it next to the blocker); nothing rewires dependents from it.
+	HandoffBeadIDMetadataKey = "gc.handoff_bead_id"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -372,6 +377,10 @@ const (
 //     (not a bare "gc.commit") to avoid collision with future commit concepts.
 //   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
 //     record (gate result, "manual", or a link) backing a shipped outcome.
+//   - HandoffBeadIDMetadataKey ("gc.handoff_bead_id") — optional; on a
+//     "blocked" close, the successor bead carrying the work. Never required by
+//     the close gate and never acted on automatically: dependents stay wired to
+//     the blocked bead until an agent re-points them.
 //
 // The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
 // commit on the branch" rule live with the close gate in cmd/gc.
@@ -591,6 +600,7 @@ var KnownMetadataKeys = []string{
 	FormulaSourceMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
+	HandoffBeadIDMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,

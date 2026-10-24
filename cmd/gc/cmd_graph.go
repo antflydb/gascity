@@ -7,6 +7,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/spf13/cobra"
@@ -68,7 +69,11 @@ type graphJSONNode struct {
 	ParentID     string   `json:"parent_id,omitempty"`
 	BlockedBy    []string `json:"blocked_by"`
 	OpenBlockers []string `json:"open_blockers"`
-	Ready        bool     `json:"ready"`
+	// HandoffBeadIDs maps a blocker that closed work_outcome=blocked to the
+	// successor it named in gc.handoff_bead_id. Information only: the edge
+	// still points at the blocker.
+	HandoffBeadIDs map[string]string `json:"handoff_bead_ids,omitempty"`
+	Ready          bool              `json:"ready"`
 }
 
 type graphJSONSummary struct {
@@ -174,7 +179,10 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 type graphNode struct {
 	bead        beads.Bead
 	blockedBy   []string // IDs of beads in the set that block this one (all edges)
-	openBlocker []string // IDs of open beads in the set that block this one
+	openBlocker []string // IDs of beads in the set that block this one and are not satisfied
+	// handoffs maps an unsatisfied blocker to the gc.handoff_bead_id its
+	// closer stamped. Display only; nothing rewires the edge.
+	handoffs map[string]string
 }
 
 // isBlockingDep reports whether a dependency type represents a blocking
@@ -247,17 +255,31 @@ func doGraph(stores *graphStores, args []string, opts graphOpts, stdout, stderr 
 		nodes = append(nodes, graphNode{bead: b, blockedBy: blockedBy})
 	}
 
-	// Second pass: compute open blockers by cross-referencing status.
-	closedIDs := make(map[string]bool, len(nodes))
+	// Second pass: compute open blockers by cross-referencing status. A
+	// dependency is satisfied by the same predicate the store backends use, so a
+	// blocker that closed work_outcome=blocked still holds its dependents.
+	satisfied := make(map[string]bool, len(nodes))
+	handoff := make(map[string]string, len(nodes))
 	for _, n := range nodes {
-		if n.bead.Status == "closed" {
-			closedIDs[n.bead.ID] = true
+		outcome := beads.ReadinessWorkOutcome(n.bead.Metadata)
+		satisfied[n.bead.ID] = beads.DependencySatisfied(n.bead.Status, outcome)
+		if n.bead.Status == "closed" && outcome == beadmeta.WorkOutcomeBlocked {
+			if id := n.bead.Metadata[beadmeta.HandoffBeadIDMetadataKey]; id != "" {
+				handoff[n.bead.ID] = id
+			}
 		}
 	}
 	for i, n := range nodes {
 		for _, dep := range n.blockedBy {
-			if !closedIDs[dep] {
-				nodes[i].openBlocker = append(nodes[i].openBlocker, dep)
+			if satisfied[dep] {
+				continue
+			}
+			nodes[i].openBlocker = append(nodes[i].openBlocker, dep)
+			if id, ok := handoff[dep]; ok {
+				if nodes[i].handoffs == nil {
+					nodes[i].handoffs = map[string]string{}
+				}
+				nodes[i].handoffs[dep] = id
 			}
 		}
 	}
@@ -293,14 +315,15 @@ func buildGraphJSONResult(args []string, nodes []graphNode) graphJSONResult {
 			result.Summary.Blocked++
 		}
 		result.Nodes = append(result.Nodes, graphJSONNode{
-			ID:           n.bead.ID,
-			Title:        n.bead.Title,
-			Status:       n.bead.Status,
-			Type:         n.bead.Type,
-			ParentID:     n.bead.ParentID,
-			BlockedBy:    append([]string(nil), n.blockedBy...),
-			OpenBlockers: append([]string(nil), n.openBlocker...),
-			Ready:        ready,
+			ID:             n.bead.ID,
+			Title:          n.bead.Title,
+			Status:         n.bead.Status,
+			Type:           n.bead.Type,
+			ParentID:       n.bead.ParentID,
+			BlockedBy:      append([]string(nil), n.blockedBy...),
+			OpenBlockers:   append([]string(nil), n.openBlocker...),
+			HandoffBeadIDs: n.handoffs,
+			Ready:          ready,
 		})
 	}
 	result.Summary.Total = len(nodes)
@@ -364,7 +387,14 @@ func printTable(nodes []graphNode, stdout io.Writer) {
 	for _, n := range nodes {
 		blockedBy := "-"
 		if len(n.blockedBy) > 0 {
-			blockedBy = strings.Join(n.blockedBy, ", ")
+			labels := make([]string, len(n.blockedBy))
+			for i, dep := range n.blockedBy {
+				labels[i] = dep
+				if id, ok := n.handoffs[dep]; ok {
+					labels[i] = fmt.Sprintf("%s (handoff: %s)", dep, id)
+				}
+			}
+			blockedBy = strings.Join(labels, ", ")
 		}
 
 		isReady := isBeadReady(n)
