@@ -324,10 +324,28 @@ schedule = "0 6 * * *"
 ```
 
 Overrides match by order name and can change `enabled`, `trigger`, `interval`,
-`schedule`, `check`, `on`, `pool`, `timeout`, `idempotent`, and `env`. An
-override targeting a nonexistent order is an error, not a silent no-op — `gc
-order` commands fail; `gc start` logs the error and continues with the unmatched
-override skipped.
+`schedule`, `check`, `on`, `pool`, `timeout`, `check_timeout`, `idempotent`,
+and `env`. An override targeting a nonexistent order is an error, not a silent
+no-op — `gc order` commands fail; the orchestrator logs the error and skips
+that override and every override listed after it.
+
+An override without `rig` reaches only an order's city-level instance. A pack
+order that also runs once per rig needs `rig = "*"` to reach those instances.
+Because `"*"` matches the city-level instance too, it is the safe choice for an
+order a pack ships:
+
+```toml
+[[orders.overrides]]
+name = "orphan-sweep"
+rig = "*"
+interval = "10m"
+timeout = "5m"
+```
+
+To turn a pack's order off, use one mechanism: an override with
+`enabled = false`, or `[orders] skip`. Not both. `skip` removes the order
+before overrides apply, so an override that names a skipped order matches
+nothing and fails as described above.
 
 <Accordion title="Disambiguating overrides when an order exists both city-wide and per-rig">
 Many orders expand at scan time into one instance per rig (anything in a rig's
@@ -441,8 +459,13 @@ empty list, fails validation. Omit the key and the order runs on every backend.
 For a scope whose store uses a backend the order does not name, gc never
 dispatches it. It records one `order.inapplicable` event per controller boot,
 and `gc order list` and `gc doctor` show the order as
-`inapplicable (backend http)`. An inapplicable order is not a failure and is
-never counted as a stale order.
+`inapplicable (backend http)`. `gc order check` shows it as inapplicable and
+never due, a webhook that targets it is rejected, and `gc order run` refuses it
+unless you pass `--force`. The HTTP API's order check
+(`GET /v0/city/{cityName}/orders/check`) does not apply this gate yet: it still
+evaluates the order's trigger and can report the order as due, though gc never
+dispatches it. An inapplicable order is not a failure and is never counted as a
+stale order.
 
 ## Rig-scoped orders
 
