@@ -320,7 +320,12 @@ const (
 	// bumps) merged without it running. requiredFilterPaths pins the three
 	// paths. Reviewed delta: three filter paths; no new job, step command or
 	// permission.
-	expectedCIExecutionHash     = "97af365879b1ea3c6a86cfdb6e9cc662a2cef31bc50463f833f57eef7067d6a9"
+	//
+	// Bumped again (contract radar toolchain): beads main's go.mod requires a
+	// newer Go than ours and setup-go pins GOTOOLCHAIN=local. Reviewed delta:
+	// one step env (GOTOOLCHAIN=auto) on contract-radar-bd-head's Build bd
+	// step; no new job, trigger, step command or permission.
+	expectedCIExecutionHash     = "3d2d22c8d62da7b30b06a1f0f816abc8fdb0f2368698e56491a2c2d7af292fd5"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
