@@ -189,6 +189,7 @@ func (c *laneCity) x6Check(ids []string, phase string, timeout time.Duration) x6
 	slices.Sort(lat.steady)
 	slices.Sort(lat.drain)
 	c.assertNoIdentifier(c.ops())
+	c.logTail(phase)
 	return lat
 }
 
@@ -273,7 +274,6 @@ func TestX6FanIn(t *testing.T) {
 		drainMax := drain[len(drain)-1]
 		t.Logf("x6 steady: %d notices at 20/s in %d injections; latency p50 %s p99 %s max %s; the last injection's %d notices: max %s; all notices: p99 %s",
 			len(ids), len(c.injectionSizes("steady")), p50, p99, maxLat, len(drain), drainMax, percentile(lat.all(), 0.99))
-		c.logTail("steady")
 		if p99 > x6SteadyP99 || maxLat > x6SteadyMax {
 			t.Fatalf("latency p99 %s max %s before the last injection, want p99 <= %s and max <= %s", p99, maxLat, x6SteadyP99, x6SteadyMax)
 		}
