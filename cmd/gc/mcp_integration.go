@@ -64,6 +64,20 @@ type resolvedMCPProjection struct {
 	Delivery     string
 	Catalog      materialize.MCPCatalog
 	Projection   materialize.MCPProjection
+	// Skipped lists shared-layer servers the agent's provider cannot
+	// receive. They are in neither Catalog nor Projection: the agent starts
+	// without them.
+	Skipped []mcpServerSkip
+}
+
+// agentMCPResolution is one agent's effective MCP after provider capability
+// filtering. Catalog holds the servers the agent's provider receives and
+// Projection their provider-native payload; Skipped holds the shared-layer
+// servers it starts without.
+type agentMCPResolution struct {
+	Catalog    materialize.MCPCatalog
+	Projection materialize.MCPProjection
+	Skipped    []mcpServerSkip
 }
 
 // mcpProviderKinds are the harness families gc can write an MCP config for.
@@ -86,33 +100,6 @@ func supportsMCPProviderKind(kind string) bool {
 	return false
 }
 
-// unsupportedMCPHarnessError reports an agent whose scope carries MCP servers
-// while its provider runs on a harness gc cannot write an MCP config for.
-type unsupportedMCPHarnessError struct {
-	Harness string
-	Servers []string
-}
-
-func (e *unsupportedMCPHarnessError) Error() string {
-	harness := e.Harness
-	if harness == "" {
-		harness = "(none)"
-	}
-	return fmt.Sprintf(
-		"MCP servers [%s] are configured for this agent, but its provider runs on the %q harness, "+
-			"which cannot receive MCP (supported harnesses: %s); switch the agent to a provider on a "+
-			"supported harness or remove the MCP servers from its scope",
-		strings.Join(e.Servers, ", "), harness, strings.Join(mcpProviderKinds, ", "))
-}
-
-func newUnsupportedMCPHarnessError(harness string, catalog materialize.MCPCatalog) *unsupportedMCPHarnessError {
-	names := make([]string, 0, len(catalog.Servers))
-	for _, server := range catalog.Servers {
-		names = append(names, server.Name)
-	}
-	return &unsupportedMCPHarnessError{Harness: strings.TrimSpace(harness), Servers: names}
-}
-
 func loadEffectiveMCPForAgent(
 	cityPath string,
 	cfg *config.City,
@@ -126,31 +113,66 @@ func loadEffectiveMCPForAgent(
 	return catalog, nil
 }
 
+// resolveAgentMCPProjection loads an agent's effective MCP catalog and builds
+// the provider-native file projection of the servers its provider's MCP
+// config can carry.
+//
+// inBand is set for ACP sessions, which receive their servers in the
+// session/new request instead of through a file. They receive every server:
+// Catalog is the whole effective catalog, nothing is skipped, and nothing is
+// an error. Their file projection, when the harness has one, still holds
+// only what the file can carry.
+//
+// For every other session, shared-layer servers the provider cannot receive
+// come back in Skipped and are left out of Catalog and Projection, and
+// agent-local ones are an error (partitionAgentMCPCatalog).
 func resolveAgentMCPProjection(
 	cityPath string,
 	cfg *config.City,
 	agent *config.Agent,
 	qualifiedName, workDir string,
 	providerKind string,
-) (materialize.MCPCatalog, materialize.MCPProjection, error) {
+	inBand bool,
+) (agentMCPResolution, error) {
 	catalog, err := loadEffectiveMCPForAgent(cityPath, cfg, agent, qualifiedName, workDir)
 	if err != nil {
-		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
+		return agentMCPResolution{}, err
+	}
+	if !supportsMCPProviderKind(providerKind) && shouldSkipDeterministicControlDispatcherMCP(agent, providerKind) {
+		return agentMCPResolution{}, nil
+	}
+	var resolution agentMCPResolution
+	fileServers := catalog.Servers
+	if inBand {
+		resolution.Catalog = catalog
+		if supportsMCPProviderKind(providerKind) {
+			fileServers = catalog.Filter(func(server materialize.MCPServer) bool {
+				return materialize.MCPProjectionSupportsTransport(providerKind, server.Transport)
+			}).Servers
+		}
+	} else {
+		kept, skipped, err := partitionAgentMCPCatalog(providerKind, catalog)
+		if err != nil {
+			return agentMCPResolution{}, err
+		}
+		resolution.Catalog, resolution.Skipped = kept, skipped
+		fileServers = kept.Servers
 	}
 	if !supportsMCPProviderKind(providerKind) {
-		if shouldSkipDeterministicControlDispatcherMCP(agent, providerKind) {
-			return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
-		}
-		if len(catalog.Servers) > 0 {
-			return materialize.MCPCatalog{}, materialize.MCPProjection{}, newUnsupportedMCPHarnessError(providerKind, catalog)
-		}
-		return catalog, materialize.MCPProjection{}, nil
+		return resolution, nil
 	}
-	projection, err := materialize.BuildMCPProjection(providerKind, workDir, catalog.Servers)
+	resolution.Projection, err = materialize.BuildMCPProjection(providerKind, workDir, fileServers)
 	if err != nil {
-		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
+		return agentMCPResolution{}, err
 	}
-	return catalog, projection, nil
+	return resolution, nil
+}
+
+// mcpInBand reports whether an agent's sessions receive MCP in-band: an ACP
+// session carries its servers in session/new rather than in a provider-native
+// file. resolved may be nil when the provider does not resolve.
+func mcpInBand(agent *config.Agent, resolved *config.ResolvedProvider) bool {
+	return agent != nil && config.ResolveSessionCreateTransport(agent.Session, resolved) == config.SessionTransportACP
 }
 
 // shouldSkipDeterministicControlDispatcherMCP matches the providerless
@@ -196,50 +218,112 @@ func ensureMCPGitignoreBestEffort(root string, entries []string, stderr io.Write
 	}
 }
 
-// stage1MCPSkipWarned remembers which (city, agent, harness, servers) skips
-// have already been reported, so the supervisor's per-tick stage-1 pass warns
-// once per process instead of on every tick.
+// stage1MCPSkipWarned remembers which stage-1 skip warnings have been
+// printed, keyed by city and message, so a supervisor that runs stage 1 again
+// (a city start retried after a failure, a config reload) warns once per
+// process. A changed skip (another agent, another server) is a new message
+// and warns again.
 var stage1MCPSkipWarned sync.Map
 
-func warnStage1MCPSkip(cityPath, agent string, harnessErr *unsupportedMCPHarnessError, stderr io.Writer) {
+// warnStage1MCPOnce prints a stage-1 skip warning naming its city, since a
+// supervisor's log interleaves every city it runs.
+func warnStage1MCPOnce(cityPath, cityName, message string, stderr io.Writer) {
 	if stderr == nil {
 		return
 	}
-	key := strings.Join([]string{filepath.Clean(cityPath), agent, harnessErr.Harness, strings.Join(harnessErr.Servers, ",")}, "\x00")
+	key := filepath.Clean(cityPath) + "\x00" + message
 	if _, seen := stage1MCPSkipWarned.LoadOrStore(key, true); seen {
 		return
 	}
-	fmt.Fprintf(stderr, "gc: warning: skipping MCP projection for agent %q: %v\n", agent, harnessErr) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc: warning: city %q: %s\n", cityName, message) //nolint:errcheck // best-effort stderr
+}
+
+// isProviderResolutionError reports whether err says an agent's provider
+// does not resolve: its binary is not installed, or its name is not in the
+// provider catalog. That agent cannot start, and its own session start says
+// why, but it must not stop stage 1 for the rest of the city. Every provider
+// a city declares has an implicit agent that inherits the city's MCP, so one
+// declared provider that is not installed is enough.
+func isProviderResolutionError(err error) bool {
+	return errors.Is(err, config.ErrProviderNotInPATH) || errors.Is(err, config.ErrProviderNotFound)
+}
+
+// stage1MCPTargets is what a stage-1 pass reconciles: the targets to apply,
+// and the managed keys of agents it skipped. A skipped agent cannot start,
+// but the target it last projected is left as it was instead of being
+// cleaned up as an orphan: a session started before the skip may still read
+// it, and the next stage-1 pass (a city start or config reload) projects it
+// again once the agent resolves.
+type stage1MCPTargets struct {
+	targets []mcpTargetSpec
+	held    []string
 }
 
 func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
-	return buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, false)
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, false)
+	return set.targets, err
 }
 
-// buildStage1MCPTargetsWith is buildStage1MCPTargets with pathOnly: agents'
-// work dirs are resolved without being created, for a plan that must write
-// nothing.
-func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) ([]mcpTargetSpec, error) {
+// heldStage1MCPKey returns the managed key of the stage-1 target a skipped
+// agent would reconcile: set when its provider family has an MCP projection
+// and its work dir is its scope root. The family resolves from config alone,
+// since the provider binary may be what is missing. With pathOnly, the work
+// dir is resolved without being created.
+func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pathOnly bool) (string, bool) {
+	resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, resolveAnyProviderBinary)
+	if err != nil {
+		return "", false
+	}
+	kind := resolvedProviderLaunchFamily(resolved)
+	if !supportsMCPProviderKind(kind) {
+		return "", false
+	}
+	scopeRoot := agentScopeRoot(agent, cityPath, cfg.Rigs)
+	resolveWorkDir := resolveWorkDirForQualifiedName
+	if pathOnly {
+		resolveWorkDir = resolveWorkDirPathForQualifiedName
+	}
+	workDir, err := resolveWorkDir(cityPath, cfg, agent, agent.QualifiedName())
+	if err != nil || canonicaliseFilePath(workDir, cityPath) != scopeRoot {
+		return "", false
+	}
+	return managedKey(kind, scopeRoot), true
+}
+
+// collectStage1MCPTargets resolves every stage-1 agent's MCP target, and the
+// targets of the agents it skips. With pathOnly, agents' work dirs are
+// resolved without being created, for a plan that must write nothing.
+func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) (stage1MCPTargets, error) {
 	if cfg == nil {
-		return nil, nil
+		return stage1MCPTargets{}, nil
 	}
 	byKey := make(map[string]mcpTargetSpec)
+	var (
+		skips mcpSkipGroups
+		held  []string
+	)
+	blocked := make(map[string]string)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
 			continue
 		}
 		view, err := resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, pathOnly)
-		var harnessErr *unsupportedMCPHarnessError
-		if errors.As(err, &harnessErr) {
-			// One agent's harness must not fail the whole city: skip it here.
-			// Its own session start still reports the same error.
-			warnStage1MCPSkip(cityPath, agent.QualifiedName(), harnessErr, stderr)
+		if isAgentMCPCapabilityError(err) || isProviderResolutionError(err) {
+			// One agent that cannot start must not fail the whole city:
+			// skip it here. Its own session start reports the same error.
+			blocked[mcpAgentLabel(agent)] = err.Error()
+			if key, ok := heldStage1MCPKey(cityPath, cfg, agent, pathOnly); ok {
+				held = append(held, key)
+			}
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
+			return stage1MCPTargets{}, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
 		}
+		// Shared-layer servers the provider cannot receive are already out
+		// of view.Projection; say which agents start without them.
+		skips.add(mcpAgentLabel(agent), view.Skipped)
 		if view.Delivery != "stage1" {
 			continue
 		}
@@ -250,7 +334,7 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 		existing, ok := byKey[key]
 		if ok {
 			if existing.Projection.Hash() != view.Projection.Hash() {
-				return nil, fmt.Errorf(
+				return stage1MCPTargets{}, fmt.Errorf(
 					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
 					view.Projection.Target,
 					view.Projection.Provider,
@@ -272,6 +356,11 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 		}
 	}
 
+	cityName := loadedCityName(cfg, cityPath)
+	for _, line := range append(skips.lines(), groupBlockedAgents(blocked)...) {
+		warnStage1MCPOnce(cityPath, cityName, line, stderr)
+	}
+
 	keys := make([]string, 0, len(byKey))
 	for key := range byKey {
 		keys = append(keys, key)
@@ -281,15 +370,20 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 	for _, key := range keys {
 		out = append(out, byKey[key])
 	}
-	return out, nil
+	return stage1MCPTargets{targets: out, held: held}, nil
 }
 
 func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) error {
-	targets, err := buildStage1MCPTargets(cityPath, cfg, lookPath, stderr)
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, false)
 	if err != nil {
 		return err
 	}
-	desired := make(map[string]bool, len(targets)) // provider+root keys we still own
+	desired := make(map[string]bool, len(set.targets)+len(set.held)) // provider+root keys we still own
+	// A skipped agent's target is left as it was, not cleaned up as an
+	// orphan (stage1MCPTargets).
+	for _, key := range set.held {
+		desired[key] = true
+	}
 	// .gitignore entries for the targets projected so far, by root; written
 	// on every way out, so a later target's failure does not leave a
 	// projected file unignored.
@@ -299,7 +393,7 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 			ensureMCPGitignoreBestEffort(root, gitignore[root], stderr)
 		}
 	}()
-	for _, target := range targets {
+	for _, target := range set.targets {
 		err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr)
 		var refused *materialize.MCPAdoptionRefusedError
 		if errors.As(err, &refused) {
@@ -609,7 +703,7 @@ func resolveDeterministicAgentMCPProjection(
 	if err != nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent %q has session-specific MCP targets; use --session", agent.QualifiedName())
 	}
-	altView, err := resolveProjectedMCPForTarget(cityPath, cfg, agent, altIdentity, altWorkDir, "", lookPath)
+	altView, err := resolveProjectedMCPForTarget(cityPath, cfg, agent, altIdentity, altWorkDir, "", "", lookPath)
 	if err != nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent %q has session-specific MCP targets; use --session", agent.QualifiedName())
 	}
@@ -657,7 +751,7 @@ func resolveConfiguredAgentMCPProjectionWith(
 		}
 		return resolvedMCPProjection{}, fmt.Errorf("resolving workdir for agent %q: %w", identity, err)
 	}
-	return resolveProjectedMCPForTarget(cityPath, cfg, agent, identity, workDir, "", lookPath)
+	return resolveProjectedMCPForTarget(cityPath, cfg, agent, identity, workDir, "", "", lookPath)
 }
 
 func resolveSessionMCPProjection(
@@ -709,7 +803,7 @@ func resolveSessionMCPProjection(
 	if providerKind == "" {
 		providerKind = strings.TrimSpace(info.Provider)
 	}
-	return resolveProjectedMCPForTarget(cityPath, cfg, agent, identity, workDir, providerKind, lookPath)
+	return resolveProjectedMCPForTarget(cityPath, cfg, agent, identity, workDir, providerKind, strings.TrimSpace(info.Transport), lookPath)
 }
 
 // validateStage2TargetClaimants enforces that every configured agent
@@ -801,10 +895,11 @@ func validateStage2TargetClaimants(
 		if err != nil {
 			continue
 		}
-		_, projection, err := resolveAgentMCPProjection(cityPath, cfg, other, identity, otherWorkDir, otherKind)
+		peer, err := resolveAgentMCPProjection(cityPath, cfg, other, identity, otherWorkDir, otherKind, false)
 		if err != nil {
 			continue
 		}
+		projection := peer.Projection
 		if projection.Provider != want.Provider || projection.Target != want.Target {
 			// Different physical target, no conflict.
 			continue
@@ -824,11 +919,14 @@ func validateStage2TargetClaimants(
 	return nil
 }
 
+// resolveProjectedMCPForTarget resolves an agent's MCP for one concrete
+// target. providerKind and transport describe a live session; empty values
+// resolve them from config.
 func resolveProjectedMCPForTarget(
 	cityPath string,
 	cfg *config.City,
 	agent *config.Agent,
-	identity, workDir, providerKind string,
+	identity, workDir, providerKind, transport string,
 	lookPath config.LookPathFunc,
 ) (resolvedMCPProjection, error) {
 	if cfg == nil || agent == nil {
@@ -838,6 +936,7 @@ func resolveProjectedMCPForTarget(
 		identity = agent.QualifiedName()
 	}
 	scopeRoot := agentScopeRoot(agent, cityPath, cfg.Rigs)
+	inBand := transport == config.SessionTransportACP
 	if strings.TrimSpace(providerKind) == "" {
 		resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, lookPath)
 		if err != nil {
@@ -851,15 +950,20 @@ func resolveProjectedMCPForTarget(
 			return resolvedMCPProjection{}, err
 		}
 		providerKind = resolvedProviderLaunchFamily(resolved)
+		if transport == "" {
+			inBand = mcpInBand(agent, resolved)
+		}
+	} else if transport == "" {
+		inBand = mcpInBand(agent, nil)
 	}
-	catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, agent, identity, workDir, providerKind)
+	mcp, err := resolveAgentMCPProjection(cityPath, cfg, agent, identity, workDir, providerKind, inBand)
 	if err != nil {
 		return resolvedMCPProjection{}, err
 	}
 	canonWorkDir := canonicaliseFilePath(workDir, cityPath)
 	stage1 := canStage1Materialize(cfg.Session.Provider, agent) && canonWorkDir == scopeRoot
 	stage2 := isStage2EligibleSession(cfg.Session.Provider, agent) && canonWorkDir != scopeRoot
-	if len(catalog.Servers) > 0 && !stage1 && !stage2 {
+	if len(mcp.Catalog.Servers) > 0 && !stage1 && !stage2 && !inBand {
 		return resolvedMCPProjection{}, fmt.Errorf(
 			"effective MCP cannot be delivered to workdir %q with session provider %q",
 			canonWorkDir,
@@ -872,6 +976,8 @@ func resolveProjectedMCPForTarget(
 		delivery = "stage1"
 	case stage2:
 		delivery = "stage2"
+	case inBand:
+		delivery = "acp"
 	}
 	return resolvedMCPProjection{
 		Agent:        agent,
@@ -880,7 +986,8 @@ func resolveProjectedMCPForTarget(
 		ScopeRoot:    scopeRoot,
 		ProviderKind: providerKind,
 		Delivery:     delivery,
-		Catalog:      catalog,
-		Projection:   projection,
+		Catalog:      mcp.Catalog,
+		Projection:   mcp.Projection,
+		Skipped:      mcp.Skipped,
 	}, nil
 }

@@ -64,8 +64,10 @@ is the release gate.
 
 Transport support is also provider-gated at projection time. If a provider
 family's current tested build does not support a neutral transport shape
-(for example, HTTP remote MCP on a given provider), projection for that target
-must hard-error instead of emitting a config block the provider will ignore.
+(for example, HTTP remote MCP on a given provider), Gas City never emits a
+config block the provider would ignore. Whether that leaves the server out or
+stops the agent depends on where the server came from; see
+[Servers a provider cannot receive](#servers-a-provider-cannot-receive).
 
 The Codex project-local target is therefore a design requirement with an
 explicit merge gate: implementation must land with an acceptance test against
@@ -495,8 +497,11 @@ config instead of skill symlinks.
 
 ### Stage 1: scope-root reconcile
 
-At `gc start` and supervisor ticks, Gas City reconciles MCP for every eligible
-scope root even if no session is currently running.
+When a city starts (`gc start`, or the supervisor starting it) and on every
+applied config reload, Gas City reconciles MCP for every eligible scope root
+even if no session is currently running. The reload pass runs before that
+tick's reconcile restarts drifted sessions, so they start against the new
+config; its failures warn instead of refusing the reload.
 
 This handles:
 
@@ -643,6 +648,8 @@ Rules:
 - otherwise users must pass `--session <id>`
 - unsupported or undeliverable targets return the same hard error reason the
   runtime would use
+- servers left out because the target's provider cannot receive them are
+  listed separately with the reason, never as projected
 
 `--agent` is non-deterministic and therefore rejected when the effective target
 depends on a live session workdir, such as pooled or stage-2-projected
@@ -671,6 +678,8 @@ Checks cover:
 - template expansion failures
 - invalid transport field combinations
 - unsupported provider/runtime delivery
+- shared servers an agent's provider cannot receive (a warning: the agent
+  starts without them)
 - conflicting projected payloads for a shared target
 - provider-native files gc leaves alone, and adopted files whose servers
   survive only in an adoption snapshot (`mcp-adoption`)
@@ -691,15 +700,88 @@ Projection is fail-closed.
 
 - config validation failures are hard errors
 - provider resolution failures for agents with effective MCP are hard errors
-- unsupported provider families with effective MCP are hard errors
+  for that agent: its session start fails, while stage 1 skips it with a
+  warning and projects the rest of the city. Stage 1 leaves the target a
+  skipped agent last projected as it was, instead of cleaning it up as an
+  orphan: a session started before the skip may still read it, and the next
+  stage-1 pass (a city start or config reload) projects it again once the
+  agent resolves. Fixing the agent's config triggers that reload; installing a
+  missing provider binary does not, so restart the city afterwards
+  (`gc restart`).
+- servers an agent's provider cannot receive follow
+  [Servers a provider cannot receive](#servers-a-provider-cannot-receive)
 - undeliverable runtime/workdir topologies with effective MCP are hard errors
-- projection write or permission failures are hard errors
+- projection write or permission failures are hard errors, with one
+  exception: a stage-1 pass run by a config reload that fails (a target
+  conflict, a write error) warns, leaves the targets it did not reach as they
+  were, and lets the reload apply. A city start still fails on it.
 
-There is no best-effort warning mode once effective MCP exists, with one
-exception: a provider-native file gc does not manage and would have to drop
-content from is left as it is, with a warning (see "Ownership and cleanup").
-That file belongs to a repository or a user, not to gc, and failing would
-stop every agent in the city over it.
+There is no best-effort warning mode once effective MCP exists, apart from
+the warnings above (an agent stage 1 skips, a server its provider cannot
+receive, a failed projection on reload) and one more exception: a
+provider-native file gc does not manage and would have to drop content from
+is left as it is, with a warning (see "Ownership and cleanup"). That file
+belongs to a repository or a user, not to gc, and failing would stop every
+agent in the city over it.
+
+### Servers a provider cannot receive
+
+A provider cannot receive a server when its harness has no MCP projection at
+all (copilot, for one), or when the server's transport is one its projection
+cannot express (the cursor projection carries only stdio servers; no
+projection renders SSE). `materialize.MCPProjectionSupportsTransport` is the
+single source for which transports each projection carries.
+
+This applies to sessions that read a provider-native file. An ACP session
+receives its servers in-band, in `session/new`, so it receives every server
+whatever its harness's file projection can carry, and nothing is skipped or
+reported for it.
+
+What happens depends on the layer the server came from:
+
+| Layer | Who it targets | When the provider cannot receive the server |
+|---|---|---|
+| The agent's own `mcp/` directory | that agent, explicitly | Error for that agent: its session start fails with the reason. Stage 1 skips the agent with a warning and leaves the target it last projected as it was; the rest of the city starts. |
+| Every other layer: the city pack's `mcp/` and pack graph, explicit, implicit and bootstrap imports, the rig pack, rig imports | every agent in its scope | The server is left out of that agent's projection with a warning, and the agent starts without it. |
+
+Shared layers attach their servers to every agent in scope, so a single
+`[imports]` entry can reach agents on harnesses its author never targeted.
+The user's own city-level `mcp/` directory is a shared layer too: it means
+"every agent in this city that can use it". Treating either as fatal would let
+one agent's provider stop that agent, or before per-agent skipping the whole
+city, from starting. The agent's own `mcp/` directory is the one way to target
+a single agent, so a server there that the provider cannot receive stays a
+hard error for that agent.
+
+A skipped server is visible in every surface that shows MCP:
+
+- each stage-1 pass (the supervisor log, or the output of `gc start
+  --foreground` and `--dry-run`) prints one warning per group of agents that
+  skip the same servers, once per process, naming the city; agents that
+  cannot start are reported the same way. An implicit agent, which gc adds
+  for each declared provider, is named with the provider it stands for
+- under a supervisor, `gc start` and a `gc reload` the controller accepts
+  print the same warnings, since the supervisor's pass prints them only to
+  its log. They come from a pass of the command's own that projects nothing
+  and loads the config without waiting on a busy repo cache. Like
+  `gc start --dry-run`, it resolves providers on the invoking shell's
+  `PATH`, which can differ from the supervisor's, so the supervisor log is
+  authoritative
+- `gc mcp list --agent|--session` lists it under "Not projected" (`skipped` in
+  `--json`) instead of with the projected servers
+- `gc doctor` reports it as an `mcp-config` warning
+- `gc config show` reports it as a validation warning, as it does an agent
+  that cannot start because its own `mcp/` directory declares a server its
+  provider cannot receive: `gc start` starts the rest of the city
+- `gc import add` names the agents that will start without the new import's
+  servers, comparing the city before and after the add
+- the stage-2 `gc internal project-mcp` pre-start prints it, but a runtime
+  keeps a pre-start's output only when the pre-start fails (tmux, for one,
+  discards it otherwise), so for a session in its own work dir the other
+  surfaces above are where it shows
+
+Skipped servers are not part of the projection, its hash, or the session
+fingerprint, so the agent's MCP drift tracks only what it receives.
 
 ## Implementation Shape
 
