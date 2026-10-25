@@ -39,6 +39,11 @@ ls -lh /path/to/city/.beads/dolt/<dbname>/.dolt/noms/*.journal
 gc stop --all 2>/dev/null || true
 gc dolt stop 2>/dev/null || true
 
+# 3b. Keep the damaged store only OUTSIDE data_dir (see "Keep Damaged Stores Outside data_dir")
+mkdir -p /path/to/city/.gc/runtime/packs/dolt/corrupt-aside
+mv /path/to/city/.beads/dolt/<dbname> \
+  /path/to/city/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.$(date -u +%Y%m%dT%H%M%SZ)
+
 # 4a. Restore from backup (preferred)
 # WARNING: all changes after the backup snapshot are lost
 gc dolt backup restore <dbname>-backup <dbname>
@@ -47,6 +52,9 @@ gc dolt backup restore <dbname>-backup <dbname>
 # WARNING: reconstructs from the passive 15-minute export; open/in-progress
 #          bead state may be partially stale compared to the last committed Dolt state
 gc bd import /path/to/city/.gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
+
+# 4c. After a fresh clone or restore, recreate the clone-local tables
+gc bd migrate schema
 
 # 5. Verify
 dolt --host 127.0.0.1 --port "$GC_DOLT_PORT" --user root sql -q "SELECT active_branch()"
@@ -110,6 +118,34 @@ lsof -i :"${GC_DOLT_PORT:-28231}" 2>/dev/null || true
 
 ---
 
+## Keep Damaged Stores Outside data_dir
+
+The managed Dolt server treats **every subdirectory of `data_dir`** (`.beads/dolt` by default)
+as a database. A damaged store kept there, even renamed to `<dbname>.broken` or
+`<dbname>.damaged-<timestamp>`, is loaded as a database on the next start. The server dies
+and the watchdog restarts it, so you get a crash loop that never mentions the stray
+directory. The log line to search for is:
+
+```text
+root hash doesn't exist: <hash>
+```
+
+Whenever you keep a damaged or replaced store for postmortem, move it **outside `data_dir`**.
+The automated journal recovery in `gc-beads-bd.sh` follows the same rule: it preserves each
+corrupt store under `$PACK_STATE_DIR/corrupt-aside/` (`.gc/runtime/packs/dolt/corrupt-aside/`
+in a default city), never deleting it. Use that directory for manual recovery too:
+
+```bash
+mkdir -p /path/to/city/.gc/runtime/packs/dolt/corrupt-aside
+mv /path/to/city/.beads/dolt/<dbname> \
+  /path/to/city/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+If the server is already crash-looping on this error, stop it (Step 3), move the stray
+directory out of `data_dir` the same way, and start again.
+
+---
+
 ## Step 4: Restore From Backup
 
 > **[WARNING]** Restoring from backup permanently replaces the current database with the
@@ -124,7 +160,8 @@ gc dolt backup list <dbname>
 # Restore the database from the <dbname>-backup remote
 gc dolt backup restore <dbname>-backup <dbname>
 
-# If the restore command is unavailable, drop and re-clone manually:
+# If the restore command is unavailable, drop and re-clone manually (to keep the
+# damaged store instead of deleting it, move it outside data_dir first, as above):
 # rm -rf /path/to/city/.beads/dolt/<dbname>
 # dolt clone <backup-url> /path/to/city/.beads/dolt/<dbname>
 ```
@@ -172,6 +209,29 @@ gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 
 ---
 
+## Step 4 (after a fresh clone): Recreate the Clone-Local Tables
+
+A store rebuilt by `dolt clone` or a Dolt backup restore does not carry the clone-local
+tables, which Dolt ignores and so never commits or backs up. bd's ordinary open does not
+recreate them. Without them, `gc bd list` fails with:
+
+```text
+table not found: leases
+```
+
+and the supervisor cannot load session beads. Replay them with:
+
+```bash
+gc bd migrate schema
+```
+
+This is the correct and sufficient fix, and it needs no `--force`. It may report
+`Schema already at v64` (the number is your bd's schema version). That output reads like a
+no-op but is expected, not an error: the clone-local tables were recreated. The command is
+idempotent, so run it after any restore or re-clone.
+
+---
+
 ## Step 5: Verify
 
 Confirm the database starts cleanly and the city is healthy before resuming work:
@@ -202,6 +262,8 @@ gc dolt compact
 
 ## Post-Recovery Checklist
 
+- [ ] Any damaged store kept for postmortem lives outside `data_dir`, not beside the live databases
+- [ ] `gc bd migrate schema` ran after a fresh clone or restore, and `gc bd list` works
 - [ ] Dolt server starts and responds to SQL queries
 - [ ] `gc doctor` passes with no errors (warnings on non-critical checks are acceptable)
 - [ ] `gc start` brings all configured sessions online

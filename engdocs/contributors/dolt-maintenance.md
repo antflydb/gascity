@@ -236,6 +236,13 @@ not for restore.
    mv dolt dolt.broken-$(date -u +%Y%m%dT%H%M%SZ)
    ```
 
+   The set-aside copy must stay outside `data_dir` (`.beads/dolt`): the
+   managed server treats every directory under `data_dir` as a database, and
+   a damaged one there crash-loops it. The copy above sits beside `dolt`, not
+   inside it. See
+   [`journal-corruption-recovery.md`](../../examples/bd/dolt/docs/journal-corruption-recovery.md)
+   for the signature and the `corrupt-aside` convention.
+
 3. **Pick the most recent successful snapshot** under
    `.beads/dolt-backups/success/` (sorted lexicographically — the
    timestamp format makes lexical order equal to time order).
@@ -246,6 +253,16 @@ not for restore.
    cd <city>/.beads
    dolt clone file://$(pwd)/dolt-backups/success/<timestamp> dolt
    ```
+
+   A fresh clone lacks the clone-local tables, so recreate them before
+   starting (`table not found: leases` is the symptom of skipping this;
+   `Schema already at v<N>` is the expected, successful output):
+
+   ```sh
+   gc bd migrate schema
+   ```
+
+   See the same runbook, [Step 4 (after a fresh clone)](../../examples/bd/dolt/docs/journal-corruption-recovery.md).
 
 5. **Restart the controller and verify:**
 
