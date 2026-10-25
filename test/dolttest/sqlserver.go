@@ -26,8 +26,10 @@ const (
 	sqlServerAttemptTimeout = 60 * time.Second
 	// sqlServerLogTailLines is how much of the server log a failure carries.
 	sqlServerLogTailLines = 40
-	// sqlServerPortTaken is what dolt prints, in any case, when it cannot
-	// bind the port it was handed ("Port N already in use.").
+	// sqlServerPortTaken ends what dolt prints, in any case, when it cannot
+	// bind the port it was handed ("Port N already in use."). The match also
+	// needs "port " so dolt's unix-socket warning ("file already in use") is
+	// not taken for a lost port.
 	sqlServerPortTaken = "already in use"
 )
 
@@ -203,7 +205,8 @@ func startSQLServerOnPort(t testing.TB, spec SQLServerSpec, host, logPath string
 		select {
 		case <-exited:
 			output := readServerLog(logPath)
-			if strings.Contains(strings.ToLower(output), sqlServerPortTaken) {
+			lower := strings.ToLower(output)
+			if strings.Contains(lower, "port ") && strings.Contains(lower, sqlServerPortTaken+".") {
 				return nil, true
 			}
 			t.Fatalf("dolt sql-server exited before it listened on %s: %v\n%s", addr, waitErr, tailLines(output, sqlServerLogTailLines))

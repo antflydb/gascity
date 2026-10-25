@@ -93,6 +93,30 @@ func TestStartSQLServerGivesUpWhenEveryProbedPortIsLost(t *testing.T) {
 	}
 }
 
+func TestStartSQLServerDoesNotTakeASocketInUseForALostPort(t *testing.T) {
+	// Dolt's unix-socket warning shares "already in use" with its lost-port
+	// error; a server that logs it and exits did not lose its port.
+	dolt := fakeDolt(t, `echo "unix socket set up failed: file already in use: /tmp/mysql.sock" >&2; exit 3`)
+	attempts := 0
+
+	failure := failureOf(t, func(tb testing.TB) {
+		StartSQLServer(tb, SQLServerSpec{
+			Dolt: dolt,
+			Args: func(port int) []string {
+				attempts++
+				return []string{strconv.Itoa(port)}
+			},
+		})
+	})
+
+	if !strings.Contains(failure, "exited before it listened") {
+		t.Fatalf("failure %q does not say dolt exited before it listened", failure)
+	}
+	if attempts != 1 {
+		t.Fatalf("started dolt %d times; an exit that is not a lost port is not retried", attempts)
+	}
+}
+
 func TestStartSQLServerReportsTheLogTailWhenTheServerExitsEarly(t *testing.T) {
 	dolt := fakeDolt(t, `i=1; while [ "$i" -le 60 ]; do echo "log line $i" >&2; i=$((i + 1)); done; exit 3`)
 	attempts := 0
