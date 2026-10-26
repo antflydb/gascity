@@ -1,0 +1,7 @@
+# rbe-west worker-env grace record (gascity tools/rbe/worker-env-grace; TESTING.md "Grace window for Go re-pins").
+# no grace window: the re-pin moves more than the go line: -dolt dolt version 2.1.8, +dolt dolt version 2.6.0
+version 1
+pin sha256:1c13f58eb37a36d4961b8db0e37825d1ddc39ebce86a33bd58b50abb495bfd98
+sha f78779e415224ec372001245b51b9f25b4a4368b
+previous none
+reason the re-pin moves more than the go line: -dolt dolt version 2.1.8, +dolt dolt version 2.6.0
