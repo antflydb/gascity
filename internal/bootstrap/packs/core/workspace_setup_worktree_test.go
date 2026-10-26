@@ -172,6 +172,8 @@ func TestCoreWorkspaceSetupPlacesWorktreeUnderGCDir(t *testing.T) {
 	}{
 		{name: "mol-scoped-work from rig root", file: "mol-scoped-work.toml", startDir: "rig"},
 		{name: "mol-scoped-work from rig subdirectory", file: "mol-scoped-work.toml", startDir: "rig/sub"},
+		{name: "mol-polecat-commit from rig root", file: "mol-polecat-commit.toml", startDir: "rig"},
+		{name: "mol-polecat-commit from rig subdirectory", file: "mol-polecat-commit.toml", startDir: "rig/sub"},
 		// The Gastown-style layout that already works: the home is itself a
 		// linked worktree of the rig and the session never left it, so the
 		// anchored path and the old cwd-derived path coincide. Guards against
@@ -222,5 +224,21 @@ func TestCoreWorkspaceSetupPlacesWorktreeUnderGCDir(t *testing.T) {
 				t.Errorf("step ended in %s, want the new worktree %s ({{setup_command}} runs there)", got, want)
 			}
 		})
+	}
+}
+
+// TestMolPolecatCommitCleanupKeepsCwdWorktreePath is the scope guard for the
+// #6014 fix: commit-and-push's cleanup runs with the session already inside
+// the worktree, so WORKTREE_PATH=$(pwd) there is the intended value. After a
+// relaunch GC_DIR follows the recorded work_dir (the worktree itself), so
+// re-deriving $GC_DIR/worktrees/<bead> would point one level too deep. An
+// over-broad anchor sweep must fail here.
+func TestMolPolecatCommitCleanupKeepsCwdWorktreePath(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-polecat-commit.toml"), "commit-and-push")
+	if !strings.Contains(step, "WORKTREE_PATH=$(pwd)") {
+		t.Error("commit-and-push cleanup must keep deriving WORKTREE_PATH from the current directory: the step runs inside the worktree")
+	}
+	if strings.Contains(step, "GC_DIR") {
+		t.Error("commit-and-push must not depend on GC_DIR: after a relaunch it names the worktree itself, not its parent")
 	}
 }
