@@ -227,6 +227,52 @@ func TestCoreWorkspaceSetupPlacesWorktreeUnderGCDir(t *testing.T) {
 	}
 }
 
+// TestCoreWorkspaceSetupRefusesWithoutAbsoluteGCDir pins the fail-closed half
+// of the anchor: with GC_DIR unset, empty, or relative, the create branch must
+// refuse — name GC_DIR on stderr, create nothing, record no work_dir — rather
+// than fall back to the current directory. The fallback is the original
+// defect, not a safety net.
+func TestCoreWorkspaceSetupRefusesWithoutAbsoluteGCDir(t *testing.T) {
+	empty := ""
+	relative := "home"
+	rows := []struct {
+		name  string
+		file  string
+		gcDir *string
+	}{
+		{name: "mol-scoped-work GC_DIR unset", file: "mol-scoped-work.toml", gcDir: nil},
+		{name: "mol-scoped-work GC_DIR empty", file: "mol-scoped-work.toml", gcDir: &empty},
+		{name: "mol-scoped-work GC_DIR relative", file: "mol-scoped-work.toml", gcDir: &relative},
+		{name: "mol-polecat-commit GC_DIR unset", file: "mol-polecat-commit.toml", gcDir: nil},
+		{name: "mol-polecat-commit GC_DIR empty", file: "mol-polecat-commit.toml", gcDir: &empty},
+		{name: "mol-polecat-commit GC_DIR relative", file: "mol-polecat-commit.toml", gcDir: &relative},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			stage, prelude, epilogue := stageWorkspace(t, "rig", false)
+			out, logPath, err := runStagedWorkspaceSetup(t, stage, prelude, epilogue, row.file, row.gcDir)
+			if err == nil {
+				t.Fatalf("the create branch must refuse a non-absolute GC_DIR; it succeeded:\n%s", out)
+			}
+			if !strings.Contains(out, "GC_DIR") {
+				t.Errorf("the refusal must name GC_DIR on stderr:\n%s", out)
+			}
+			for _, parent := range []string{
+				filepath.Join(stage, "rig"),
+				filepath.Join(stage, "rig", "sub"),
+				filepath.Join(stage, "home"),
+			} {
+				if _, statErr := os.Stat(filepath.Join(parent, "worktrees")); !os.IsNotExist(statErr) {
+					t.Errorf("a refused create must build no worktree, but one exists under %s", parent)
+				}
+			}
+			if logged, readErr := os.ReadFile(logPath); readErr != nil || strings.Contains(string(logged), "bd update") {
+				t.Errorf("a refused create must record no work_dir; gc log:\n%s", logged)
+			}
+		})
+	}
+}
+
 // TestMolPolecatCommitCleanupKeepsCwdWorktreePath is the scope guard for the
 // #6014 fix: commit-and-push's cleanup runs with the session already inside
 // the worktree, so WORKTREE_PATH=$(pwd) there is the intended value. After a
