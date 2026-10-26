@@ -7,7 +7,7 @@
       "package": "main",
       "function": "reconcileSessionBeadsTracedWithNamedDemand",
       "file": "cmd/gc/session_reconciler.go",
-      "ccn": 626
+      "ccn": 614
     },
     {
       "package": "main",
@@ -25,7 +25,7 @@
       "package": "config",
       "function": "LoadWithIncludesOptions",
       "file": "internal/config/compose.go",
-      "ccn": 139
+      "ccn": 138
     },
     {
       "package": "config",
@@ -34,28 +34,28 @@
       "ccn": 106
     },
     {
-      "package": "main",
-      "function": "executePlannedStartsTraced",
-      "file": "cmd/gc/session_lifecycle_parallel.go",
-      "ccn": 98
-    },
-    {
-      "package": "beads",
-      "function": "(*CachingStore).applyEvent",
-      "file": "internal/beads/caching_store_events.go",
-      "ccn": 97
-    },
-    {
       "package": "molecule",
       "function": "Instantiate",
       "file": "internal/molecule/molecule.go",
       "ccn": 97
     },
     {
+      "package": "beads",
+      "function": "(*CachingStore).applyEvent",
+      "file": "internal/beads/caching_store_events.go",
+      "ccn": 95
+    },
+    {
       "package": "main",
       "function": "doStorageRecoverStranded",
       "file": "cmd/gc/infra_class_recover.go",
       "ccn": 95
+    },
+    {
+      "package": "main",
+      "function": "executePlannedStartsTraced",
+      "file": "cmd/gc/session_lifecycle_parallel.go",
+      "ccn": 94
     },
     {
       "package": "config",
@@ -65,15 +65,15 @@
     },
     {
       "package": "main",
-      "function": "(*CityRuntime).reloadConfigTraced",
-      "file": "cmd/gc/city_runtime.go",
-      "ccn": 89
-    },
-    {
-      "package": "main",
       "function": "resolveTemplate",
       "file": "cmd/gc/template_resolve.go",
       "ccn": 87
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).reloadConfigTraced",
+      "file": "cmd/gc/city_runtime.go",
+      "ccn": 86
     },
     {
       "package": "config",
@@ -124,12 +124,6 @@
       "ccn": 65
     },
     {
-      "package": "opjournal",
-      "function": "planRules",
-      "file": "internal/opjournal/lane_plan.go",
-      "ccn": 64
-    },
-    {
       "package": "main",
       "function": "buildPreparedStartWithTranscript",
       "file": "cmd/gc/session_lifecycle_parallel.go",
@@ -149,14 +143,20 @@
     },
     {
       "package": "main",
-      "function": "startOneCity",
+      "function": "runSupervisor",
       "file": "cmd/gc/cmd_supervisor.go",
-      "ccn": 61
+      "ccn": 60
     },
     {
       "package": "main",
-      "function": "runSupervisor",
+      "function": "startOneCity",
       "file": "cmd/gc/cmd_supervisor.go",
+      "ccn": 60
+    },
+    {
+      "package": "opjournal",
+      "function": "planRules",
+      "file": "internal/opjournal/lane_plan.go",
       "ccn": 60
     },
     {
@@ -175,12 +175,6 @@
       "package": "convergence",
       "function": "(*Handler).HandleWispClosed",
       "file": "internal/convergence/handler.go",
-      "ccn": 57
-    },
-    {
-      "package": "main",
-      "function": "doPrimeWithHookFormatOpts",
-      "file": "cmd/gc/cmd_prime.go",
       "ccn": 57
     },
     {
@@ -221,8 +215,8 @@
     },
     {
       "package": "main",
-      "function": "cmdNudgeDrainWithFormat",
-      "file": "cmd/gc/cmd_nudge.go",
+      "function": "doPrimeWithHookFormatOpts",
+      "file": "cmd/gc/cmd_prime.go",
       "ccn": 53
     },
     {
@@ -355,7 +349,7 @@
       "package": "api",
       "function": "(*Server).buildStatusBody",
       "file": "internal/api/handler_status.go",
-      "ccn": 45
+      "ccn": 46
     },
     {
       "package": "config",
@@ -373,6 +367,12 @@
       "package": "formula",
       "function": "(*Formula).Validate",
       "file": "internal/formula/types.go",
+      "ccn": 45
+    },
+    {
+      "package": "main",
+      "function": "cmdNudgeDrainWithFormat",
+      "file": "cmd/gc/cmd_nudge.go",
       "ccn": 45
     },
     {
@@ -424,12 +424,6 @@
       "ccn": 43
     },
     {
-      "package": "beads",
-      "function": "(*CachingStore).RefreshRowReport",
-      "file": "internal/beads/caching_store_reads.go",
-      "ccn": 42
-    },
-    {
       "package": "main",
       "function": "applyReconcileDecision",
       "file": "cmd/gc/dolt_project_id.go",
@@ -467,12 +461,6 @@
     },
     {
       "package": "main",
-      "function": "cmdHookWithOptions",
-      "file": "cmd/gc/cmd_hook.go",
-      "ccn": 41
-    },
-    {
-      "package": "main",
       "function": "recoverManagedDoltProcessWithOps",
       "file": "cmd/gc/dolt_recover_managed.go",
       "ccn": 41
@@ -484,9 +472,21 @@
       "ccn": 40
     },
     {
+      "package": "api",
+      "function": "(*Server).humaHandleSessionCreate",
+      "file": "internal/api/huma_handlers_sessions_command.go",
+      "ccn": 40
+    },
+    {
       "package": "beads",
       "function": "(*CachingStore).prime",
       "file": "internal/beads/caching_store.go",
+      "ccn": 40
+    },
+    {
+      "package": "main",
+      "function": "cmdHookWithOptions",
+      "file": "cmd/gc/cmd_hook.go",
       "ccn": 40
     },
     {
@@ -515,20 +515,8 @@
     },
     {
       "package": "api",
-      "function": "(*Server).acceptSessionCreate",
-      "file": "internal/api/huma_handlers_sessions_command.go",
-      "ccn": 39
-    },
-    {
-      "package": "api",
       "function": "(*Server).handleSessionCreate",
       "file": "internal/api/handler_session_create.go",
-      "ccn": 39
-    },
-    {
-      "package": "session",
-      "function": "(*Manager).StopTurnWith",
-      "file": "internal/session/stop_turn_with.go",
       "ccn": 39
     },
     {
@@ -616,12 +604,6 @@
       "ccn": 37
     },
     {
-      "package": "main",
-      "function": "tryDeliverQueuedNudgesByPoller",
-      "file": "cmd/gc/cmd_nudge.go",
-      "ccn": 37
-    },
-    {
       "package": "orders",
       "function": "Validate",
       "file": "internal/orders/order.go",
@@ -631,12 +613,6 @@
       "package": "storebinding",
       "function": "(IntentSection).Validate",
       "file": "internal/storebinding/migration_manifest_record.go",
-      "ccn": 37
-    },
-    {
-      "package": "worker",
-      "function": "OperatorKill",
-      "file": "internal/worker/operator_kill.go",
       "ccn": 37
     },
     {
@@ -655,12 +631,6 @@
       "package": "dispatch",
       "function": "appendRalphRetryLegacy",
       "file": "internal/dispatch/ralph.go",
-      "ccn": 36
-    },
-    {
-      "package": "dispatch",
-      "function": "expandDrain",
-      "file": "internal/dispatch/drain.go",
       "ccn": 36
     },
     {
@@ -695,12 +665,6 @@
     },
     {
       "package": "main",
-      "function": "(*hookClaimOps).applyDefaults",
-      "file": "cmd/gc/cmd_hook_claim.go",
-      "ccn": 35
-    },
-    {
-      "package": "main",
       "function": "doStorageStatus",
       "file": "cmd/gc/cmd_storage.go",
       "ccn": 35
@@ -709,12 +673,6 @@
       "package": "main",
       "function": "parseBdShowWatchArgs",
       "file": "cmd/gc/cmd_bd_show_watch.go",
-      "ccn": 35
-    },
-    {
-      "package": "opjournal",
-      "function": "(*takePlan).planContent",
-      "file": "internal/opjournal/lane_plan.go",
       "ccn": 35
     },
     {
@@ -761,19 +719,13 @@
     },
     {
       "package": "main",
-      "function": "initAndHookDirResolvingDatabase",
-      "file": "cmd/gc/beads_provider_lifecycle.go",
-      "ccn": 34
-    },
-    {
-      "package": "main",
       "function": "initWizardConfigFromFlags",
       "file": "cmd/gc/cmd_init.go",
       "ccn": 34
     },
     {
       "package": "main",
-      "function": "startBeadsLifecycleResolvingCityDatabase",
+      "function": "startBeadsLifecycle",
       "file": "cmd/gc/beads_provider_lifecycle.go",
       "ccn": 34
     },
@@ -796,18 +748,6 @@
       "ccn": 34
     },
     {
-      "package": "tmux",
-      "function": "(*Tmux).nudgeSession",
-      "file": "internal/runtime/tmux/tmux.go",
-      "ccn": 34
-    },
-    {
-      "package": "tmux",
-      "function": "closeClaudeBackgroundShells",
-      "file": "internal/runtime/tmux/claude_background_stop.go",
-      "ccn": 34
-    },
-    {
       "package": "config",
       "function": "applyProviderPatch",
       "file": "internal/config/patch.go",
@@ -823,6 +763,12 @@
       "package": "contract",
       "function": "ensureCanonicalConfigFallback",
       "file": "internal/beads/contract/files.go",
+      "ccn": 33
+    },
+    {
+      "package": "dispatch",
+      "function": "expandDrain",
+      "file": "internal/dispatch/drain.go",
       "ccn": 33
     },
     {
@@ -856,6 +802,12 @@
       "ccn": 33
     },
     {
+      "package": "opjournal",
+      "function": "(*takePlan).planContent",
+      "file": "internal/opjournal/lane_plan.go",
+      "ccn": 33
+    },
+    {
       "package": "productmetrics",
       "function": "platformOpenStorageRoot",
       "file": "internal/productmetrics/storage_unix.go",
@@ -865,12 +817,6 @@
       "package": "api",
       "function": "(*Server).streamSessionTranscriptHistoryRaw",
       "file": "internal/api/handler_session_stream.go",
-      "ccn": 32
-    },
-    {
-      "package": "config",
-      "function": "mergeFragment",
-      "file": "internal/config/compose.go",
       "ccn": 32
     },
     {
@@ -905,6 +851,12 @@
     },
     {
       "package": "main",
+      "function": "cmdSessionKillWithForce",
+      "file": "cmd/gc/cmd_session.go",
+      "ccn": 32
+    },
+    {
+      "package": "main",
       "function": "doInitFromDirWithOptionsFSInternal",
       "file": "cmd/gc/cmd_init.go",
       "ccn": 32
@@ -928,9 +880,9 @@
       "ccn": 32
     },
     {
-      "package": "opjournal",
-      "function": "(*ConversationLane).Pass",
-      "file": "internal/opjournal/lane.go",
+      "package": "main",
+      "function": "tryDeliverQueuedNudgesByPoller",
+      "file": "cmd/gc/cmd_nudge.go",
       "ccn": 32
     },
     {
@@ -965,6 +917,12 @@
     },
     {
       "package": "api",
+      "function": "(*Server).humaCreateProviderSession",
+      "file": "internal/api/huma_handlers_sessions_command.go",
+      "ccn": 31
+    },
+    {
+      "package": "api",
       "function": "(*Server).streamSessionTranscriptLogRawHuma",
       "file": "internal/api/handler_session_stream.go",
       "ccn": 31
@@ -995,6 +953,12 @@
     },
     {
       "package": "main",
+      "function": "(*hookClaimOps).applyDefaults",
+      "file": "cmd/gc/cmd_hook_claim.go",
+      "ccn": 31
+    },
+    {
+      "package": "main",
       "function": "bdRigQualifiedMetadataRefusal",
       "file": "cmd/gc/cmd_bd.go",
       "ccn": 31
@@ -1015,12 +979,6 @@
       "package": "main",
       "function": "mergeScaleCheckDemand",
       "file": "cmd/gc/build_desired_state.go",
-      "ccn": 31
-    },
-    {
-      "package": "main",
-      "function": "parseBdByIDUpdateArgs",
-      "file": "cmd/gc/cmd_bd_by_id.go",
       "ccn": 31
     },
     {
@@ -1067,14 +1025,14 @@
     },
     {
       "package": "api",
-      "function": "(*Server).humaCreateProviderSession",
-      "file": "internal/api/huma_handlers_sessions_command.go",
+      "function": "buildWorkflowRunProjections",
+      "file": "internal/api/orders_feed.go",
       "ccn": 30
     },
     {
-      "package": "api",
-      "function": "buildWorkflowRunProjections",
-      "file": "internal/api/orders_feed.go",
+      "package": "beads",
+      "function": "(*CachingStore).RefreshRow",
+      "file": "internal/beads/caching_store_reads.go",
       "ccn": 30
     },
     {
@@ -1133,6 +1091,12 @@
     },
     {
       "package": "main",
+      "function": "parseBdByIDUpdateArgs",
+      "file": "cmd/gc/cmd_bd_by_id.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
       "function": "reapRuntimesBoundToClosedBeadsWith",
       "file": "cmd/gc/session_beads.go",
       "ccn": 30
@@ -1156,21 +1120,9 @@
       "ccn": 30
     },
     {
-      "package": "opjournal",
-      "function": "(*rulesPlan).planNowInterrupt",
-      "file": "internal/opjournal/lane_now.go",
-      "ccn": 30
-    },
-    {
       "package": "productmetrics",
       "function": "isClosedProductionTLSConfig",
       "file": "internal/productmetrics/upload.go",
-      "ccn": 30
-    },
-    {
-      "package": "sessionlog",
-      "function": "ReadCodexFile",
-      "file": "internal/sessionlog/codex_reader.go",
       "ccn": 30
     },
     {
@@ -1231,12 +1183,6 @@
       "package": "main",
       "function": "cmdWorkflowDeleteSource",
       "file": "cmd/gc/cmd_convoy_dispatch.go",
-      "ccn": 29
-    },
-    {
-      "package": "main",
-      "function": "doSessionWake",
-      "file": "cmd/gc/cmd_session_wake.go",
       "ccn": 29
     },
     {
@@ -1331,7 +1277,7 @@
     },
     {
       "package": "contract",
-      "function": "resolveDoltConnectionTarget",
+      "function": "ResolveDoltConnectionTarget",
       "file": "internal/beads/contract/connection.go",
       "ccn": 28
     },
@@ -1339,12 +1285,6 @@
       "package": "docgen",
       "function": "RenderMarkdown",
       "file": "internal/docgen/markdown.go",
-      "ccn": 28
-    },
-    {
-      "package": "main",
-      "function": "cmdSessionSubmit",
-      "file": "cmd/gc/cmd_session.go",
       "ccn": 28
     },
     {
@@ -1385,6 +1325,12 @@
     },
     {
       "package": "main",
+      "function": "initAndHookDir",
+      "file": "cmd/gc/beads_provider_lifecycle.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
       "function": "loadProviderScopeOwnershipJournal",
       "file": "cmd/gc/beads_scope_ownership.go",
       "ccn": 28
@@ -1411,12 +1357,6 @@
       "package": "main",
       "function": "runInfraClassMigrationFrom",
       "file": "cmd/gc/infra_class_migrate.go",
-      "ccn": 28
-    },
-    {
-      "package": "main",
-      "function": "runNudgeBackstop",
-      "file": "cmd/gc/nudge_backstop.go",
       "ccn": 28
     },
     {
@@ -1456,6 +1396,12 @@
       "ccn": 28
     },
     {
+      "package": "tmux",
+      "function": "(*Tmux).nudgeSession",
+      "file": "internal/runtime/tmux/tmux.go",
+      "ccn": 28
+    },
+    {
       "package": "worker",
       "function": "parsePatchHunks",
       "file": "internal/worker/structured_tool.go",
@@ -1471,6 +1417,12 @@
       "package": "config",
       "function": "ValidateGitHubPRMonitors",
       "file": "internal/config/github_pr_monitor.go",
+      "ccn": 27
+    },
+    {
+      "package": "config",
+      "function": "mergeFragment",
+      "file": "internal/config/compose.go",
       "ccn": 27
     },
     {
@@ -1523,8 +1475,14 @@
     },
     {
       "package": "main",
-      "function": "deliverSessionNudgeLegacy",
+      "function": "deliverSessionNudgeWithWorker",
       "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "doSessionWake",
+      "file": "cmd/gc/cmd_session_wake.go",
       "ccn": 27
     },
     {
@@ -1549,18 +1507,6 @@
       "package": "main",
       "function": "selectIdleProbeTargets",
       "file": "cmd/gc/session_reconciler.go",
-      "ccn": 27
-    },
-    {
-      "package": "main",
-      "function": "wakeWillNotStart",
-      "file": "cmd/gc/api_state_wake_refusal.go",
-      "ccn": 27
-    },
-    {
-      "package": "opjournal",
-      "function": "(*ConversationLane).settle",
-      "file": "internal/opjournal/lane_done.go",
       "ccn": 27
     },
     {
@@ -1597,12 +1543,6 @@
       "package": "sqlite",
       "function": "validateSQLiteRollbackJournal",
       "file": "internal/storebinding/sqlite/sqlite_writer_reservation.go",
-      "ccn": 27
-    },
-    {
-      "package": "tmux",
-      "function": "(*tmuxFetcher).FetchState",
-      "file": "internal/runtime/tmux/state_cache.go",
       "ccn": 27
     },
     {
@@ -1709,12 +1649,6 @@
     },
     {
       "package": "main",
-      "function": "(*conversationLaneWorker).await",
-      "file": "cmd/gc/conversation_lane_worker.go",
-      "ccn": 26
-    },
-    {
-      "package": "main",
       "function": "armConfigDrift",
       "file": "cmd/gc/reconcile_arms_drift.go",
       "ccn": 26
@@ -1780,12 +1714,6 @@
       "ccn": 26
     },
     {
-      "package": "opjournal",
-      "function": "(*ConversationLane).reconcile",
-      "file": "internal/opjournal/lane_done.go",
-      "ccn": 26
-    },
-    {
       "package": "productmetrics",
       "function": "(*spoolSweepState).finish",
       "file": "internal/productmetrics/spool.go",
@@ -1798,12 +1726,6 @@
       "ccn": 26
     },
     {
-      "package": "session",
-      "function": "(*Manager).Suspend",
-      "file": "internal/session/manager.go",
-      "ccn": 26
-    },
-    {
       "package": "sling",
       "function": "attachFormulaToBead",
       "file": "internal/sling/sling_core.go",
@@ -1813,6 +1735,12 @@
       "package": "storebinding",
       "function": "AttestGuardedActivation",
       "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 26
+    },
+    {
+      "package": "tmux",
+      "function": "(*tmuxFetcher).FetchState",
+      "file": "internal/runtime/tmux/state_cache.go",
       "ccn": 26
     },
     {
@@ -1837,12 +1765,6 @@
       "package": "api",
       "function": "(*Server).streamSessionTranscriptHistory",
       "file": "internal/api/handler_session_stream.go",
-      "ccn": 25
-    },
-    {
-      "package": "api",
-      "function": "(*SupervisorMux).streamGlobalEvents",
-      "file": "internal/api/huma_handlers_supervisor.go",
       "ccn": 25
     },
     {
@@ -1955,14 +1877,14 @@
     },
     {
       "package": "main",
-      "function": "v2ClassStoreCapabilities",
-      "file": "cmd/gc/city_runtime_v2.go",
+      "function": "validateProviderScopeOwnership",
+      "file": "cmd/gc/beads_scope_ownership.go",
       "ccn": 25
     },
     {
       "package": "main",
-      "function": "validateProviderScopeOwnership",
-      "file": "cmd/gc/beads_scope_ownership.go",
+      "function": "wakeWillNotStart",
+      "file": "cmd/gc/api_state_wake_refusal.go",
       "ccn": 25
     },
     {
@@ -2032,9 +1954,9 @@
       "ccn": 24
     },
     {
-      "package": "beads",
-      "function": "sqliteListSQL",
-      "file": "internal/beads/sqlite_store.go",
+      "package": "api",
+      "function": "(*SupervisorMux).streamGlobalEvents",
+      "file": "internal/api/huma_handlers_supervisor.go",
       "ccn": 24
     },
     {
@@ -2081,12 +2003,6 @@
     },
     {
       "package": "dispatch",
-      "function": "processWorkflowFinalize",
-      "file": "internal/dispatch/runtime.go",
-      "ccn": 24
-    },
-    {
-      "package": "dispatch",
       "function": "reconcileScopeForTerminalMember",
       "file": "internal/dispatch/scope_settle.go",
       "ccn": 24
@@ -2129,18 +2045,6 @@
     },
     {
       "package": "main",
-      "function": "(*ledgerFeed).refreshRows",
-      "file": "cmd/gc/ledger_feed.go",
-      "ccn": 24
-    },
-    {
-      "package": "main",
-      "function": "classRoutedHookClaimOps",
-      "file": "cmd/gc/claim_class_route.go",
-      "ccn": 24
-    },
-    {
-      "package": "main",
       "function": "cmdSlingWithJSON",
       "file": "cmd/gc/cmd_sling.go",
       "ccn": 24
@@ -2171,20 +2075,8 @@
     },
     {
       "package": "main",
-      "function": "handleControllerConn",
-      "file": "cmd/gc/controller.go",
-      "ccn": 24
-    },
-    {
-      "package": "main",
       "function": "materializeSessionForAgentConfig",
       "file": "cmd/gc/session_template_start.go",
-      "ccn": 24
-    },
-    {
-      "package": "main",
-      "function": "normalizeCanonicalBdScopeFilesResolvingCityDatabase",
-      "file": "cmd/gc/beads_provider_lifecycle.go",
       "ccn": 24
     },
     {
@@ -2218,9 +2110,21 @@
       "ccn": 24
     },
     {
+      "package": "main",
+      "function": "v2ClassStoreCapabilities",
+      "file": "cmd/gc/city_runtime_v2.go",
+      "ccn": 24
+    },
+    {
       "package": "molecule",
       "function": "existingAttachIDMapping",
       "file": "internal/molecule/molecule.go",
+      "ccn": 24
+    },
+    {
+      "package": "opjournal",
+      "function": "(*ConversationLane).Pass",
+      "file": "internal/opjournal/lane.go",
       "ccn": 24
     },
     {
@@ -2245,6 +2149,12 @@
       "package": "session",
       "function": "(*Manager).KillFencedReport",
       "file": "internal/session/kill_fence.go",
+      "ccn": 24
+    },
+    {
+      "package": "session",
+      "function": "(*Manager).Suspend",
+      "file": "internal/session/manager.go",
       "ccn": 24
     },
     {
@@ -2281,12 +2191,6 @@
       "package": "tmux",
       "function": "parseInputCommand",
       "file": "internal/runtime/tmux/fence.go",
-      "ccn": 24
-    },
-    {
-      "package": "worker",
-      "function": "(*SessionHandle).Nudge",
-      "file": "internal/worker/handle_lifecycle.go",
       "ccn": 24
     },
     {
@@ -2423,8 +2327,8 @@
     },
     {
       "package": "main",
-      "function": "claimFirstReadyHookAssignment",
-      "file": "cmd/gc/cmd_hook_claim.go",
+      "function": "classRoutedHookClaimOps",
+      "file": "cmd/gc/claim_class_route.go",
       "ccn": 23
     },
     {
@@ -2531,7 +2435,13 @@
     },
     {
       "package": "opjournal",
-      "function": "(*ConversationLane).writeDone",
+      "function": "(*ConversationLane).reconcile",
+      "file": "internal/opjournal/lane_done.go",
+      "ccn": 23
+    },
+    {
+      "package": "opjournal",
+      "function": "(*ConversationLane).settle",
       "file": "internal/opjournal/lane_done.go",
       "ccn": 23
     },
@@ -2555,12 +2465,6 @@
     },
     {
       "package": "session",
-      "function": "(*Store).CommitClose",
-      "file": "internal/session/store.go",
-      "ccn": 23
-    },
-    {
-      "package": "session",
       "function": "(*Store).MintIncarnation",
       "file": "internal/session/incarnation.go",
       "ccn": 23
@@ -2575,6 +2479,12 @@
       "package": "sessionlog",
       "function": "BuildDag",
       "file": "internal/sessionlog/dag.go",
+      "ccn": 23
+    },
+    {
+      "package": "sessionlog",
+      "function": "ReadCodexFile",
+      "file": "internal/sessionlog/codex_reader.go",
       "ccn": 23
     },
     {
@@ -2621,6 +2531,12 @@
     },
     {
       "package": "beads",
+      "function": "sqliteListSQL",
+      "file": "internal/beads/sqlite_store.go",
+      "ccn": 22
+    },
+    {
+      "package": "beads",
       "function": "updateProjectionMatches",
       "file": "internal/beads/bdstore.go",
       "ccn": 22
@@ -2650,12 +2566,6 @@
       "ccn": 22
     },
     {
-      "package": "events",
-      "function": "readFilteredTrackedContext",
-      "file": "internal/events/reader_context.go",
-      "ccn": 22
-    },
-    {
       "package": "formula",
       "function": "sortGraphSteps",
       "file": "internal/formula/graph.go",
@@ -2681,12 +2591,6 @@
     },
     {
       "package": "main",
-      "function": "(*laneTurnObserver).writeOnce",
-      "file": "cmd/gc/conversation_lane_turns.go",
-      "ccn": 22
-    },
-    {
-      "package": "main",
       "function": "(*routeRecoveryLane).backstopLeg",
       "file": "cmd/gc/route_recovery_lane.go",
       "ccn": 22
@@ -2695,12 +2599,6 @@
       "package": "main",
       "function": "armDrainBegin",
       "file": "cmd/gc/reconcile_arms_drain.go",
-      "ccn": 22
-    },
-    {
-      "package": "main",
-      "function": "bestStoreWithWork",
-      "file": "cmd/gc/hook_cross_store.go",
       "ccn": 22
     },
     {
@@ -2735,6 +2633,12 @@
     },
     {
       "package": "main",
+      "function": "normalizeCanonicalBdScopeFiles",
+      "file": "cmd/gc/beads_provider_lifecycle.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
       "function": "parseProductMetricsLiteralFlagToken",
       "file": "cmd/gc/metrics_classifier.go",
       "ccn": 22
@@ -2761,18 +2665,6 @@
       "package": "main",
       "function": "streamCityEventsOnce",
       "file": "cmd/gc/cmd_events.go",
-      "ccn": 22
-    },
-    {
-      "package": "opjournal",
-      "function": "(*takePlan).formBatch",
-      "file": "internal/opjournal/lane_plan.go",
-      "ccn": 22
-    },
-    {
-      "package": "opjournal",
-      "function": "validateRequestShape",
-      "file": "internal/opjournal/request.go",
       "ccn": 22
     },
     {
@@ -2843,6 +2735,12 @@
     },
     {
       "package": "api",
+      "function": "(*Server).humaHandleOrderHistory",
+      "file": "internal/api/huma_handlers_orders.go",
+      "ccn": 21
+    },
+    {
+      "package": "api",
       "function": "(*Server).resolveSessionTargetIDWithContext",
       "file": "internal/api/session_resolution.go",
       "ccn": 21
@@ -2860,15 +2758,9 @@
       "ccn": 21
     },
     {
-      "package": "api",
-      "function": "humaSessionManagerError",
-      "file": "internal/api/huma_handlers_sessions.go",
-      "ccn": 21
-    },
-    {
       "package": "beads",
-      "function": "(*BdStore).ChildrenOfAny",
-      "file": "internal/beads/children_batch.go",
+      "function": "(*BdStore).listViaBDList",
+      "file": "internal/beads/bdstore.go",
       "ccn": 21
     },
     {
@@ -2968,6 +2860,12 @@
       "ccn": 21
     },
     {
+      "package": "legacyop",
+      "function": "(*Recorder).Admit",
+      "file": "internal/opjournal/legacyop/legacyop.go",
+      "ccn": 21
+    },
+    {
       "package": "main",
       "function": "(*CityRuntime).convergenceTickScope",
       "file": "cmd/gc/convergence_tick.go",
@@ -2987,12 +2885,6 @@
     },
     {
       "package": "main",
-      "function": "(*controllerState).ConditionalWritesStatus",
-      "file": "cmd/gc/api_state_conditional_writes.go",
-      "ccn": 21
-    },
-    {
-      "package": "main",
       "function": "(agentScriptExecutor).runAction",
       "file": "cmd/gc/cmd_agent_script.go",
       "ccn": 21
@@ -3007,6 +2899,12 @@
       "package": "main",
       "function": "beadUsesACPTransport",
       "file": "cmd/gc/providers.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "claimFirstReadyHookAssignment",
+      "file": "cmd/gc/cmd_hook_claim.go",
       "ccn": 21
     },
     {
@@ -3031,6 +2929,12 @@
       "package": "main",
       "function": "doSessionListFallback",
       "file": "cmd/gc/cmd_session.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "handleControllerConn",
+      "file": "cmd/gc/controller.go",
       "ccn": 21
     },
     {
@@ -3065,20 +2969,26 @@
     },
     {
       "package": "main",
-      "function": "recoverRunningPendingCreate",
-      "file": "cmd/gc/session_lifecycle_parallel.go",
-      "ccn": 21
-    },
-    {
-      "package": "main",
       "function": "relaunchAgentForLaunchDrift",
       "file": "cmd/gc/session_reconciler.go",
       "ccn": 21
     },
     {
       "package": "main",
+      "function": "runNudgeBackstop",
+      "file": "cmd/gc/nudge_backstop.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
       "function": "runWorkflowServe",
       "file": "cmd/gc/dispatch_runtime.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "sendMailNotifyWithWorker",
+      "file": "cmd/gc/cmd_nudge.go",
       "ccn": 21
     },
     {
@@ -3125,12 +3035,6 @@
     },
     {
       "package": "opjournal",
-      "function": "planTake",
-      "file": "internal/opjournal/lane_plan.go",
-      "ccn": 21
-    },
-    {
-      "package": "opjournal",
       "function": "validateOutcome",
       "file": "internal/opjournal/request.go",
       "ccn": 21
@@ -3167,6 +3071,12 @@
     },
     {
       "package": "session",
+      "function": "(*Store).CommitClose",
+      "file": "internal/session/store.go",
+      "ccn": 21
+    },
+    {
+      "package": "session",
       "function": "lookupConfiguredNamedSession",
       "file": "internal/session/named_config.go",
       "ccn": 21
@@ -3187,6 +3097,12 @@
       "package": "storebinding",
       "function": "(Descriptor).Validate",
       "file": "internal/storebinding/provider.go",
+      "ccn": 21
+    },
+    {
+      "package": "worker",
+      "function": "(*SessionHandle).Nudge",
+      "file": "internal/worker/handle_lifecycle.go",
       "ccn": 21
     },
     {
@@ -3215,12 +3131,6 @@
     },
     {
       "package": "api",
-      "function": "(*Server).humaHandleOrderHistory",
-      "file": "internal/api/huma_handlers_orders.go",
-      "ccn": 20
-    },
-    {
-      "package": "api",
       "function": "(*Server).humaHandleSessionPatch",
       "file": "internal/api/huma_handlers_sessions_command.go",
       "ccn": 20
@@ -3245,14 +3155,8 @@
     },
     {
       "package": "api",
-      "function": "writeSessionManagerError",
-      "file": "internal/api/handler_session_errors.go",
-      "ccn": 20
-    },
-    {
-      "package": "beads",
-      "function": "(*BdStore).fetchViaBDList",
-      "file": "internal/beads/bdstore.go",
+      "function": "humaSessionManagerError",
+      "file": "internal/api/huma_handlers_sessions.go",
       "ccn": 20
     },
     {
@@ -3370,12 +3274,6 @@
       "ccn": 20
     },
     {
-      "package": "legacyop",
-      "function": "(*Recorder).Admit",
-      "file": "internal/opjournal/legacyop/legacyop.go",
-      "ccn": 20
-    },
-    {
       "package": "main",
       "function": "(*builtinImportDoctorCheck).Run",
       "file": "cmd/gc/builtin_include_doctor_check.go",
@@ -3407,14 +3305,14 @@
     },
     {
       "package": "main",
-      "function": "claimFirstEligibleHookCandidate",
-      "file": "cmd/gc/cmd_hook_claim.go",
+      "function": "cmdOrderSweepTrackingWithOptions",
+      "file": "cmd/gc/cmd_order.go",
       "ccn": 20
     },
     {
       "package": "main",
-      "function": "cmdOrderSweepTrackingWithOptions",
-      "file": "cmd/gc/cmd_order.go",
+      "function": "cmdSessionReset",
+      "file": "cmd/gc/cmd_session_reset.go",
       "ccn": 20
     },
     {
@@ -3593,20 +3491,8 @@
     },
     {
       "package": "main",
-      "function": "tryHookClaim",
-      "file": "cmd/gc/cmd_hook_claim.go",
-      "ccn": 20
-    },
-    {
-      "package": "main",
       "function": "validateProductMetricsCommandCensus",
       "file": "cmd/gc/metrics_census.go",
-      "ccn": 20
-    },
-    {
-      "package": "main",
-      "function": "writeHookClaimWorkResultForBead",
-      "file": "cmd/gc/cmd_hook_claim.go",
       "ccn": 20
     },
     {
@@ -3617,8 +3503,20 @@
     },
     {
       "package": "opjournal",
-      "function": "(RuntimeRow).validateShape",
-      "file": "internal/opjournal/runtime_row.go",
+      "function": "(*ConversationLane).writeDone",
+      "file": "internal/opjournal/lane_done.go",
+      "ccn": 20
+    },
+    {
+      "package": "opjournal",
+      "function": "(*takePlan).formBatch",
+      "file": "internal/opjournal/lane_plan.go",
+      "ccn": 20
+    },
+    {
+      "package": "opjournal",
+      "function": "validateRequestShape",
+      "file": "internal/opjournal/request.go",
       "ccn": 20
     },
     {
@@ -3721,12 +3619,6 @@
       "package": "t3bridge",
       "function": "(*Provider).ListRunning",
       "file": "internal/runtime/t3bridge/provider.go",
-      "ccn": 20
-    },
-    {
-      "package": "tmux",
-      "function": "readCodexSubmitRecord",
-      "file": "internal/runtime/tmux/submit_turn_guard.go",
       "ccn": 20
     },
     {
