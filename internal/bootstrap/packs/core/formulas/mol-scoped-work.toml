@@ -98,7 +98,11 @@ if [ -z "$WORK_BEAD_ID" ]; then
 fi
 WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
-  WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
+  # The worktree is anchored under the session work dir ($GC_DIR) rather than
+  # $(pwd): the step shell is long-lived, an earlier step or the prompt may
+  # have cd'd elsewhere, and a cwd-derived path then lands the worktree inside
+  # a tracked checkout.
+  WORKTREE_PATH="$GC_DIR/worktrees/$WORK_BEAD_ID"
   git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
   gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
   WORKTREE="$WORKTREE_PATH"
