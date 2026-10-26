@@ -2208,9 +2208,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		batch, busy := rollbackPendingCreateReportingBusy(lockCtx, info, sessFront, clk.Now().UTC(), clearClaim, stderr)
 		if busy {
 			fmt.Fprintf(stderr, "session reconciler: pending-create rollback of %s skipped: session mutation lock busy\n", name) //nolint:errcheck
-			if trace != nil {
-				trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollbackLockBusy, TraceOutcomeSkipped, templateName, name, nil)
-			}
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollbackLockBusy, TraceOutcomeSkipped, templateName, name, nil)
 			return nil
 		}
 		if batch == nil {

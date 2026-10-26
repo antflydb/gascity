@@ -3816,9 +3816,7 @@ func recoverRunningPendingCreate(
 		// buildPreparedStart already persisted (an instance_token mint, a
 		// stale-resume clear) reaches the snapshot on that retry.
 		fmt.Fprintf(stderr, "session reconciler: pending-create recovery of %s skipped: session mutation lock busy\n", tp.SessionName) //nolint:errcheck
-		if trace != nil {
-			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryLockBusy, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, nil)
-		}
+		trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryLockBusy, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, nil)
 		return false, nil
 	}
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
@@ -3863,9 +3861,7 @@ func recoverRunningPendingCreate(
 	if tok := prepared.candidate.info.InstanceToken; tok != "" {
 		metadata["instance_token"] = tok
 	}
-	if trace != nil {
-		trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateHealed, TraceOutcomeHealed, tp.TemplateName, tp.SessionName, nil)
-	}
+	trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateHealed, TraceOutcomeHealed, tp.TemplateName, tp.SessionName, nil)
 	return true, metadata
 }
 
@@ -4807,6 +4803,18 @@ func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTr
 	return true
 }
 
+// settlePrepareFailure undoes what a failed prepare left in flight. A PreWake
+// refused because the row moved (or the lease was taken over) is no restart and
+// leaves the row's in-flight marker to whoever moved it, so only the breaker's
+// restart count is restored; any other failure clears the marker.
+func settlePrepareFailure(err error, cb *sessionCircuitBreaker, sessFront *sessionpkg.Store, id, identity string, cbBefore sessionCircuitBreakerEntrySnapshot, cbNow time.Time, stderr io.Writer) {
+	if errors.Is(err, errPreWakeSuperseded) {
+		cb.restoreEntrySnapshot(sessFront, id, identity, cbBefore, cbNow, stderr)
+		return
+	}
+	clearPendingStartInFlightLease(id, sessFront, stderr)
+}
+
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -4960,9 +4968,7 @@ func executePlannedStartsTraced(
 				// ticket, budget or write.
 				if startOpts.onDeathGate.Pending(candidate.name()) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByOnDeathHook), time.Time{}, time.Time{}, nil)
-					if trace != nil {
-						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonOnDeathHookPending, TraceOutcomeDeferredByOnDeathHook, candidate.tp.TemplateName, candidate.name(), nil)
-					}
+					trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonOnDeathHookPending, TraceOutcomeDeferredByOnDeathHook, candidate.tp.TemplateName, candidate.name(), nil)
 					continue
 				}
 				// A planner call that has spent its prepare budget defers the
@@ -4975,9 +4981,7 @@ func executePlannedStartsTraced(
 				// restart, so the skip writes nothing and the next pass retries.
 				if startSessionLockBusy(ctx, candidate, sessFront) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "skipped_session_busy", time.Time{}, time.Time{}, nil)
-					if trace != nil {
-						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionLockBusy, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), nil)
-					}
+					trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionLockBusy, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), nil)
 					continue
 				}
 				var release func()
@@ -5129,19 +5133,13 @@ func executePlannedStartsTraced(
 					if errors.Is(err, sessionpkg.ErrSessionMutationBusy) {
 						fmt.Fprintf(stderr, "session reconciler: pre-wake %s: skipped: session mutation lock busy\n", candidate.name()) //nolint:errcheck
 						drop("skipped_session_busy", nil)
-						if trace != nil {
-							trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionLockBusy, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), nil)
-						}
+						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionLockBusy, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), nil)
 						continue
 					}
 					// A PreWake refused because the row moved (or the lease was
 					// taken over) is no restart and leaves the row's in-flight
 					// marker to whoever moved it; the next pass decides again.
-					if errors.Is(err, errPreWakeSuperseded) {
-						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
-					} else {
-						clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
-					}
+					settlePrepareFailure(err, cb, sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					drop("failed", err)
 					continue
