@@ -245,10 +245,16 @@ managed_runtime_listener_pids() (
     | sort -n -u
 )
 
-# managed_runtime_listener_pid prints the PID of the first running process
-# holding a LISTEN socket on PORT, or nothing when there is none.
+# managed_runtime_listener_pid PORT [CANDIDATE...] prints the PID of the
+# process holding a LISTEN socket on PORT: the first CANDIDATE among the
+# running holders, else the first running holder, or nothing when there is
+# none. Callers pass the pids runtime state records, so a lower pid sharing
+# the recorded server's listen socket (an inherited or reuse-port
+# descriptor) cannot mask that server. Each holder's liveness is judged as
+# the probe lists it.
 managed_runtime_listener_pid() (
   port="$1"
+  shift
 
   case "$port" in
     ''|*[!0-9]*)
@@ -256,7 +262,7 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  managed_runtime_listener_pids "$port" \
+  running=$(managed_runtime_listener_pids "$port" \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)
@@ -265,9 +271,22 @@ managed_runtime_listener_pid() (
         esac
         if pid_is_running "$holder_pid"; then
           printf '%s\n' "$holder_pid"
-          break
         fi
-      done
+      done)
+
+  for candidate in "$@"; do
+    for holder_pid in $running; do
+      if [ "$holder_pid" = "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  done
+
+  for holder_pid in $running; do
+    printf '%s\n' "$holder_pid"
+    return 0
+  done
 )
 
 managed_runtime_tcp_reachable() (
@@ -325,7 +344,7 @@ managed_runtime_port() (
   fi
   pid_is_running "$pid" || return 0
 
-  holder_pid=$(managed_runtime_listener_pid "$port" || true)
+  holder_pid=$(managed_runtime_listener_pid "$port" "$pid" || true)
   if [ -n "$holder_pid" ]; then
     [ "$holder_pid" = "$pid" ] || return 0
     printf '%s\n' "$port"
