@@ -1384,7 +1384,8 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
-// recoveryReadShell wraps one bd read of a DEFAULT recovery hook. A read that
+// recoveryReadShell wraps one bd read of a DEFAULT recovery hook; name is the
+// read's bd subcommand and selector, reported as "bd <name>". A read that
 // exits non-zero prints one RecoveryHookMarker line on fd 3 and contributes
 // nothing to the sweep, not even rows it printed before it failed; a read that
 // succeeds feeds its output to filter and keeps its stderr dropped.
@@ -1396,7 +1397,7 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 // exits non-zero, and the marker is the point.
 func recoveryReadShell(hook, name, read, filter string) string {
 	return `if r=$(` + read + ` 2>/dev/null); then printf '%s\n' "$r" | ` + filter + ` 2>/dev/null; ` +
-		`else printf '` + RecoveryHookMarker + ` ` + hook + ` read failed: ` + name + ` (exit %s)\n' "$?" >&3; fi; `
+		`else printf '` + RecoveryHookMarker + ` ` + hook + ` read failed: bd ` + name + ` (exit %s)\n' "$?" >&3; fi; `
 }
 
 func buildOnDeath(a *Agent, topo QueryTopology) string {
@@ -1405,10 +1406,10 @@ func buildOnDeath(a *Agent, topo QueryTopology) string {
 		route = a.PoolName
 	}
 	_ = topo
-	listRead := recoveryReadShell("on_death", "bd list",
+	listRead := recoveryReadShell("on_death", "list",
 		`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`,
 		`jq -r '.[] | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
-	ephemeralRead := recoveryReadShell("on_death", "bd query",
+	ephemeralRead := recoveryReadShell("on_death", "query",
 		bdQueryEphemeralStatusShell("in_progress"),
 		`jq -r --arg assignee `+shellquote.Quote(a.QualifiedName())+` '.[] | select((.assignee // "") == $assignee) | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
 	// Reset both assignee and status: clearing assignee alone leaves the bead
@@ -1450,13 +1451,13 @@ func buildOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	routedRead := recoveryReadShell("on_boot", "bd list "+beadmeta.RoutedToMetadataKey,
+	routedRead := recoveryReadShell("on_boot", "list "+beadmeta.RoutedToMetadataKey,
 		`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`,
 		`jq -r '.[].id'`)
-	runTargetRead := recoveryReadShell("on_boot", "bd list "+beadmeta.RunTargetMetadataKey,
+	runTargetRead := recoveryReadShell("on_boot", "list "+beadmeta.RunTargetMetadataKey,
 		`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`,
 		`jq -r '.[] | select(`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") | .id'`)
-	ephemeralRead := recoveryReadShell("on_boot", "bd query",
+	ephemeralRead := recoveryReadShell("on_boot", "query",
 		bdQueryEphemeralStatusShell("in_progress"),
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $template) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $template) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`"))) | .id'`)
 	return `template=` + shellquote.Quote(template) + `; exec 3>&1; ` +
