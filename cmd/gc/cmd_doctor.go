@@ -305,10 +305,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		// The ops-recording line sits with the rollout gates it reports on, so
 		// it runs before the bead-store preflight and opens its own store
-		// rather than the preflight's shared factory. With every ops gate off
-		// (the default) the check reads at most one op row, and scans for
-		// expired legacy ops only once that read finds one; during a store
-		// outage it reports the outage too, beside the preflight's line.
+		// rather than the preflight's shared factory. With every ops gate off,
+		// or auto by default over a store the default does not record on (not
+		// SQLite, or unable to record ops), the check reads at most one op
+		// row, and scans for expired legacy ops only once that read finds
+		// one; during a store outage it reports the outage too, beside the
+		// preflight's line.
 		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr))
 		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
@@ -337,6 +339,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+		register(newMCPAdoptionDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))

@@ -111,7 +111,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 	}
 
 	// Agent track.
-	resolved, workDir, transport, template, err := s.resolveSessionTemplateWithBareNameFallback(name)
+	resolved, _, transport, template, err := s.resolveSessionTemplateWithBareNameFallback(name)
 	if err != nil {
 		if errors.Is(err, errSessionTemplateNotFound) {
 			return nil, apierr.AgentNotFound.Msg("agent '" + name + "' not found")
@@ -162,7 +162,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 	alias = createCtx.Alias
 	explicitName := createCtx.ExplicitName
 	workDirQualifiedName := createCtx.Identity
-	workDir = createCtx.WorkDir
+	workDir := createCtx.WorkDir
 
 	command, err := s.agentTemplateLaunchCommand(agentCfg, resolved, transport)
 	if err != nil {
@@ -917,6 +917,8 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	go func() {
 		defer finish()
 		defer s.recoverMessageOp(adm, reqID, operation)
+		// K2 (X12): the 202 is on its way and the delivery has not started.
+		adm.Reach(legacyop.CrashPointAnswered)
 		deliver(d)
 	}()
 	return body, nil
