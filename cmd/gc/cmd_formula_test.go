@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +12,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -1745,21 +1748,31 @@ func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
 }
 
 // TestFormulaCookRejectsMalformedMetaBeforeWriting pins that a malformed --meta
-// pair is refused before the cook writes anything, on every arm: no root, no
-// steps, no synthetic input convoy (open or closed) and no blocking dep on the
-// attach bead.
+// pair, or one whose key the bead store would refuse, is refused before the
+// cook writes anything, on every arm: no root, no steps, no synthetic input
+// convoy (open or closed) and no blocking dep on the attach bead. bd and native
+// Dolt refuse "my-key" only at the stamp, after the graft is written; the file
+// store under this test accepts it, so only the up-front check refuses it here.
 func TestFormulaCookRejectsMalformedMetaBeforeWriting(t *testing.T) {
+	malformed := func(meta string) string { return fmt.Sprintf("invalid metadata %q (want key=value)", meta) }
+	const refusedKeyMeta = "my-key=v"
+	refusedKey := fmt.Sprintf("invalid metadata %q: %v", refusedKeyMeta, beadmeta.ValidateKey("my-key"))
 	for _, tc := range []struct {
 		name    string
 		formula string
 		attach  bool
 		meta    string
+		want    string
 	}{
-		{name: "v1 standalone", formula: "legacy-work", meta: "no-equals"},
-		{name: "v1 attach", formula: "legacy-work", attach: true, meta: "no-equals"},
-		{name: "v1 attach, empty key", formula: "legacy-work", attach: true, meta: "=v"},
-		{name: "graph.v2 standalone", formula: "graph-work", meta: "no-equals"},
-		{name: "graph.v2 attach", formula: "graph-work", attach: true, meta: "no-equals"},
+		{name: "v1 standalone", formula: "legacy-work", meta: "no-equals", want: malformed("no-equals")},
+		{name: "v1 attach", formula: "legacy-work", attach: true, meta: "no-equals", want: malformed("no-equals")},
+		{name: "v1 attach, empty key", formula: "legacy-work", attach: true, meta: "=v", want: malformed("=v")},
+		{name: "graph.v2 standalone", formula: "graph-work", meta: "no-equals", want: malformed("no-equals")},
+		{name: "graph.v2 attach", formula: "graph-work", attach: true, meta: "no-equals", want: malformed("no-equals")},
+		{name: "v1 standalone, key the store refuses", formula: "legacy-work", meta: refusedKeyMeta, want: refusedKey},
+		{name: "v1 attach, key the store refuses", formula: "legacy-work", attach: true, meta: refusedKeyMeta, want: refusedKey},
+		{name: "graph.v2 standalone, key the store refuses", formula: "graph-work", meta: refusedKeyMeta, want: refusedKey},
+		{name: "graph.v2 attach, key the store refuses", formula: "graph-work", attach: true, meta: refusedKeyMeta, want: refusedKey},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityDir := oneShotCookCity(t)
@@ -1782,8 +1795,8 @@ func TestFormulaCookRejectsMalformedMetaBeforeWriting(t *testing.T) {
 			if err == nil {
 				t.Fatalf("cook with --meta %q succeeded: %s", tc.meta, out)
 			}
-			if want := fmt.Sprintf("invalid metadata %q (want key=value)", tc.meta); !strings.Contains(out, want) {
-				t.Errorf("cook output = %q, want it to contain %q", out, want)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("cook output = %q, want it to contain %q", out, tc.want)
 			}
 			if got := beadIDs(allBeads(t, work)); len(got) != 1 || got[0] != target.ID {
 				t.Errorf("store holds %v after a refused cook, want only %s", got, target.ID)
@@ -1792,5 +1805,172 @@ func TestFormulaCookRejectsMalformedMetaBeforeWriting(t *testing.T) {
 				t.Errorf("attach bead %s carries %d blocking deps after a refused cook, want 0", target.ID, got)
 			}
 		})
+	}
+}
+
+// stampProbeStore runs probe before each SetMetadataBatch and writes only when
+// it returns nil, so a test can observe or fail the --meta stamp at the moment
+// the cook writes it.
+type stampProbeStore struct {
+	beads.Store
+	probe func(id string, kvs map[string]string) error
+}
+
+func (s stampProbeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.probe(id, kvs); err != nil {
+		return err
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// probeFormulaCookStamps wraps every store opened from here on, the cook's
+// included, in a stampProbeStore.
+func probeFormulaCookStamps(t *testing.T, probe func(id string, kvs map[string]string) error) {
+	t.Helper()
+	inner := openStoreFactoryForCity
+	openStoreFactoryForCity = func(ctx context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		res, err := inner(ctx, opts)
+		if err == nil {
+			res.Store = stampProbeStore{Store: res.Store, probe: probe}
+		}
+		return res, err
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = inner })
+}
+
+// isFormulaCookMetaStamp reports whether a SetMetadataBatch carries the
+// formulaCookAttachMetaArgs pairs rather than a write the pour itself makes.
+func isFormulaCookMetaStamp(kvs map[string]string) bool {
+	_, ok := kvs["work_dir"]
+	return ok
+}
+
+// sourceWorkflowLockHeld reports whether the city's one source-workflow lock
+// file is locked right now. flock binds to an open file description, so a
+// fresh open of the file is refused while the cook's own descriptor holds the
+// lock, in this process as in any other.
+func sourceWorkflowLockHeld(t *testing.T, cityPath string) bool {
+	t.Helper()
+	names := sourceWorkflowLockFiles(t, cityPath)
+	if len(names) != 1 {
+		t.Fatalf("source-workflow lock files = %v, want the cook's one", names)
+	}
+	f, err := os.OpenFile(filepath.Join(citylayout.RuntimeDataDir(cityPath), "sling-source-locks", names[0]), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("opening the source-workflow lock: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // probe only
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	switch {
+	case err == nil:
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false
+	case errors.Is(err, syscall.EWOULDBLOCK):
+		return true
+	default:
+		t.Fatalf("probing the source-workflow lock: %v", err)
+		return false
+	}
+}
+
+// TestFormulaCookAttachGraphV2StampsMetaUnderTheSourceLock pins that a graph.v2
+// --attach cook writes --meta while it still holds the per-source workflow
+// lock, on the fresh and the adopted root alike. The lock is what makes
+// overlapping cooks of one source behave like sequential ones: a stamp written
+// after it is released lets an earlier cook's --meta land over a later cook's,
+// which has already reported success.
+func TestFormulaCookAttachGraphV2StampsMetaUnderTheSourceLock(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		targetType string
+		recook     bool
+	}{
+		{name: "fresh root, task target", targetType: "task"},
+		{name: "adopted root, convoy target re-cook", targetType: "convoy", recook: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			seedCLIStorageRoutes(t, cityDir, nil)
+			work, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open work store: %v", err)
+			}
+			target, err := work.Create(beads.Bead{Title: "attach target", Type: tc.targetType})
+			if err != nil {
+				t.Fatalf("create attach bead: %v", err)
+			}
+			if tc.recook {
+				cookFormula(t, "graph-work", "--attach", target.ID)
+			}
+			stamps := 0
+			probeFormulaCookStamps(t, func(id string, kvs map[string]string) error {
+				if !isFormulaCookMetaStamp(kvs) {
+					return nil
+				}
+				stamps++
+				if !sourceWorkflowLockHeld(t, cityDir) {
+					t.Errorf("--meta stamp on %s was written after the source-workflow lock was released", id)
+				}
+				return nil
+			})
+
+			res := cookFormula(t, "graph-work", append([]string{"--attach", target.ID}, formulaCookAttachMetaArgs...)...)
+
+			if stamps != 1 {
+				t.Fatalf("cook wrote %d --meta stamps, want 1", stamps)
+			}
+			requireFormulaCookMeta(t, work, res.RootID)
+		})
+	}
+}
+
+// TestFormulaCookAttachGraphV2StampFailureKeepsTheLiveInputConvoyOpen pins the
+// other half of stamping under the lock. A stamp that fails after the root is
+// committed fails the command, but the root is live and the synthetic input
+// convoy is its input: the failure must not close that convoy the way a failure
+// that discards the invocation does.
+func TestFormulaCookAttachGraphV2StampFailureKeepsTheLiveInputConvoyOpen(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	seedCLIStorageRoutes(t, cityDir, nil)
+	work, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
+	target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create attach bead: %v", err)
+	}
+	probeFormulaCookStamps(t, func(id string, kvs map[string]string) error {
+		if isFormulaCookMetaStamp(kvs) {
+			return fmt.Errorf("injected stamp failure on %s", id)
+		}
+		return nil
+	})
+
+	out, err := cookFormulaErr(t, "graph-work", append([]string{"--attach", target.ID}, formulaCookAttachMetaArgs...)...)
+
+	if err == nil {
+		t.Fatalf("cook succeeded although its --meta stamp failed: %s", out)
+	}
+	if !strings.Contains(out, "injected stamp failure") {
+		t.Errorf("cook output = %q, want the stamp failure", out)
+	}
+	root := workflowRoot(t, work)
+	if root.Status == "closed" {
+		t.Fatalf("workflow root %s is closed; the cook committed it before the stamp failed", root.ID)
+	}
+	// List(Type:"convoy") returns only non-terminal beads.
+	openConvoys, err := work.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("list convoys: %v", err)
+	}
+	var synthetic []string
+	for _, c := range openConvoys {
+		if c.Metadata["gc.synthetic"] == "true" {
+			synthetic = append(synthetic, c.ID)
+		}
+	}
+	if want := root.Metadata[beadmeta.InputConvoyIDMetadataKey]; len(synthetic) != 1 || synthetic[0] != want {
+		t.Errorf("open synthetic input convoys = %v, want only the live root's input convoy %q", synthetic, want)
 	}
 }
