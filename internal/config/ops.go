@@ -87,11 +87,14 @@ type OpsConfig struct {
 	// op. A message over 16 KiB, the op journal's inline payload limit, is
 	// refused 422 payload_too_large, a provider create's before the session
 	// is created. extmsg member notices are lane notices, their inbound text
-	// cut to fit that limit. gc session submit's local fallback, mail
-	// --notify, sling --nudge and wait nudges keep their legacy delivery in
-	// this build; the fallback answers from the API's lane op under its key
-	// rather than delivering again, on any sessions store, the content
-	// gate's builtin default notwithstanding.
+	// cut to fit that limit. For sessions a lane host can type into, gc
+	// session submit's local fallback proposes the op the API would, and
+	// mail --notify, sling --nudge and the hook-claim continuation propose
+	// lane notices (a mail notice is withdrawn once its mail is read or
+	// archived). For any other session the fallback answers from the API's
+	// lane op under its key rather than delivering again, on any sessions
+	// store, the content gate's builtin default notwithstanding. Wait nudges
+	// keep their legacy delivery in this build.
 	// Listing interrupt switches the API's POST
 	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
 	// each proposes interrupt ops the controller's lane host runs, and
