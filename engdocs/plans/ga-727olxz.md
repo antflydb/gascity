@@ -1,6 +1,6 @@
 # Asleep named-session launch-drift continuity
 
-Status: planning complete; behavior is proposed and gated on explicit decisions.
+Status: planning complete; product behavior approved with guardrails; architecture sequencing and wake proof remain gated.
 Root: `ga-727olxz` (P3, architect-origin).
 Source baseline: `37bd09351ac80604606366872b4efeed63b624b8`.
 Public feature discussion: https://github.com/gastownhall/gascity/issues/8370.
@@ -11,12 +11,14 @@ An operator editing only launch configuration should not lose an asleep
 configured-named session's tracked conversation merely because the session was
 asleep. The next wake should use the new approved launch configuration and
 resume the same conversation, just as the alive launch-only path does today.
-No incident of past conversation loss was established. The architect's
-read-only snapshot found 16 asleep configured-named sessions among 34 sessions;
-that measures exposure, not prior failures.
+The architect's read-only snapshot found 16 asleep configured-named sessions
+among 34 sessions; that measures exposure, not prior failures. Mayor's ruling
+reports a related September model-change restart that lost conversation
+context; it does not establish that the reset used this asleep repair path.
 
-The source fixes the target predicate: both stored tier hashes are present,
-provision still matches, and launch does not. The asleep predicate does not
+The source fixes the hash predicate: both stored tier hashes are present,
+provision still matches, and launch does not. The approved continuity case
+additionally keeps the same provider/runtime that owns the conversation key. The asleep predicate does not
 require a provider capable of relaunching a live runtime. Provision drift,
 mixed provision/launch drift, and either missing tier hash retain the existing
 fresh-conversation reset. Version-artifact and unrelated live-tier handling
@@ -26,10 +28,14 @@ must retain their existing meaning.
 
 `ga-727olxz.1` is a real enabling prerequisite, not a courtesy note:
 
-- Mayor/operator must explicitly accept or reject resuming old conversation
-  history after a Launch-tier Command edit, including a model-flag change.
-  PM recommends parity with alive launch-only behavior and has asked for the
-  ruling. It is not assumed here.
+- Mayor APPROVED resuming old history after a Launch-tier Command/model-flag
+  edit in `gm-wisp-22up1jw` (read and recorded on the decision). This applies
+  only within the same provider/runtime that owns the key. A provider/runtime
+  change retains today's reset. If the new launch cannot resume (rejected id,
+  missing conversation, or model context limit), it must fall back safely to
+  a fresh conversation without a crash loop or wedge. Architect defines how
+  existing recovery is reused and the validator proves this failure outcome;
+  PM does not assume the existing helper already guarantees it.
 - Architect must identify the actual C7b2 migration owner/carrier and select
   sequencing. Both still-serving legacy and decide/effect paths must agree;
   arms-only work requires proof that legacy is actually retired first.
@@ -49,8 +55,8 @@ surface or doctor behavior is proposed.
 
 | Bead | Outcome and acceptance | Route | Native prerequisite |
 |---|---|---|---|
-| `ga-727olxz.1` | Explicit model/Command ruling, migration sequencing/owner and next-wake proof contract; return a clear go/no-go on the same record. | `needs-architecture` → architect | None initially; architect records any actual migration prerequisite. |
-| `ga-727olxz.2` | One test-first behavior scope: preserve key on proved launch-only asleep drift, rebaseline core/provision/launch, clear both drift-stamp pairs, converge next tick, and resume on the actual next start. Preserve conservative negative cases and all lifecycle safety fences. Update both serving paths and their parity evidence unless the ruling proves retirement. Own the required scenario/requirements/AGENTS change in the same behavior PR. | `needs-tests` → validator → SAME bead to builder | `ga-727olxz.1` |
+| `ga-727olxz.1` | Carry the approved same-provider/fail-safe model ruling into migration sequencing/owner and next-wake proof; return an enabling architecture contract on the same record. | `needs-architecture` → architect | None initially; architect records any actual migration prerequisite. |
+| `ga-727olxz.2` | One test-first behavior scope: preserve key on proved same-provider launch-only asleep drift, rebaseline core/provision/launch, clear both drift-stamp pairs, converge next tick, and resume on the actual next start. Preserve conservative negative cases and all lifecycle safety fences. Update both serving paths and their parity evidence unless the ruling proves retirement. Own the required scenario/requirements/AGENTS change in the same behavior PR. | `needs-tests` → validator → SAME bead to builder | `ga-727olxz.1` |
 | `ga-727olxz.3` | Update the existing operator configuration guide with the shipped retention boundary and one accurate approved config example; preserve the command/resume-command wrapper caveat and avoid internal sequencing details or unsupported provider promises. | `ready-to-build` → builder (docs only) | `ga-727olxz.1` and `ga-gde7bpf` |
 
 `ga-gde7bpf` is an unrouted condition record, not a fourth delivery scope.
@@ -86,8 +92,10 @@ The validator and builder use **one** needs-tests bead for the behavior:
    test remains unchanged and passing.
 2. Prove actual next-wake/start uses the original conversation and new approved
    launch config for session-id and resume-only provider shapes, without
-   duplicate startup prompts or a fresh conversation. Include the Command/model
-   case only as approved. Provider coverage and seams follow the architect's
+   duplicate startup prompts or a fresh conversation. Include the approved same-provider Command/model case, a provider/runtime
+   switch that resets, and failed-resume cases (rejected id, missing
+   conversation, model context limit) that safely start fresh without looping
+   or wedging. Provider coverage and seams follow the architect's
    ruling; no paid live-model dependency is imposed by this plan.
 3. Preserve provision/mixed/missing-tier reset behavior, no-drift and
    version-artifact behavior, and correct independent handling of live updates.
@@ -111,12 +119,14 @@ scenario/AGENTS updates remain in the behavior PR, not delayed to that package.
 
 ## Delivery, risks and scope
 
-Priority stays P3: the inconsistency is established in source, while a
-historical loss incident is not. The principal risks are a model/command
+Priority stays P3: this exact asleep-repair inconsistency is established in
+source; the mayor's related historical model-reset incident is supporting
+context, not a reproduced asleep-path failure. The principal risks are a model/command
 semantics mismatch, assuming that a kept key is enough to resume, racing the
 mid-migration path ownership, and accidentally clearing unrelated lifecycle or
-live-config state. The explicit ruling and native blockers address these
-uncertainties before implementation.
+live-config state. The product ruling supplies the required same-provider and fail-safe
+boundaries; the remaining architecture contract and native blockers address
+the engineering uncertainties before implementation.
 
 The obsolete doctor discovery `ga-i3yh2a`, its uncommitted RED test and the
 older Option A' history remain separate. No alive/pinned/attached behavior,
