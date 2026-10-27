@@ -1976,7 +1976,10 @@ func mailNoticeLaneKey(messageID string) string {
 // authoritative lists message and a lane serves the target's session, the
 // notice is a lane notice from gc:mail, keyed mail:<message id> with the
 // message as its causation, which the controller's lane host delivers and
-// a read or archive of the message withdraws (mail_notice_withdraw.go). On a worker site
+// a read or archive of the message withdraws (mail_notice_withdraw.go); a
+// notice the op journal cannot record is the error, with nothing delivered
+// or queued (cliLaneProduce), and so is one the key finds already closed
+// undelivered (mailLaneNoticeResult). On a worker site
 // it records only the recipient's wake (requestWorkerSiteNudgeWake), the one
 // notice a box can leave, and no op, and returns
 // errWorkerSiteNotifyNotDelivered when it recorded no wake. Elsewhere the
@@ -2004,7 +2007,10 @@ func sendMailNotifyWithOp(target nudgeTarget, store beads.Store, sp runtime.Prov
 		target: target, store: store, sp: sp,
 		req: cliLaneNotice(mailNoticePrincipal, mailNoticeLaneKey(messageID), messageID, msg, opjournal.WakeIfNeeded),
 	}); prod.handled {
-		return prod.op.ID, err
+		if err != nil {
+			return "", err
+		}
+		return mailLaneNoticeResult(prod.op)
 	}
 	op, start := startMailNotifyOp(target, store, msg, messageID)
 	switch start {
@@ -2019,6 +2025,25 @@ func sendMailNotifyWithOp(target nudgeTarget, store beads.Store, sp runtime.Prov
 	op.finishMessage(queued, err)
 	id, _, _ := op.jsonFields()
 	return id, err
+}
+
+// mailLaneNoticeResult is a mail notify's answer from the lane notice op its
+// key mail:<message id> names: the op's id while it is open, and when it has
+// closed, a replay only of a notice that did its work, delivered (succeeded)
+// or withdrawn by a read of the message (canceled). A notice that failed or
+// was skipped was never delivered: the notify is the error that says so, as
+// the legacy path refuses it (cliOp.start), and nothing is proposed again,
+// so the key stays one op per message and recipient.
+func mailLaneNoticeResult(op opjournal.Op) (string, error) {
+	if op.Status != opjournal.StatusClosed {
+		return op.ID, nil
+	}
+	switch arm, _ := op.Outcome.Effective(); arm {
+	case opjournal.ArmSucceeded, opjournal.ArmCanceled:
+		return op.ID, nil
+	default:
+		return "", fmt.Errorf("op %s closed %s", op.ID, cliOpOutcomeText(op.Outcome))
+	}
 }
 
 // startMailNotifyOp starts a mail notify's op over the session store store

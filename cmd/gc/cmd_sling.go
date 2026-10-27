@@ -1570,12 +1570,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		if tryNudgeStore(store) {
 			return
 		}
-		if cityPath != "" {
-			if _, statErr := os.Stat(filepath.Join(cityPath, "city.toml")); statErr == nil {
-				if cityStore, err := slingOpenCityStore(cityPath); err == nil && cityStore != nil && tryNudgeStore(cityStore) {
-					return
-				}
-			}
+		if cityStore, err := openSlingCityStore(cityPath); err == nil && cityStore != nil && tryNudgeStore(cityStore) {
+			return
 		}
 		// No running config session — poke controller for immediate wake.
 		// Key-less (allocator): the wake is template demand, not a session.
@@ -1589,13 +1585,64 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		return
 	}
 
-	// Fixed agent: nudge directly. Session lookups route to the session
-	// coordination-class store; deliverSlingNudge keeps the nudge enqueue on the
-	// plain store. Identity today.
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
-	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
+	// Fixed agent: nudge directly.
+	slingFixedNudge(a, cityName, cityPath, cfg, sp, store, beadID, stdout, stderr)
+}
+
+// slingFixedNudge nudges fixed agent a (deliverSlingNudge), its target
+// resolved in store (slingFixedNudgeTarget); deliverSlingNudge keeps the
+// nudge enqueue on the plain store. With message listed in [ops]
+// authoritative, a target that store holds no session row for resolves in
+// the city store instead, as the pool branch's lookup does (#2579): session
+// rows live there, not in a rig bead's store, and the row decides whether a
+// lane serves the session. The notice then lands in the sessions class the
+// lane host reads, rather than taking the legacy path into a session the lane
+// serves. A city store that does not open is the refusal (cliLaneRefusal),
+// since under lane authority there is no legacy path to fall back to.
+func slingFixedNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
+	sp runtime.Provider, store beads.Store, beadID string, stdout, stderr io.Writer,
+) {
+	target := slingFixedNudgeTarget(a, cityName, cityPath, cfg, store)
+	if target.sessionID == "" && cliLaneExecutesMessage(cfg) && !onWorkerSite(cityPath) {
+		cityStore, err := openSlingCityStore(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", cliLaneRefusal(fmt.Errorf("opening the city store: %w", err))) //nolint:errcheck // best-effort
+			return
+		}
+		if cityStore != nil {
+			defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
+			if inCity := slingFixedNudgeTarget(a, cityName, cityPath, cfg, cityStore); inCity.sessionID != "" {
+				target, store = inCity, cityStore
+			}
+		}
+	}
 	deliverSlingNudge(target, sp, store, cityPath, beadID, stdout, stderr)
+}
+
+// slingFixedNudgeTarget is fixed agent a's nudge target resolved in store.
+// Session lookups route to the session coordination-class store (identity
+// today).
+func slingFixedNudgeTarget(a *config.Agent, cityName, cityPath string, cfg *config.City, store beads.Store) nudgeTarget {
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+	return buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
+}
+
+// openSlingCityStore opens the store of the city at cityPath, where session
+// rows live, for a sling nudge whose bead's store holds no row for its
+// target. It returns no store and no error when cityPath names no city (no
+// city.toml).
+func openSlingCityStore(cityPath string) (beads.Store, error) {
+	if cityPath == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return slingOpenCityStore(cityPath)
 }
 
 // resolvePoolNudgeMember resolves the config identity to nudge for a live pool
@@ -1701,7 +1748,9 @@ const slingNudgeText = "Work slung. Check your hook."
 // from gc:sling, keyed sling:<bead id> (minted with no bead), which the
 // controller's lane host delivers, waking the session if needed. The key
 // coalesces a re-sling only while the bead's notice is open; once it closed,
-// a re-sling is a new notice under a minted key.
+// a re-sling renews it (proposeRenewal), and later re-slings coalesce into
+// the renewed notice while it is open. A notice the op journal cannot record
+// is warned of, and neither delivered nor queued (cliLaneProduce).
 func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath, beadID string, stdout, stderr io.Writer) {
 	const msg = slingNudgeText
 	if !onWorkerSite(target.cityPath) {

@@ -2836,7 +2836,11 @@ type sessionSubmitOp struct {
 // local path loads it again, as it always has, from the invocation's config
 // memo. Under require the local path checks that the op journal can record
 // before it resolves the target, which may materialize a named session's
-// row.
+// row. When [ops] authoritative lists message the key goes to the API
+// whatever the gate, and the local path is the lane's (submitSessionLane),
+// whose preflight runs before the resolution instead; for a session no lane
+// serves it answers from the lane op the key names, and takes the legacy
+// path under the same key when it names none.
 func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	defer beginInvocationConfigMemo()()
 	target := args[0]
@@ -2866,7 +2870,8 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	// With message listed the submit is a lane op on either path: the API
 	// proposes it, and the local fallback proposes the same op (the same key,
 	// minted here when --key is empty, the operator principal and
-	// api.LaneMessageOpPolicy), so it finds the API's op.
+	// api.LaneMessageOpPolicy), so it finds the API's op. When no lane
+	// serves the session, the legacy path admits under the same key.
 	laneOn := cliLaneExecutesMessage(gateCfg)
 	laneKey, laneMinted := key, false
 	if laneOn && laneKey == "" {
@@ -2875,7 +2880,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 			fmt.Fprintf(stderr, "gc session submit: %v\n", cliLaneUnavailable(err)) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		laneKey, laneMinted = minted, true
+		laneKey, laneMinted, op.req.presetKey = minted, true, minted
 	}
 	if !laneOn && op.recording() && key == "" {
 		minted, err := legacyop.MintKey()
@@ -2892,7 +2897,9 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		apiKey := ""
 		switch {
 		case laneOn:
-			apiKey = laneKey
+			// Once sent, the key may name the API's op, so the fallback's
+			// Propose reads it first.
+			apiKey, laneMinted = laneKey, false
 		case op.recording():
 			apiKey = op.requestKey()
 		}
@@ -2934,7 +2941,12 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	// store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	op.sessStore = sessStore
-	if !laneOn && !op.preflight() {
+	lane := sessionSubmitLane{
+		cityPath: cityPath, cfg: cfg, store: store, target: target,
+		message: message, intent: intent, key: laneKey, minted: laneMinted,
+		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
+	}
+	if !submitPreflight(laneOn, lane, op) {
 		return 1
 	}
 
@@ -2944,15 +2956,12 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		return 1
 	}
 	if laneOn {
-		if code, handled := submitSessionLane(sessionSubmitLane{
-			cityPath: cityPath, cfg: cfg, store: store, sessionID: sessionID, target: target,
-			message: message, intent: intent, key: laneKey, minted: laneMinted,
-			asJSON: jsonOutput, stdout: stdout, stderr: stderr,
-		}); handled {
+		lane.sessionID = sessionID
+		if code, handled := submitSessionLane(lane); handled {
 			return code
 		}
-		// No lane serves the session: the legacy path, under the content
-		// gate.
+		// No lane serves the session and its key names no lane op: the
+		// legacy path, under the content gate.
 		if !op.preflight() {
 			return 1
 		}

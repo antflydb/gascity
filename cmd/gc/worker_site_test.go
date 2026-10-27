@@ -630,7 +630,7 @@ func TestWorkerSiteHookContinuationNudgeQueuesNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	hookContinuationNudgeEnqueue(sessionID, "")
+	hookContinuationNudgeEnqueue(sessionID, "", io.Discard)
 
 	assertNoNudgeQueued(t, cityDir)
 	if len(pollers) != 0 {

@@ -406,8 +406,8 @@ type (
 	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
 	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
 	// hook-claim-continuation nudge, keyed by the claim assignee, for the
-	// workflow root it claimed.
-	hookEnqueueContinuationNudgeFunc func(assignee, rootID string)
+	// workflow root it claimed; it warns on stderr of a nudge it refused.
+	hookEnqueueContinuationNudgeFunc func(assignee, rootID string, stderr io.Writer)
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
@@ -1630,7 +1630,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// len(assigned) conjunct is what scopes this: the nudge only ever reaches a
 	// session that now owns pinned sibling work.
 	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
-		ops.EnqueueContinuationNudge(opts.Assignee, bead.ID)
+		ops.EnqueueContinuationNudge(opts.Assignee, bead.ID, stderr)
 	}
 	return 0
 }
@@ -3890,19 +3890,21 @@ func emitClaimReclaimedStale(rec events.Recorder, beadID, previousOwner, newAssi
 // the root → step-1 transition without an external gc session nudge. The city
 // path is resolved from the environment so this call is self-contained — the
 // same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
-// error is swallowed so a nudge-queue failure never blocks the claim.
+// error is swallowed so a nudge-queue failure never blocks the claim, and a
+// lane notice the op journal refuses is only warned of on stderr
+// (continuationNudgeEnqueueAt).
 // ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
 // daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
 // On a worker site it queues nothing and starts no poller: the box's nudge
 // queue is a local file the remote controller never reads, and the claimed
 // work is on the ledger either way.
 // See writeHookClaimWorkResultForBead for the call site.
-func hookContinuationNudgeEnqueue(assignee, rootID string) {
+func hookContinuationNudgeEnqueue(assignee, rootID string, stderr io.Writer) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
 	}
-	continuationNudgeEnqueueAt(cityPath, assignee, rootID)
+	continuationNudgeEnqueueAt(cityPath, assignee, rootID, stderr)
 }
 
 // hookClaimContinuationPrincipal is the principal of a hook-claim
@@ -3918,8 +3920,10 @@ const hookClaimContinuationText = "Work slung. Check your hook."
 // serves the claiming session, the nudge is a lane notice from
 // gc:hook-claim-continuation instead, keyed hook-claim:<root id> with the
 // root as its causation, scoped to the session's generation and delivered
-// only while it runs (live_only), as the queue item was.
-func continuationNudgeEnqueueAt(cityPath, assignee, rootID string) {
+// only while it runs (live_only), as the queue item was. A notice the op
+// journal cannot record is refused, as every CLI lane producer's is
+// (cliLaneProduce): a warning on stderr, and nothing queued.
+func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Writer) {
 	if onWorkerSite(cityPath) {
 		return
 	}
@@ -3956,10 +3960,10 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string) {
 			target = withNudgeTargetFence(sessStore, target)
 		}
 	}
-	if opened != nil && rootID != "" && cliLaneExecutesMessage(cfg) {
-		// Best-effort, as the queue item is: a provider that does not open,
-		// or a proposal that fails, leaves the queue path below.
-		if continuationLaneNoticeIn(cityPath, cfg, target, opened, rootID) {
+	if rootID != "" && cliLaneExecutesMessage(cfg) {
+		// A lane that may serve the session takes the notice or refuses it;
+		// only a session no lane serves takes the queue path below.
+		if continuationLaneNoticeIn(cityPath, cfg, target, opened, rootID, stderr) {
 			return
 		}
 	}
@@ -3976,30 +3980,49 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string) {
 }
 
 // continuationLaneNoticeIn is continuationLaneNotice under the city's session
-// provider; a provider that does not open proposes nothing.
-func continuationLaneNoticeIn(cityPath string, cfg *config.City, target nudgeTarget, store beads.Store, rootID string) bool {
+// provider, and reports whether the lane handled the notice: true once it
+// proposed or refused it, the refusal warned of on stderr. A store (nil when
+// the nudge store did not open) or provider that does not open is a refusal:
+// without it the CLI cannot tell whether a lane serves the session
+// (laneServesSession), and a notice that may be the lane's is never queued.
+func continuationLaneNoticeIn(cityPath string, cfg *config.City, target nudgeTarget, store beads.Store, rootID string, stderr io.Writer) bool {
+	if isNilBeadStore(store) {
+		warnContinuationRefused(stderr, rootID, cliLaneRefusal("the nudge store did not open"))
+		return true
+	}
 	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
-		return false
+		warnContinuationRefused(stderr, rootID, cliLaneRefusal(fmt.Errorf("opening the session provider: %w", err)))
+		return true
 	}
-	return continuationLaneNotice(target, store, sp, rootID)
+	handled, err := continuationLaneNotice(target, store, sp, rootID)
+	if err != nil {
+		warnContinuationRefused(stderr, rootID, err)
+	}
+	return handled
+}
+
+// warnContinuationRefused warns on stderr that the lane refused rootID's
+// continuation nudge for err.
+func warnContinuationRefused(stderr io.Writer, rootID string, err error) {
+	fmt.Fprintf(stderr, "gc hook --claim: warning: the continuation nudge for %s was not sent: %v\n", rootID, err) //nolint:errcheck // best-effort stderr
 }
 
 // continuationLaneNotice proposes the hook-claim continuation for rootID as a
-// lane notice to target's session (continuationNudgeEnqueueAt), and reports
-// whether it did; false leaves the legacy queue path, nothing written, or
-// after a proposal that failed. Its key, hook-claim:<root id>, coalesces a
-// continuation only while its notice is open: a later claim of the root,
-// after that notice closed or in a later generation, is a new notice under a
-// minted key.
-func continuationLaneNotice(target nudgeTarget, store beads.Store, sp runtime.Provider, rootID string) bool {
+// lane notice to target's session (continuationNudgeEnqueueAt), as
+// cliLaneProduce does: handled false leaves the legacy queue path, nothing
+// written; an error is the lane's refusal, nothing written either. Its key,
+// hook-claim:<root id>, coalesces a continuation only while its notice is
+// open: a later claim of the root, after that notice closed or in a later
+// generation, renews it (proposeRenewal).
+func continuationLaneNotice(target nudgeTarget, store beads.Store, sp runtime.Provider, rootID string) (handled bool, err error) {
 	prod, err := cliLaneProduce(context.Background(), cliLaneProduction{
 		target: target, store: store, sp: sp,
 		req:           cliLaneNotice(hookClaimContinuationPrincipal, "hook-claim:"+rootID, rootID, hookClaimContinuationText, opjournal.WakeLiveOnly),
 		sessionScoped: true,
 		renew:         true,
 	})
-	return prod.handled && err == nil
+	return prod.handled, err
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {

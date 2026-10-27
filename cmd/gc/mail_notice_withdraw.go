@@ -5,10 +5,13 @@ package main
 // mail notice is a lane op caused by its message (mail:<message id>). Once
 // the message is read, marked read, archived or deleted, its open notices
 // say nothing the recipient does not know, so the mail provider cancels
-// them, best effort, after the mutation succeeds. A notice already started
+// them, best effort, after the mutation succeeds. An archive of a message
+// already archived, or already gone, cancels them again, so a cancel that
+// failed is retried as a repeated read retries it. A notice already started
 // keeps the cancel as a request (opjournal.Store.Cancel); the lane decides.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -41,11 +44,10 @@ func withMailNoticeWithdrawal(p mail.Provider, sessions beads.Store, cfg *config
 	if p == nil || isNilBeadStore(sessions) || !cliLaneExecutesMessage(cfg) {
 		return p
 	}
-	w := &mailNoticeWithdrawer{Provider: p, sessions: sessions, warn: warn}
 	if bp, ok := p.(*beadmail.Provider); ok {
-		bp.OnConsumed(w.withdraw)
-		return bp
+		return withBeadMailNoticeWithdrawal(bp, sessions, cfg, warn)
 	}
+	w := &mailNoticeWithdrawer{Provider: p, sessions: sessions, warn: warn}
 	dedup, isDedup := p.(mail.DedupSender)
 	inboxer, isInboxer := p.(mail.MultiRecipientInboxer)
 	switch {
@@ -67,6 +69,19 @@ func withMailNoticeWithdrawal(p mail.Provider, sessions beads.Store, cfg *config
 		}{w, inboxer}
 	}
 	return w
+}
+
+// withBeadMailNoticeWithdrawal is withMailNoticeWithdrawal for a caller that
+// keeps calling the bead mail provider's own methods, such as the SessionStart
+// handoff archive: it registers the withdrawal as bp's consumed hook when cfg's
+// [ops] authoritative lists message, and returns bp.
+func withBeadMailNoticeWithdrawal(bp *beadmail.Provider, sessions beads.Store, cfg *config.City, warn io.Writer) *beadmail.Provider {
+	if bp == nil || isNilBeadStore(sessions) || !cliLaneExecutesMessage(cfg) {
+		return bp
+	}
+	w := &mailNoticeWithdrawer{Provider: bp, sessions: sessions, warn: warn}
+	bp.OnConsumed(w.withdraw)
+	return bp
 }
 
 // mailNoticeWithdrawer is a mail.Provider that withdraws a message's lane
@@ -99,7 +114,7 @@ func (w *mailNoticeWithdrawer) MarkRead(id string) error {
 // Archive implements mail.Provider.
 func (w *mailNoticeWithdrawer) Archive(id string) error {
 	err := w.Provider.Archive(id)
-	if err == nil {
+	if archivedAfter(err) {
 		w.withdraw(id)
 	}
 	return err
@@ -108,10 +123,18 @@ func (w *mailNoticeWithdrawer) Archive(id string) error {
 // Delete implements mail.Provider.
 func (w *mailNoticeWithdrawer) Delete(id string) error {
 	err := w.Provider.Delete(id)
-	if err == nil {
+	if archivedAfter(err) {
 		w.withdraw(id)
 	}
 	return err
+}
+
+// archivedAfter reports whether an archive or delete that answered err left
+// its message archived: it succeeded, or the message already was
+// (mail.ErrAlreadyArchived), so a withdrawal that failed after the first
+// archive is retried, as a repeated read retries it.
+func archivedAfter(err error) bool {
+	return err == nil || errors.Is(err, mail.ErrAlreadyArchived)
 }
 
 // ArchiveMany implements mail.Provider.
@@ -129,10 +152,10 @@ func (w *mailNoticeWithdrawer) DeleteMany(ids []string) ([]mail.ArchiveResult, e
 }
 
 // withdrawSucceeded withdraws the notices of every message results reports
-// done.
+// archived.
 func (w *mailNoticeWithdrawer) withdrawSucceeded(results []mail.ArchiveResult) {
 	for _, r := range results {
-		if r.Err == nil && r.ID != "" {
+		if archivedAfter(r.Err) && r.ID != "" {
 			w.withdraw(r.ID)
 		}
 	}
