@@ -135,6 +135,11 @@ func TestWorkflowWritePermissionsAreJobScoped(t *testing.T) {
 			want:     map[string]string{"checks": "write", "actions": "read"},
 		},
 		{
+			file:     "pr-evidence-rewatch.yml",
+			writeJob: "rewatch",
+			want:     map[string]string{"actions": "write", "checks": "read", "contents": "read", "pull-requests": "read"},
+		},
+		{
 			file:     "worker-env-notify-beads-pr.yml",
 			writeJob: "comment",
 			want:     map[string]string{"pull-requests": "write"},

@@ -14,6 +14,10 @@ go_test(
     name = "prwatchdog_test",
     srcs = [
         "evaluate_test.go",
+        "github_test.go",
+        "rewatch_github_test.go",
+        "rewatch_test.go",
+        "rewatch_workflow_policy_test.go",
         "testenv_import_test.go",
         "watch_test.go",
         "workflow_policy_test.go",
