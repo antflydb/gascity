@@ -18,6 +18,16 @@ var Default = Config{
 		"github.com/gastownhall/gascity/internal/beads.Store",
 		"github.com/gastownhall/gascity/internal/runtime.Provider",
 	},
+	// The typed store handles (typed-stores design §3.8): a pure root may not
+	// read a store through one any more than through a raw beads.Store.
+	ForbiddenTypes: []string{
+		"github.com/gastownhall/gascity/internal/beads.WorkStore",
+		"github.com/gastownhall/gascity/internal/beads.GraphStore",
+		"github.com/gastownhall/gascity/internal/beads.SessionStore",
+		"github.com/gastownhall/gascity/internal/beads.MailStore",
+		"github.com/gastownhall/gascity/internal/beads.OrdersStore",
+		"github.com/gastownhall/gascity/internal/beads.NudgesStore",
+	},
 	// Roots pins the //gc:pure roots: the decide, admission, the dirty
 	// filters, the work ladder's decision, every section's Decide, and every
 	// decide a probed section is given.

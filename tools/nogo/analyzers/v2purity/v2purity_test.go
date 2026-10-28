@@ -522,3 +522,52 @@ func TestSealRules(t *testing.T) {
 		check(t, c.name, got, c.want)
 	}
 }
+
+// typedHandles stands in for internal/beads: the raw store, today's class
+// handle (an embedded interface), and the sealed generic shape the design
+// moves to (a pointer to a per-class instance of one generic core).
+const typedHandles = `type Store interface{ Get() int }
+
+type GraphStore struct{ Store }
+
+func (s GraphStore) Raw() Store { return s.Store }
+
+type graphTag struct{}
+
+type handle[C any] struct{ inner Store }
+
+func (h *handle[C]) Ref() string { return "" }
+
+type SealedGraph struct{ *handle[graphTag] }
+`
+
+// TestPurityForbidsTypedHandles: a //gc:pure root may not use a typed store
+// handle. A method promoted from an embedded interface is that interface's
+// method, which ForbiddenInterfaces already bans; a method declared on the
+// handle, or promoted from a generic core, is concrete and needs
+// ForbiddenTypes (typed-stores design §3.8).
+func TestPurityForbidsTypedHandles(t *testing.T) {
+	withTypes := cfg
+	withTypes.ForbiddenInterfaces = []string{"example.com/q.Store"}
+	withTypes.ForbiddenTypes = []string{"example.com/q.GraphStore", "example.com/q.SealedGraph"}
+	without := withTypes
+	without.ForbiddenTypes = nil
+	for _, c := range []struct {
+		name, src string
+		cfg       v2purity.Config
+		want      string
+	}{
+		{"a promoted interface method", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.GraphStore) int { return h.Get() }\n", without, "reaches example.com/q.Store.Get"},
+		{"a declared handle method, unbanned", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.GraphStore) int { _ = h.Raw(); return 0 }\n", without, ""},
+		{"a declared handle method", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.GraphStore) int { _ = h.Raw(); return 0 }\n", withTypes, "reaches example.com/q.GraphStore.Raw"},
+		{"a method value", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.GraphStore) int { f := h.Raw; _ = f; return 0 }\n", withTypes, "reaches example.com/q.GraphStore.Raw"},
+		{"a generic core's method, unbanned", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.SealedGraph) int { _ = h.Ref(); return 0 }\n", without, ""},
+		{"a generic core's method", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.SealedGraph) int { _ = h.Ref(); return 0 }\n", withTypes, "reaches example.com/q.SealedGraph.Ref"},
+		{"through an embedding struct", "import \"example.com/q\"\n\ntype env struct{ q.SealedGraph }\n\n//gc:pure\nfunc decide(e env) int { _ = e.Ref(); return 0 }\n", withTypes, "reaches example.com/q.SealedGraph.Ref"},
+		{"a handle held, not used", "import \"example.com/q\"\n\n//gc:pure\nfunc decide(h q.SealedGraph) int { _ = h; return 1 }\n", withTypes, ""},
+		{"an unmarked caller", "import \"example.com/q\"\n\nfunc decide(h q.SealedGraph) int { _ = h.Ref(); return 0 }\n", withTypes, ""},
+	} {
+		check(t, c.name, messages(t, c.cfg, typedHandles, c.src), c.want)
+		check(t, c.name+" (export view)", messagesIn(t, true, c.cfg, typedHandles, c.src), c.want)
+	}
+}
