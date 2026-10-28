@@ -29,7 +29,8 @@ var Default = Config{
 		beads + ".OrdersStore",
 		beads + ".NudgesStore",
 	},
-	UnwrapMethods: []string{"Raw"},
+	UnwrapMethods: []string{"Raw", "ConditionalWritesResolveTarget"},
+	AsFuncs:       []string{beads + ".As"},
 	// The mint lands with the router (T2): storeref.NewStores is its only
 	// production caller. Until then the handles are minted by literal, and
 	// every literal outside the allowlist is baselined.
@@ -51,7 +52,11 @@ var Default = Config{
 		{Package: "internal/storebinding/...", Reason: "the binding engines and the migration copy and clear: they move rows between physical stores, raw by nature"},
 		{Package: "internal/storeref", Rules: AllRulesBut(CapAssert), Reason: "the residency resolver: the mint (T2) and the plan executors that run legs over physical stores. A capability assertion here still goes through beads.As"},
 		{Package: "cmd/gc", File: "storage_boot.go", Reason: "storage-class routing at boot: opens and holds the physical engines the router later wraps"},
-		{Package: "cmd/gc", File: "infra_class_*.go", Reason: "the storage-class migration engine (migrate, clear, recover, relower): it copies and clears rows between physical stores, raw by nature (S5 works here)"},
+		{Package: "cmd/gc", File: "infra_class_migrate.go", Rules: rawRules, Reason: "the storage-class migration: copies a class's rows between physical stores, raw by nature (S5)"},
+		{Package: "cmd/gc", File: "infra_class_clear.go", Rules: rawRules, Reason: "the migration's clear: deletes migrated rows from the source physical store"},
+		{Package: "cmd/gc", File: "infra_class_recover.go", Rules: rawRules, Reason: "the stranded-write recovery: moves rows between physical stores"},
+		{Package: "cmd/gc", File: "infra_class_recover_held.go", Rules: rawRules, Reason: "the stranded-write recovery for held rows: moves rows between physical stores"},
+		{Package: "cmd/gc", File: "infra_class_relower.go", Rules: rawRules, Reason: "the reverse migration: copies rows back to the work store"},
 	},
 	// Sealed packages have no baseline rows: a phase ends by adding its
 	// package here, and the list only grows (TestSealedOnlyGrows).
@@ -60,6 +65,10 @@ var Default = Config{
 	},
 	Baseline: mustParseBaseline(baselineText),
 }
+
+// rawRules are the raw-signature rules: the migration engine takes physical
+// stores, but it still mints, unwraps and asserts only through the baseline.
+var rawRules = []Rule{RawParam, RawResult, RawField, RawVar, RawType}
 
 // Analyzer runs the rules with Default.
 var Analyzer = New(Default)

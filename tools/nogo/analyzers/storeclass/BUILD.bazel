@@ -21,7 +21,10 @@ go_test(
         "ratchet_test.go",
         "storeclass_test.go",
     ],
-    embedsrcs = ["ceiling.txt"],
+    embedsrcs = [
+        "ceiling.txt",
+        "sealed_floor.txt",
+    ],
     deps = [
         ":storeclass",
         "//tools/nogo/analyzers/internal/analyzertest",

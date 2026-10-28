@@ -46,8 +46,17 @@ func main() {
 	repo := flag.String("repo", "", "the gascity checkout (default: the git toplevel)")
 	write := flag.Bool("write", false, "rewrite baseline.txt and ceiling.txt; refuse any growth")
 	initial := flag.Bool("init", false, "write the first ceiling.txt; refuse when one has rows")
+	since := flag.String("growth-since", "", "also fail on any baseline or ceiling raise against this git ref (the PR's merge-base)")
+	allowRaise := flag.Bool("allow-raise", false, "with -growth-since: report raises but pass (the PR carries the storeclass/baseline-raise label)")
 	flag.Parse()
 	if err := run(*repo, *write, *initial, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "storeclass-baseline:", err)
+		os.Exit(1)
+	}
+	if *since == "" {
+		return
+	}
+	if err := gate(*repo, *since, *allowRaise, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "storeclass-baseline:", err)
 		os.Exit(1)
 	}
@@ -335,4 +344,94 @@ func growth(rows map[storeclass.Key]int, ceiling map[storeclass.CeilingKey]int, 
 	}
 	sort.Strings(refusals)
 	return refusals
+}
+
+const (
+	baselineRel = "tools/nogo/analyzers/storeclass/baseline.txt"
+	ceilingRel  = "tools/nogo/analyzers/storeclass/ceiling.txt"
+)
+
+// gate compares the checkout's baseline and ceiling with ref's: any new row,
+// raised count, new ceiling row or raised ceiling is a raise, which fails
+// unless allowRaise. A ref with no baseline is the PR that introduces it.
+func gate(repo, ref string, allowRaise bool, out io.Writer) error {
+	if repo == "" {
+		top, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+		if err != nil {
+			return fmt.Errorf("finding the checkout: %w", err)
+		}
+		repo = strings.TrimSpace(string(top))
+	}
+	show := func(rel string) (string, bool) {
+		b, err := exec.Command("git", "-C", repo, "show", ref+":"+rel).Output()
+		return string(b), err == nil
+	}
+	oldBaseline, ok := show(baselineRel)
+	if !ok {
+		_, err := fmt.Fprintf(out, "%s has no storeclass baseline: this change introduces it\n", ref)
+		return err
+	}
+	oldCeilingText, _ := show(ceilingRel)
+	oldRows, err := storeclass.ParseBaseline(oldBaseline)
+	if err != nil {
+		return fmt.Errorf("%s baseline: %w", ref, err)
+	}
+	oldCeil, err := storeclass.ParseCeiling(oldCeilingText)
+	if err != nil {
+		return fmt.Errorf("%s ceiling: %w", ref, err)
+	}
+	read := func(rel string) (string, error) {
+		b, err := os.ReadFile(filepath.Join(repo, rel))
+		return string(b), err
+	}
+	newBaseline, err := read(baselineRel)
+	if err != nil {
+		return err
+	}
+	newCeilingText, err := read(ceilingRel)
+	if err != nil {
+		return err
+	}
+	newRows, err := storeclass.ParseBaseline(newBaseline)
+	if err != nil {
+		return err
+	}
+	newCeil, err := storeclass.ParseCeiling(newCeilingText)
+	if err != nil {
+		return err
+	}
+	rs := raises(oldRows, newRows, oldCeil, newCeil)
+	if len(rs) == 0 {
+		_, err := fmt.Fprintf(out, "no storeclass baseline raise against %s\n", ref)
+		return err
+	}
+	msg := fmt.Sprintf("storeclass baseline raises against %s:\n  %s\n", ref, strings.Join(rs, "\n  "))
+	if allowRaise {
+		_, err := fmt.Fprintf(out, "%sapproved by the storeclass/baseline-raise label\n", msg)
+		return err
+	}
+	return fmt.Errorf("%snew raw-store debt needs the coordinator's approval: the storeclass/baseline-raise label (see the storeclass package doc)", msg)
+}
+
+// raises is every way the new baseline and ceiling grow past the old.
+func raises(oldRows, newRows map[storeclass.Key]int, oldCeil, newCeil map[storeclass.CeilingKey]int) []string {
+	var out []string
+	for k, n := range newRows {
+		switch was, ok := oldRows[k]; {
+		case !ok:
+			out = append(out, fmt.Sprintf("new row %s (%d)", k, n))
+		case n > was:
+			out = append(out, fmt.Sprintf("%s raised %d -> %d", k, was, n))
+		}
+	}
+	for k, n := range newCeil {
+		switch was, ok := oldCeil[k]; {
+		case !ok:
+			out = append(out, fmt.Sprintf("new ceiling row %s %s (%d)", k.Package, k.Rule, n))
+		case n > was:
+			out = append(out, fmt.Sprintf("ceiling %s %s raised %d -> %d", k.Package, k.Rule, was, n))
+		}
+	}
+	sort.Strings(out)
+	return out
 }

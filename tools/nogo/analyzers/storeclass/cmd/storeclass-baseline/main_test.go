@@ -79,3 +79,29 @@ func TestMergeVariantsTakesEachKeysMax(t *testing.T) {
 		t.Fatalf("merged = %v", merged)
 	}
 }
+
+func TestRaisesAgainstTheMergeBase(t *testing.T) {
+	k := func(p, fn string) storeclass.Key { return storeclass.Key{Path: p, Func: fn, Rule: storeclass.RawParam} }
+	c := storeclass.CeilingKey{Package: "cmd/gc", Rule: storeclass.RawParam}
+	oldRows := map[storeclass.Key]int{k("cmd/gc/a.go", "f"): 2, k("cmd/gc/b.go", "g"): 1}
+	oldCeil := map[storeclass.CeilingKey]int{c: 3}
+	for name, tc := range map[string]struct {
+		rows map[storeclass.Key]int
+		ceil map[storeclass.CeilingKey]int
+		want []string
+	}{
+		"unchanged":         {rows: oldRows, ceil: oldCeil},
+		"a shrink":          {rows: map[storeclass.Key]int{k("cmd/gc/a.go", "f"): 1}, ceil: map[storeclass.CeilingKey]int{c: 1}},
+		"a new key":         {rows: map[storeclass.Key]int{k("cmd/gc/a.go", "f"): 2, k("cmd/gc/c.go", "h"): 1}, ceil: oldCeil, want: []string{"new row cmd/gc/c.go\th\traw-param (1)"}},
+		"a raised count":    {rows: map[storeclass.Key]int{k("cmd/gc/a.go", "f"): 3}, ceil: oldCeil, want: []string{"cmd/gc/a.go\tf\traw-param raised 2 -> 3"}},
+		"a raised ceiling":  {rows: oldRows, ceil: map[storeclass.CeilingKey]int{c: 4}, want: []string{"ceiling cmd/gc raw-param raised 3 -> 4"}},
+		"a new ceiling row": {rows: oldRows, ceil: map[storeclass.CeilingKey]int{c: 3, {Package: "internal/x", Rule: storeclass.Mint}: 1}, want: []string{"new ceiling row internal/x mint (1)"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := raises(oldRows, tc.rows, oldCeil, tc.ceil)
+			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Fatalf("raises = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

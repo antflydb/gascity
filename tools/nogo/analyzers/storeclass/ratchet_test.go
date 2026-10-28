@@ -5,6 +5,7 @@ import (
 	"path"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/storeclass"
@@ -13,11 +14,12 @@ import (
 //go:embed ceiling.txt
 var ceilingText string
 
-// sealedFloor is every package ever sealed. Default.Sealed must keep each:
-// a sealed package never reopens. Seal a package by adding it to both.
-var sealedFloor = []string{
-	"internal/workladder",
-}
+// sealedFloorText is every package ever sealed (sealed_floor.txt, one per
+// line). Default.Sealed must keep each: a sealed package never reopens. Seal a
+// package by adding it to both; CODEOWNERS gates both files.
+//
+//go:embed sealed_floor.txt
+var sealedFloorText string
 
 // TestBaselineIsCanonical: the embedded baseline is exactly what the
 // generator writes, so a hand edit that reorders, duplicates or zeroes a row
@@ -75,7 +77,7 @@ func TestBaselineOnlyShrinks(t *testing.T) {
 // package has no baseline row.
 func TestSealedOnlyGrows(t *testing.T) {
 	sealed := storeclass.Default.Sealed
-	for _, p := range sealedFloor {
+	for _, p := range strings.Fields(sealedFloorText) {
 		if !slices.Contains(sealed, p) {
 			t.Errorf("%s was sealed and is no longer: the sealed list only grows", p)
 		}

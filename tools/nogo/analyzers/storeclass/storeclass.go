@@ -23,6 +23,19 @@
 //   - read-marker: a federated or relic read marker named (D9 freezes them:
 //     a new federation is a storeref intent change).
 //
+// A raw store is beads.Store itself, an interface that is one, or a concrete
+// store type (an engine such as *beads.CachingStore, or a wrapper); a struct
+// that is a store only through an embedded typed handle is not. A type
+// parameter constrained by a raw store is a raw-type finding, and so is an
+// interface element that holds one. As[T] with a store for T is an unwrap,
+// and so is ConditionalWritesResolveTarget.
+//
+// Out of scope, by design: assertions laundered through a value that is no
+// longer typed as a store (var x any = s; x.(T)), through reflect, or through
+// a helper outside the linted packages. A conversion that boxes a store at the
+// assertion (any(s).(T)) is caught. The runtime class guard (T8) is the
+// backstop for what a type check cannot see.
+//
 // Every finding counts against a generated baseline keyed by file, enclosing
 // function and rule (baseline.txt). A count above its pin reports every site
 // of that key; a pin the tree no longer reaches reports too, so the baseline
@@ -97,6 +110,7 @@ type Config struct {
 	Handles          []string // the typed class handle types
 	HandleField      string   // the handles' embedded store field
 	UnwrapMethods    []string // handle methods that return the raw store
+	AsFuncs          []string // capability helpers (beads.As): an instance whose T is a store unwraps
 	MintFuncs        []string // functions that mint handles
 	TestMintPackages []string // packages production code may not import
 	Markers          []string // federated/relic read marker functions
@@ -194,7 +208,7 @@ func run(pass *analysis.Pass, cfg Config, collect func(Finding)) error {
 	var bases []string
 	for _, file := range pass.Files {
 		name := pass.Fset.Position(file.Pos()).Filename
-		if !linted(name) {
+		if !linted(name) || ast.IsGenerated(file) {
 			continue
 		}
 		if first == nil {
@@ -224,6 +238,7 @@ type checker struct {
 	storeIface *types.Interface
 	found      []Finding
 	nolint     []token.Pos
+	concrete   map[*types.Named]bool
 }
 
 // report checks the pass's findings against the baseline.
@@ -346,11 +361,12 @@ func (c *checker) file(file *ast.File, base string) {
 					c.signature(base, fn, ft)
 					continue
 				}
-				if c.isStore(info.TypeOf(m.Type)) {
-					c.add(base, fn, RawType, m.Pos(), "an interface embeds the raw beads.Store: take a typed class handle")
+				if c.holdsElement(info.TypeOf(m.Type)) {
+					c.add(base, fn, RawType, m.Pos(), "an interface embeds or is satisfied by a raw store: take a typed class handle")
 				}
 			}
 		case *ast.TypeSpec:
+			c.typeParams(base, fn, v.TypeParams)
 			switch v.Type.(type) {
 			case *ast.StructType, *ast.InterfaceType:
 			default:
@@ -384,6 +400,12 @@ func (c *checker) file(file *ast.File, base string) {
 					c.add(base, fn, Mint, v.Pos(), fmt.Sprintf("%s mints handles: only the residency layer may call it", f.Name()))
 				case slices.Contains(c.cfg.Markers, full):
 					c.add(base, fn, ReadMarker, v.Pos(), fmt.Sprintf("the read marker %s: markers are frozen (D9); a new federation is a storeref intent change", f.Name()))
+				case slices.Contains(c.cfg.AsFuncs, full):
+					if inst, ok := info.Instances[v]; ok && inst.TypeArgs.Len() == 1 {
+						if ta := inst.TypeArgs.At(0); c.isStoreType(ta) && !c.isHandle(ta) {
+							c.add(base, fn, Unwrap, v.Pos(), fmt.Sprintf("%s[%s] extracts a raw store from a handle: ask for a capability, not a store", f.Name(), c.typeString(ta)))
+						}
+					}
 				}
 			}
 		case *ast.SelectorExpr:
@@ -394,7 +416,7 @@ func (c *checker) file(file *ast.File, base string) {
 				if v.Type != nil {
 					what = "a type assertion to " + c.typeString(info.TypeOf(v.Type))
 				}
-				c.add(base, fn, CapAssert, v.Pos(), what+" on a store: use beads.As or a beads XFor helper, which see through a typed handle")
+				c.add(base, fn, CapAssert, v.Pos(), what+" on a store: use beads.As, which sees through a typed handle")
 			}
 		}
 		return true
@@ -403,6 +425,7 @@ func (c *checker) file(file *ast.File, base string) {
 
 // signature collects a function type's raw parameters and results.
 func (c *checker) signature(base, fn string, ft *ast.FuncType) {
+	c.typeParams(base, fn, ft.TypeParams)
 	if ft.Params != nil {
 		for _, f := range ft.Params.List {
 			c.fieldList(base, fn, RawParam, "parameter", f)
@@ -413,6 +436,40 @@ func (c *checker) signature(base, fn string, ft *ast.FuncType) {
 			c.fieldList(base, fn, RawResult, "result", f)
 		}
 	}
+}
+
+// typeParams collects type parameters constrained by a raw store. A
+// constraint written as an interface literal reports where the literal is.
+func (c *checker) typeParams(base, fn string, tps *ast.FieldList) {
+	if tps == nil {
+		return
+	}
+	for _, f := range tps.List {
+		if _, lit := f.Type.(*ast.InterfaceType); lit {
+			continue
+		}
+		t := c.pass.TypesInfo.TypeOf(f.Type)
+		if !c.holds(t) {
+			continue
+		}
+		for _, name := range f.Names {
+			c.add(base, fn, RawType, name.Pos(), fmt.Sprintf("type parameter %s is constrained by a raw store (%s): take a typed class handle", name.Name, c.typeString(t)))
+		}
+	}
+}
+
+// holdsElement reports whether an interface's embedded element (a type, or a
+// union of terms) is or holds a raw store.
+func (c *checker) holdsElement(t types.Type) bool {
+	if u, ok := t.(*types.Union); ok {
+		for i := range u.Len() {
+			if c.holds(u.Term(i).Type()) {
+				return true
+			}
+		}
+		return false
+	}
+	return c.holds(t)
 }
 
 // fieldList collects one field of a parameter, result or field list: a
@@ -548,7 +605,7 @@ func (c *checker) holds(t types.Type) bool {
 	case nil:
 		return false
 	case *types.Named:
-		if c.isStore(t) {
+		if c.isStore(t) || c.isConcreteStore(t) {
 			return true
 		}
 		for a := range t.TypeArgs().Types() {
@@ -579,6 +636,40 @@ func (c *checker) holds(t types.Type) bool {
 		}
 	}
 	return false
+}
+
+// isStoreType reports whether t is the store interface or implements it.
+func (c *checker) isStoreType(t types.Type) bool {
+	if c.isStore(t) {
+		return true
+	}
+	return c.storeIface != nil && t != nil && (types.Implements(t, c.storeIface) || types.Implements(types.NewPointer(t), c.storeIface))
+}
+
+// isConcreteStore reports whether named type t is a store other than the
+// store interface and the typed handles: an engine (*beads.CachingStore,
+// *beads.MemStore), a wrapper, or an interface that is a store. A struct
+// that is a store only through an embedded typed handle is the handle's.
+func (c *checker) isConcreteStore(t *types.Named) bool {
+	if c.storeIface == nil || c.isHandle(t) || c.isStore(t) {
+		return false
+	}
+	if c.concrete == nil {
+		c.concrete = map[*types.Named]bool{}
+	}
+	if v, ok := c.concrete[t]; ok {
+		return v
+	}
+	v := types.Implements(t, c.storeIface) || types.Implements(types.NewPointer(t), c.storeIface)
+	if st, ok := t.Underlying().(*types.Struct); v && ok {
+		for i := range st.NumFields() {
+			if f := st.Field(i); f.Embedded() && c.isHandle(f.Type()) {
+				v = false
+			}
+		}
+	}
+	c.concrete[t] = v
+	return v
 }
 
 // isStoreValue reports whether a type assertion's operand is a store: a raw
