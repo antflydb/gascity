@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1547,5 +1548,68 @@ func TestSessionSubmitLaneDeclinedLegacyPathClaimsTheKeyUnderTheBuiltinDefault(t
 	}
 	if op := c.only(t); op.ClientKey != sent || op.Executor != opjournal.ExecutorLegacyCLI || op.Status != opjournal.StatusClosed {
 		t.Fatalf("op = %+v, want the CLI's own closed op under the key %q the API was sent", op, sent)
+	}
+}
+
+// With message listed, gc session submit sends resume: true, and the API
+// consumes the session's operator hold only once it has proposed the lane op,
+// so a request that died between the two leaves the op open behind the hold.
+// A fallback on either lane path, the one that serves the session (here an
+// interrupt_now unit, which waits for the controller) and the one that
+// declines it (a protocol-mode session), that finds that op open consumes the
+// hold itself, recording the session's wake, before it reports the message;
+// a resume the session refuses (its drain is stopping it) is reported, exit
+// 1, the op left open. Kills a lane fallback that reports an open op over a
+// hold nothing consumed.
+func TestSessionSubmitLaneFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
+	for _, path := range []struct {
+		name   string
+		mode   runtime.TurnInterruptMode
+		intent session.SubmitIntent
+	}{
+		{name: "served", mode: runtime.TurnInterruptKeystroke, intent: session.SubmitIntentInterruptNow},
+		{name: "declined", mode: runtime.TurnInterruptProtocol, intent: session.SubmitIntentDefault},
+	} {
+		for _, draining := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/draining=%t", path.name, draining), func(t *testing.T) {
+				c := newCLILaneCity(t)
+				c.sp.TurnInterruptModeValue = path.mode
+				if _, err := sessionFrontDoor(c.store).OperatorSuspend(c.id, laneT0.Add(-time.Minute)); err != nil {
+					t.Fatalf("suspending the session: %v", err)
+				}
+				if draining {
+					if err := c.store.SetMetadataBatch(c.id, map[string]string{"state": string(session.StateDraining)}); err != nil {
+						t.Fatalf("draining the session: %v", err)
+					}
+				}
+				var apiOp opjournal.Op
+				c.cmdSubmitCity(t, lostAnswerServer(t, func(key string) {
+					apiOp = c.proposeLaneSubmit(t, path.intent, key, cliLaneTestMessage, nil)
+				}))
+				c.sp.Calls = nil
+				code, stdout, stderr := c.cmdSubmit(path.intent, "", false)
+				c.assertNothingDelivered(t)
+				if got := c.only(t); got.ID != apiOp.ID || got.Status == opjournal.StatusClosed {
+					t.Fatalf("op rows = %+v, want only the API's open op %s", got, apiOp.ID)
+				}
+				row, err := c.store.Get(c.id)
+				if err != nil {
+					t.Fatalf("reading the session: %v", err)
+				}
+				meta := row.Metadata
+				if draining {
+					if code != 1 || !strings.Contains(stderr, "resuming "+c.id+" for op "+apiOp.ID) || meta["state"] != string(session.StateDraining) {
+						t.Fatalf("submit = %d, stdout %q, stderr %q, row state %q; want exit 1 naming the refused resume, the row left draining", code, stdout, stderr, meta["state"])
+					}
+					return
+				}
+				if code != 0 || !strings.Contains(stdout+stderr, apiOp.ID) {
+					t.Fatalf("submit = %d, stdout %q, stderr %q; want the API's op %s reported", code, stdout, stderr, apiOp.ID)
+				}
+				if meta["state"] != string(session.StateAsleep) || meta["wake_request"] != string(session.WakeCauseExplicit) {
+					t.Fatalf("session row = %v; want the hold consumed and its wake recorded", meta)
+				}
+			})
+		}
 	}
 }

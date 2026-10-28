@@ -424,7 +424,29 @@ func submitSessionLane(s sessionSubmitLane) (code int, handled bool) {
 	case prod.legacy:
 		return s.replayLegacy(prod.op), true
 	}
+	if !s.resumeHeld(prod.op) {
+		return 1, true
+	}
 	return s.report(prod), true
+}
+
+// resumeHeld is the resume: true the API applies once it has proposed a
+// submit's lane op (api.acceptMessageLane), run for op, the lane op this
+// fallback proposed or found open: a request that died between the API's
+// proposal and its resume left the op waiting on the session's operator
+// hold, so the fallback consumes the hold, as the legacy fallback does
+// (resumeForAcceptedLaneOp), consuming only a hold stamped by the op's
+// proposal. A closed op is left alone. It reports false, having printed the
+// error, when the session refuses the resume (a drain is stopping it).
+func (s sessionSubmitLane) resumeHeld(op opjournal.Op) bool {
+	if op.Status == opjournal.StatusClosed {
+		return true
+	}
+	if err := resumeForAcceptedLaneOp(cliSessionStore(s.store, s.cfg, s.cityPath), op); err != nil {
+		fmt.Fprintf(s.stderr, "gc session submit: resuming %s for op %s: %v (key %s)\n", s.target, op.ID, err, s.key) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
 }
 
 // answerKeyedLaneOp answers a submit to a session no lane serves (a
@@ -432,9 +454,10 @@ func submitSessionLane(s sessionSubmitLane) (code int, handled bool) {
 // names, which the legacy path would deliver again: the op the API proposed
 // under the key before an answer the CLI never got, which the controller's
 // lane host delivers, or one an earlier run proposed under --key. An open
-// op is the API's acceptance (emitSessionSubmitAccepted), a closed one is
-// reported as report reports a replay, and a lane op of another request is
-// refused as a key that names a different request. It reports handled
+// op is the API's acceptance (emitSessionSubmitAccepted) once its hold is
+// consumed (resumeHeld), a closed one is reported as report reports a
+// replay, and a lane op of another request is refused as a key that names
+// a different request. It reports handled
 // false, having written nothing, when the key names no lane op, which a key
 // minted in this run and never sent to the API cannot. A read that fails is
 // refused: the API may have accepted the message.
@@ -464,6 +487,9 @@ func (s sessionSubmitLane) answerKeyedLaneOp() (code int, handled bool) {
 	case op.PayloadDigest != want.PayloadDigest:
 		return s.refuseProduce(&opjournal.KeyReuseError{Existing: op}), true
 	case op.Status != opjournal.StatusClosed:
+		if !s.resumeHeld(op) {
+			return 1, true
+		}
 		return emitSessionSubmitAccepted(s.stdout, s.stderr, s.target, s.intent, op.ID, s.key, s.asJSON), true
 	}
 	return s.report(cliLaneProduced{handled: true, op: op, closedBefore: true}), true
