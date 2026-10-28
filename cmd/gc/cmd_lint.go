@@ -201,6 +201,10 @@ func lintPack(packDir string) lintPackReport {
 	return out
 }
 
+// lintLoadCityConfig is the loader gc lint uses for the city that hosts a pack.
+// It is a variable so tests can count loads.
+var lintLoadCityConfig = loadCityConfigAdvisory
+
 // lintFragmentSearchDirs splits the directories a pack's prompts may resolve
 // fragments from into the pack's own recursively-included PackDirs and the
 // extra dirs its hosting city composes in at the rig level (city.toml's
@@ -237,7 +241,7 @@ func lintFragmentSearchDirs(packDir string, ownPackDirs []string) (own []string,
 	if err != nil {
 		return ownPackDirs, nil
 	}
-	cfg, err := loadCityConfigAdvisory(cityPath)
+	cfg, err := lintLoadCityConfig(cityPath)
 	if err != nil || cfg == nil {
 		return ownPackDirs, nil
 	}

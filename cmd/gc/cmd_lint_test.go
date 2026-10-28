@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -639,6 +640,262 @@ func TestLintHelpDocumentsJSONFlag(t *testing.T) {
 	if !strings.Contains(out, "gc lint <pack>") || !strings.Contains(out, "--json") {
 		t.Fatalf("help missing lint usage or --json flag:\n%s", out)
 	}
+}
+
+// lintNestedCityFixture is a root city that composes a pack tree through a rig
+// include, with a nested city.toml sitting between the leaf packs and the root:
+//
+//	root/city.toml            rig "myrig" includes packs/comp
+//	root/packs/comp           defines fragment "footer"; includes both leaves
+//	root/sub/nested/city.toml composes nothing
+//	root/sub/nested/leaf*     inject fragment "footer"
+type lintNestedCityFixture struct {
+	root, nested, comp, leaf, leaf2 string
+}
+
+func writeLintNestedCityFixture(t *testing.T, nestedCityToml string) lintNestedCityFixture {
+	t.Helper()
+	root := pathutil.NormalizePathForCompare(t.TempDir())
+	f := lintNestedCityFixture{
+		root:   root,
+		nested: filepath.Join(root, "sub", "nested"),
+		comp:   filepath.Join(root, "packs", "comp"),
+		leaf:   filepath.Join(root, "sub", "nested", "leaf"),
+		leaf2:  filepath.Join(root, "sub", "nested", "leaf2"),
+	}
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/comp"]
+`)
+	writeLintFile(t, filepath.Join(f.nested, "city.toml"), nestedCityToml)
+	writeLintFile(t, filepath.Join(f.comp, "pack.toml"), `[pack]
+name = "comp"
+version = "0.1.0"
+schema = 2
+includes = ["../../sub/nested/leaf", "../../sub/nested/leaf2"]
+
+[[agent]]
+name = "helper"
+prompt_template = "prompts/helper.template.md"
+`)
+	writeLintFile(t, filepath.Join(f.comp, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(f.comp, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+	for _, leaf := range []string{f.leaf, f.leaf2} {
+		name := filepath.Base(leaf)
+		writeLintFile(t, filepath.Join(leaf, "pack.toml"), `[pack]
+name = "`+name+`"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "`+name+`-worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+		writeLintFile(t, filepath.Join(leaf, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+	}
+	return f
+}
+
+const lintNestedCityToml = "[workspace]\nname = \"nested\"\n"
+
+// countLintCityLoads swaps the city loader for one that counts loads per
+// normalized city dir.
+func countLintCityLoads(t *testing.T) map[string]int {
+	t.Helper()
+	loads := make(map[string]int)
+	orig := lintLoadCityConfig
+	lintLoadCityConfig = func(cityPath string) (*config.City, error) {
+		loads[pathutil.NormalizePathForCompare(cityPath)]++
+		return orig(cityPath)
+	}
+	t.Cleanup(func() { lintLoadCityConfig = orig })
+	return loads
+}
+
+func lintWarningLines(stderr, needle string) []string {
+	var out []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, ": warning: ") && strings.Contains(line, needle) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TestLintNestedCityDoesNotShadowComposingCity is the nested-city regression:
+// the nearest enclosing city.toml composes nothing, so it must not decide the
+// fragment namespace. The root city composes the pack tree, and both
+// `gc lint .` (walk-root city) and `gc lint <leaf>` (ancestor chain) find it.
+func TestLintNestedCityDoesNotShadowComposingCity(t *testing.T) {
+	f := writeLintNestedCityFixture(t, lintNestedCityToml)
+	if _, err := loadCityConfigAdvisory(f.nested); err != nil {
+		t.Fatalf("fixture nested city must load: %v", err)
+	}
+	if _, err := loadCityConfigAdvisory(f.root); err != nil {
+		t.Fatalf("fixture root city must load: %v", err)
+	}
+
+	t.Run("walk root", func(t *testing.T) {
+		t.Chdir(f.root)
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"lint", "."}, &stdout, &stderr)
+		if code != 0 || strings.Contains(stderr.String(), "inject_fragment") {
+			t.Fatalf("gc lint . = %d, want 0 and no fragment findings\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+		}
+		if lines := lintWarningLines(stderr.String(), ""); len(lines) != 0 {
+			t.Fatalf("composed packs must lint without warnings, got:\n%s", strings.Join(lines, "\n"))
+		}
+	})
+	t.Run("leaf only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"lint", f.leaf}, &stdout, &stderr)
+		if code != 0 || strings.Contains(stderr.String(), "inject_fragment") {
+			t.Fatalf("gc lint <leaf> = %d, want 0 and no fragment findings\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+		}
+		if lines := lintWarningLines(stderr.String(), ""); len(lines) != 0 {
+			t.Fatalf("composed pack must lint without warnings, got:\n%s", strings.Join(lines, "\n"))
+		}
+	})
+}
+
+// TestLintLoadsEachCandidateCityOncePerInvocation pins the memoization: two
+// leaves and a composition pack share two candidate cities, and each city is
+// loaded exactly once for the whole invocation.
+func TestLintLoadsEachCandidateCityOncePerInvocation(t *testing.T) {
+	f := writeLintNestedCityFixture(t, lintNestedCityToml)
+	loads := countLintCityLoads(t)
+
+	t.Chdir(f.root)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"lint", "."}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc lint . = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	for _, city := range []string{f.root, f.nested} {
+		if loads[city] != 1 {
+			t.Errorf("city %s loaded %d times, want exactly 1 (loads: %v)", city, loads[city], loads)
+		}
+	}
+}
+
+// TestLintWarnsOncePerCityThatFailsToLoad: a candidate city that cannot load is
+// reported once per invocation, naming the city and the error, and the next
+// candidate is tried; the warning does not fail the run.
+func TestLintWarnsOncePerCityThatFailsToLoad(t *testing.T) {
+	f := writeLintNestedCityFixture(t, "[workspace\nname = \n")
+	loads := countLintCityLoads(t)
+
+	t.Chdir(f.root)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", "."}, &stdout, &stderr)
+	if code != 0 || strings.Contains(stderr.String(), "inject_fragment") {
+		t.Fatalf("gc lint . = %d, want 0 (root city still composes the packs)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	lines := lintWarningLines(stderr.String(), f.nested)
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one load warning naming %s for two packs under it, got %d:\n%s\nfull stderr:\n%s", f.nested, len(lines), strings.Join(lines, "\n"), stderr.String())
+	}
+	if !strings.Contains(lines[0], "failed to load") {
+		t.Errorf("load warning does not say the city failed to load: %s", lines[0])
+	}
+	if loads[f.nested] != 1 {
+		t.Errorf("failing city loaded %d times, want 1", loads[f.nested])
+	}
+}
+
+// TestLintWarnsWhenNoCityComposesPack: a loadable city that does not compose
+// the pack keeps the #6256 fallback (the city's whole pack set) and says so.
+func TestLintWarnsWhenNoCityComposesPack(t *testing.T) {
+	root := pathutil.NormalizePathForCompare(t.TempDir())
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/other"]
+`)
+	other := filepath.Join(root, "packs", "other")
+	writeLintPack(t, other, "other", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(other, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(other, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+	orphan := filepath.Join(root, "packs", "orphan")
+	writeLintFile(t, filepath.Join(orphan, "pack.toml"), `[pack]
+name = "orphan"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(orphan, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", orphan}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (fallback keeps resolving; the warning never fails the run)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	lines := lintWarningLines(stderr.String(), "not composed")
+	if len(lines) != 1 || !strings.Contains(lines[0], "orphan") || !strings.Contains(lines[0], root) {
+		t.Fatalf("want one warning naming the pack %q and city %s, got:\n%s\nfull stderr:\n%s", "orphan", root, strings.Join(lines, "\n"), stderr.String())
+	}
+}
+
+// TestLintNoCandidateLoadsKeepsOwnDirs: when every candidate city fails to load
+// lint falls back to the pack's own dirs, with the load warning, and a fragment
+// only the city could have supplied is still reported missing.
+func TestLintNoCandidateLoadsKeepsOwnDirs(t *testing.T) {
+	root := pathutil.NormalizePathForCompare(t.TempDir())
+	writeLintFile(t, filepath.Join(root, "city.toml"), "[[rigs\n")
+	pack := filepath.Join(root, "packs", "lonely")
+	writeLintFile(t, filepath.Join(pack, "pack.toml"), `[pack]
+name = "lonely"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(pack, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", pack}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), `inject_fragment "footer"`) {
+		t.Fatalf("gc lint = %d, want the missing fragment reported\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if lines := lintWarningLines(stderr.String(), root); len(lines) != 1 || !strings.Contains(lines[0], "failed to load") {
+		t.Fatalf("want one load warning naming %s, got:\n%s", root, strings.Join(lines, "\n"))
+	}
+}
+
+// TestLintStandaloneAndRootPackEmitNoCityWarnings: no city on the chain stays
+// standalone and silent, and a pack at the city root counts as composed.
+func TestLintStandaloneAndRootPackEmitNoCityWarnings(t *testing.T) {
+	t.Run("no city", func(t *testing.T) {
+		dir := t.TempDir()
+		writeLintPack(t, dir, "solo", "worker", "prompts/worker.template.md")
+		writeLintFile(t, filepath.Join(dir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"lint", dir}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc lint = %d\nstderr:\n%s", code, stderr.String())
+		}
+		if lines := lintWarningLines(stderr.String(), ""); len(lines) != 0 {
+			t.Fatalf("standalone pack must not warn, got:\n%s", strings.Join(lines, "\n"))
+		}
+	})
+	t.Run("city root pack", func(t *testing.T) {
+		root := pathutil.NormalizePathForCompare(t.TempDir())
+		writeLintFile(t, filepath.Join(root, "city.toml"), lintNestedCityToml)
+		writeLintPack(t, root, "rootpack", "worker", "prompts/worker.template.md")
+		writeLintFile(t, filepath.Join(root, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"lint", root}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc lint = %d\nstderr:\n%s", code, stderr.String())
+		}
+		if lines := lintWarningLines(stderr.String(), "not composed"); len(lines) != 0 {
+			t.Fatalf("the city's own root pack is composed, got:\n%s", strings.Join(lines, "\n"))
+		}
+	})
 }
 
 func writeLintPack(t *testing.T, dir, packName, agentName, promptTemplate string) {
