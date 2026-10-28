@@ -5,9 +5,11 @@ package main
 // requalified named session's row untouched where it matters — the work
 // stays in_progress and assigned to the bare form, the row stays open under
 // the same bead ID, the runtime is neither stopped nor started, and no
-// second row appears. This file is self-contained (its own config, seed and
-// tick helpers) so it also runs against the pre-fix tree, where the first
-// tick drains or drift-restarts the seat and mints a replacement row.
+// second row appears. The legacy ticks are full daemon ticks
+// (requalifyDaemonTick: build, sync with skipClose=true, then the bead
+// reconciler), so a start, drain or close the reconciler would issue is in
+// what they observe. On the pre-fix tree the first tick drains or
+// drift-restarts the seat and mints a replacement row.
 
 import (
 	"bytes"
@@ -91,14 +93,6 @@ func stabilitySeedWork(t *testing.T, store beads.Store) beads.Bead {
 	return w
 }
 
-// stabilityTick runs one legacy reconciler tick — the desired-state build
-// followed by the session-beads sync.
-func stabilityTick(t *testing.T, cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, clk *clock.Fake, stderr *bytes.Buffer) {
-	t.Helper()
-	ds := buildDesiredState("test-city", cityPath, clk.Now(), cfg, sp, store, stderr)
-	syncSessionBeads(cityPath, store, ds.State, sp, allConfiguredDS(ds.State), cfg, clk, stderr, false)
-}
-
 // stabilityOpenRows lists the store's live session rows.
 func stabilityOpenRows(t *testing.T, store beads.Store) []beads.Bead {
 	t.Helper()
@@ -109,10 +103,10 @@ func stabilityOpenRows(t *testing.T, store beads.Store) []beads.Bead {
 	return rows
 }
 
-// AC-3, legacy half: three consecutive legacy ticks in each mode keep the
-// requalified row stable — after every tick the work is still claimed by the
-// bare assignee, the row is the only open one under the same bead ID, and
-// the runtime has been neither stopped nor started.
+// AC-3, legacy half: three consecutive full legacy daemon ticks in each mode
+// keep the requalified row stable — after every tick the work is still
+// claimed by the bare assignee, the row is the only open one under the same
+// bead ID, and the runtime has been neither stopped nor started.
 func TestLegacyRequalificationIsStableAcrossThreeTicks(t *testing.T) {
 	for _, mode := range []string{"always", "on_demand"} {
 		t.Run(mode, func(t *testing.T) {
@@ -127,9 +121,10 @@ func TestLegacyRequalificationIsStableAcrossThreeTicks(t *testing.T) {
 			starts, stops := sp.CountCalls("Start", stabilityBare), sp.CountCalls("Stop", stabilityBare)
 			cityPath := t.TempDir()
 			clk := &clock.Fake{Time: namedEffectNow}
+			dt := newDrainTracker()
 			var stderr bytes.Buffer
 			for tick := 1; tick <= 3; tick++ {
-				stabilityTick(t, cityPath, cfg, store, transportFake{sp}, clk, &stderr)
+				requalifyDaemonTick(t, cityPath, cfg, store, nil, transportFake{sp}, dt, clk, &stderr)
 				w, err := store.Get(work.ID)
 				if err != nil {
 					t.Fatalf("tick %d: reading work: %v", tick, err)

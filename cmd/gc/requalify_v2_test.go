@@ -7,8 +7,10 @@ package main
 // baseline rebaselined — with no kill, no start, no second row.
 
 import (
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -147,4 +149,169 @@ func TestSimAmbiguousLeafKeepsTheBareRowUnselected(t *testing.T) {
 		t.Errorf("work = %s/%q, want in_progress assigned %q", w.Status, w.Assignee, requalifyBare)
 	}
 	s.noViolations(t)
+}
+
+// The v2 half of the blocked bare claim: the allocator's named demand counts
+// an in_progress, blocked claim under the requalified session's bare leaf, so
+// the asleep on_demand row the qualified spec selects is started on it, in
+// place, with the claim left where it is.
+func TestSimRequalifiedOnDemandSeatWakesOnBlockedBareClaim(t *testing.T) {
+	row := requalifyBareRow("gc-7", "asleep", "generation", "1", "configured_named_mode", "on_demand", "instance_token", "tok-gc-7")
+	blocked := true
+	work := beads.Bead{ID: "gw-gc-7", Title: "hon gate", Type: "task", Status: "in_progress", Assignee: requalifyBare, IsBlocked: &blocked}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) (city, rig []beads.Bead) {
+		// The requalified entry is bound under the sim's rig, whose store
+		// holds the rig-scoped session's claims.
+		s.cfg.Agents = append(s.cfg.Agents, config.Agent{Name: requalifyBare, Dir: simRigLeg, BindingName: "lane", StartCommand: "true"})
+		s.cfg.NamedSessions = []config.NamedSession{{Template: requalifyBare, Dir: simRigLeg, BindingName: "lane", Mode: "on_demand"}}
+		return []beads.Bead{row}, []beads.Bead{work}
+	}})
+	s.lag = false
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	started := false
+	for _, st := range s.sp.starts {
+		if st.ID == "gc-7" && st.Name == requalifyBare {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf("starts %+v: the asleep on_demand row was not started in place on its blocked claim under %q", s.sp.starts, requalifyBare)
+	}
+	if m := s.snapshot()[simCityLeg+"/gc-7"].Metadata; m[namedSessionIdentityMetadata] != simRigLeg+"/lane."+requalifyBare {
+		t.Errorf("configured_named_identity = %q, want the row renamed to %q", m[namedSessionIdentityMetadata], simRigLeg+"/lane."+requalifyBare)
+	}
+	if w := s.snapshot()[simRigLeg+"/gw-gc-7"]; w.Status != "in_progress" || w.Assignee != requalifyBare {
+		t.Errorf("work = %s/%q, want in_progress assigned %q", w.Status, w.Assignee, requalifyBare)
+	}
+	s.noViolations(t)
+}
+
+// The v2 half of a binding added after the rename: once the asleep on_demand
+// row is renamed and started on its blocked bare claim, a second binding of
+// the leaf joins the rig, so the leaf resolves to no single entry. When the
+// seat's runtime then dies, the row still owns the claim: it is not closed or
+// released, and the claim, still its named demand, starts it again in place.
+func TestSimRenamedRowKeepsItsBlockedBareClaimAfterASecondBinding(t *testing.T) {
+	qualified := simRigLeg + "/lane." + requalifyBare
+	row := requalifyBareRow("gc-7", "asleep", "generation", "1", "configured_named_mode", "on_demand", "instance_token", "tok-gc-7")
+	blocked := true
+	work := beads.Bead{ID: "gw-gc-7", Title: "hon gate", Type: "task", Status: "in_progress", Assignee: requalifyBare, IsBlocked: &blocked}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) (city, rig []beads.Bead) {
+		s.cfg.Agents = append(s.cfg.Agents, config.Agent{Name: requalifyBare, Dir: simRigLeg, BindingName: "lane", StartCommand: "true"})
+		s.cfg.NamedSessions = []config.NamedSession{{Template: requalifyBare, Dir: simRigLeg, BindingName: "lane", Mode: "on_demand"}}
+		return []beads.Bead{row}, []beads.Bead{work}
+	}})
+	s.lag = false
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	s.sp.mu.Lock()
+	running := s.sp.rts[requalifyBare] != nil
+	s.sp.mu.Unlock()
+	if m := s.snapshot()[simCityLeg+"/gc-7"].Metadata; m[namedSessionIdentityMetadata] != qualified || !running {
+		t.Fatalf("test premise broken: the row is %q, running=%v; want it renamed to %q and started", m[namedSessionIdentityMetadata], running, qualified)
+	}
+
+	next := cloneSimCity(s.cfg)
+	next.Agents = append(next.Agents, config.Agent{Name: requalifyBare, Dir: simRigLeg, BindingName: "ops", StartCommand: "true"})
+	next.NamedSessions = append(next.NamedSessions, config.NamedSession{Template: requalifyBare, Dir: simRigLeg, BindingName: "ops", Mode: "on_demand"})
+	s.cfg = next
+	s.envNow = &reconcileEnv{Gen: s.envNow.Gen + 1, Cfg: next, SP: s.envNow.SP}
+	s.advance(simPatrol)
+	s.settle()
+
+	s.sp.mu.Lock()
+	before := len(s.sp.starts)
+	s.sp.drop(requalifyBare)
+	s.sp.mu.Unlock()
+	for range 6 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	s.sp.mu.Lock()
+	restarted := false
+	for _, st := range s.sp.starts[before:] {
+		if st.ID == "gc-7" && st.Name == requalifyBare && st.Created {
+			restarted = true
+		}
+	}
+	starts := slices.Clone(s.sp.starts)
+	s.sp.mu.Unlock()
+	if !restarted {
+		t.Fatalf("starts %+v: the renamed row was not started again in place on its blocked claim under %q after a second binding", starts, requalifyBare)
+	}
+	snap := s.snapshot()
+	if b := snap[simCityLeg+"/gc-7"]; b.Status == "closed" || b.Metadata[namedSessionIdentityMetadata] != qualified {
+		t.Errorf("the row = %s identity %q, want it open as %q", b.Status, b.Metadata[namedSessionIdentityMetadata], qualified)
+	}
+	if w := snap[simRigLeg+"/gw-gc-7"]; w.Status != "in_progress" || w.Assignee != requalifyBare {
+		t.Errorf("work = %s/%q, want in_progress assigned %q", w.Status, w.Assignee, requalifyBare)
+	}
+	for _, b := range snap {
+		if b.ID != "gc-7" && strings.Contains(b.Metadata[namedSessionIdentityMetadata], requalifyBare) {
+			t.Errorf("a second row %s took a %q identity: %v", b.ID, requalifyBare, b.Metadata)
+		}
+	}
+	s.noViolations(t)
+}
+
+// A claim under the bare leaf that no row owns is no named session's demand
+// under v2 either: the allocator plans no create for the born-qualified seat,
+// which could not see the claim.
+func TestAllocatorPlansNoNamedSeatForAnUnownedBareClaim(t *testing.T) {
+	f := newAllocFixture(t, requalifyCity("on_demand")).sessions()
+	f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Title: "hon gate", Type: "task", Status: "in_progress", Assignee: requalifyBare}}
+	if d := f.decide(); hasNamedPlan(d) {
+		t.Fatalf("plans %+v: a named seat was planned for the unowned claim under %q", d.Plans, requalifyBare)
+	}
+}
+
+// v2's idle arm resolves a renamed row's lifecycle settings under its named
+// session's runtime name, as legacy's trackers do (lifecycleSessionNameInfo).
+// The renamed row keeps the bare form's runtime name, yet it gets exactly the
+// born-qualified row's idle_timeout and assigned_work_defer_limit, and an
+// always-mode session's exemption from the template fallback that the backing
+// agent's instances get.
+func TestIdleSettingOfARenamedRowIsItsNamedSessions(t *testing.T) {
+	renamedMeta := requalifyRenamedRowMeta()
+	renamedMeta["session_name"] = requalifyBare
+	bornMeta := requalifyRenamedRowMeta()
+	bornMeta["session_name"] = requalifyQualifiedRuntime
+	delete(bornMeta, "alias_history")
+	for _, tc := range []struct {
+		name   string
+		mode   string
+		expand bool        // the backing agent expands into instances
+		want   idleSetting // the born-qualified row's
+	}{
+		{"singleton on_demand", "on_demand", false, idleSetting{Template: requalifyQualified, Timeout: 10 * time.Minute, Limit: 2}},
+		{"always on an instance-expanding agent", "always", true, idleSetting{Template: requalifyQualified}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := requalifyCity(tc.mode)
+			cfg.Agents[0].IdleTimeout = "10m"
+			cfg.Agents[0].AssignedWorkDeferLimit = intPtr(2)
+			if tc.expand {
+				cfg.Agents[0].MaxActiveSessions = nil
+			}
+			setting := func(meta map[string]string) idleSetting {
+				info := sessionInfoFromBead(beads.Bead{ID: "gc-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+				w := &World{Env: &reconcileEnv{Cfg: cfg}, Templates: &templateMemo{entries: map[templateMemoKey]templateResolution{
+					templateMemoKeyOf(info): {TP: TemplateParams{TemplateName: requalifyQualified}},
+				}}}
+				s, _ := w.idleSettingOf(rowKey{Leg: rowLeg, ID: info.ID}, info)
+				return s
+			}
+			if born := setting(bornMeta); born != tc.want {
+				t.Fatalf("test premise broken: the born-qualified row's settings = %+v, want %+v", born, tc.want)
+			}
+			if renamed := setting(renamedMeta); renamed != tc.want {
+				t.Errorf("the renamed row's settings = %+v, want the born-qualified row's %+v", renamed, tc.want)
+			}
+		})
+	}
 }

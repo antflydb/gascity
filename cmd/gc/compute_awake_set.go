@@ -71,6 +71,8 @@ func (x awakeWorkIndex) candidates(work []AwakeWorkBead, named []AwakeNamedSessi
 	add(bead.ID)
 	add(bead.SessionName)
 	add(bead.Alias)
+	add(bead.RequalifiedFrom)
+	add(bead.RequalifiedRuntimeName)
 	add(bead.NamedIdentity)
 	if bead.ConfiguredNamedSession {
 		for _, ns := range named {
@@ -125,6 +127,8 @@ type AwakeSessionBead struct {
 	DependencyOnly            bool      // only wakeable via dependency gate
 	NamedIdentity             string    // non-empty for named session beads
 	Alias                     string    // stable alias the session claims work under; "" for a rebinding pool slot
+	RequalifiedFrom           string    // bare identity a requalified named session was renamed in place from; it still owns work claimed under it (#5957)
+	RequalifiedRuntimeName    string    // its named session's runtime name while the renamed row keeps the bare form's; work claimed under it is the session's (#5957)
 	ConfiguredNamedSession    bool      // configured_named_session metadata is true
 	Pinned                    bool      // pin_awake durable wake reason
 	Drained                   bool      // state=="drained" or sleep_reason=="drained"
@@ -971,6 +975,18 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 	// Alias only for stable aliases (stableAssignmentAliasForConfigInfo), never
 	// for a rebinding pool slot.
 	if bead.Alias != "" && assignee == bead.Alias {
+		return true
+	}
+	// A named session requalified in place still owns the work claimed under
+	// its bare pre-adopt identity (#5957), and, while the row keeps the bare
+	// form's runtime name, the work claimed under its named session's runtime
+	// name. The bridge fills RequalifiedFrom and RequalifiedRuntimeName only for
+	// the row renamed in place (requalifiedPriorIdentityInfo,
+	// requalifiedSpecRuntimeNameInfo).
+	if bead.RequalifiedFrom != "" && assignee == bead.RequalifiedFrom {
+		return true
+	}
+	if bead.RequalifiedRuntimeName != "" && assignee == bead.RequalifiedRuntimeName {
 		return true
 	}
 	if bead.NamedIdentity != "" {

@@ -238,6 +238,8 @@ func newAwakeInputFromSnapshot(
 			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
 			Alias:                  stableAssignmentAliasForConfigInfo(info, cfg),
+			RequalifiedFrom:        requalifiedPriorIdentityInfo(info, cfg),
+			RequalifiedRuntimeName: requalifiedSpecRuntimeNameInfo(info, cfg, cityName),
 			ConfiguredNamedSession: isNamedSessionInfo(info),
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,

@@ -701,10 +701,16 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 
 	// The requalified prior form (gastownhall/gascity#5957): when spec carries
 	// a BareIdentity, the live row still stamped with it is this session
-	// awaiting its in-place rename. Uniqueness is enforced inside the pass —
-	// two bare rows fall through to conflict detection, which no bare row
-	// reaches (no stage above queried for the bare form against a
-	// qualified-scoped key).
+	// awaiting its in-place rename. The pass resolves only a unique bare row.
+	// Two or more resolve no canonical, and the conflict detection below does
+	// not report them either: it reads only the runtime-name and alias
+	// matches, and a bare row's session_name and alias match neither of the
+	// qualified spec's. The lookup then answers neither canonical nor
+	// conflict, as the reconciler's FindCanonicalNamedSessionInfo and
+	// FindNamedSessionConflictInfo pair does for the same rows, so a caller
+	// that creates on that answer mints the born-qualified row the reconciler
+	// mints. The bare rows stay open and keep the work claimed under their own
+	// bare identity.
 	if bare := strings.TrimSpace(spec.BareIdentity); bare != "" && bare != spec.Identity {
 		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, bare)
 		if err != nil {

@@ -977,13 +977,18 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 }
 
 // sessionAssignmentIdentifiersForConfig extends the persisted session-bead
-// identifiers with the session's stable alias (stableAssignmentAliasForConfig)
-// and with the configured named-session identity when a recovered bead is
-// missing identity metadata. Keep these additions aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
+// identifiers with the session's stable alias (stableAssignmentAliasForConfig),
+// with the bare identity a requalified named session was renamed in place from
+// (requalifiedPriorIdentityOfBead) and its named session's runtime name while
+// the row keeps the bare form's (requalifiedSpecRuntimeName), and with the
+// configured named-session identity when a recovered bead is missing identity
+// metadata. Keep these additions aligned with sessionAssigneeMatches and
+// compute_awake_bridge's AwakeSessionBead.Alias,
+// AwakeSessionBead.RequalifiedFrom, AwakeSessionBead.RequalifiedRuntimeName and
 // AwakeNamedSession fields.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
-	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
+	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg), requalifiedPriorIdentityOfBead(sessionBead, cfg),
+		requalifiedSpecRuntimeName(sessionBead, cfg, config.EffectiveCityName(cfg, "")))
 	if cfg == nil ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
@@ -1030,7 +1035,8 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 // SessionNameMetadata, Template) instead of cracking the raw bead, staying
 // byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
 func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
-	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg))
+	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg), requalifiedPriorIdentityInfo(info, cfg),
+		requalifiedSpecRuntimeNameInfo(info, cfg, config.EffectiveCityName(cfg, "")))
 	if cfg == nil ||
 		!info.ConfiguredNamedSession ||
 		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
@@ -1915,7 +1921,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			beadSessionName := strings.TrimSpace(b.Metadata["session_name"])
-			if beadSessionName == spec.SessionName {
+			if beadSessionName == spec.SessionName || keepsRequalifiedRuntimeName(b, cfg, cityName) {
 				continue
 			}
 			// Canonical-singleton pool step-aside carve-out (ga-vixyn5.1): a

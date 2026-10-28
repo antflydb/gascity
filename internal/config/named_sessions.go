@@ -64,14 +64,46 @@ func NamedSessionBareCandidates(cfg *City, identity string) []*NamedSession {
 // guard, so the reverse direction (resolving a bare row to ns) stays
 // unambiguous.
 func NamedSessionBareIdentity(cfg *City, ns *NamedSession) string {
-	if cfg == nil || ns == nil || ns.BindingName == "" {
+	leaf := namedSessionLeaf(ns)
+	if leaf == "" || FindNamedSession(cfg, leaf) != ns {
+		return ""
+	}
+	return leaf
+}
+
+// NamedSessionPriorIdentity returns the bare form a row of ns may have been
+// renamed in place from when a `gc rig add --adopt` requalified it
+// (gastownhall/gascity#5957), or "": ns's leaf, unless a top-level entry is
+// configured under that leaf, which then owns the bare name outright. Unlike
+// NamedSessionBareIdentity it does not need the leaf to stay unique among
+// bindings. The rename runs only while the leaf is unique, and a binding of
+// the same leaf added after it, such as a second rig importing the same pack,
+// does not take the bare form from the row renamed out of it. The row's alias
+// history, which the rename alone writes the leaf to, decides whether a given
+// row owns it.
+func NamedSessionPriorIdentity(cfg *City, ns *NamedSession) string {
+	leaf := namedSessionLeaf(ns)
+	if leaf == "" || cfg == nil {
+		return ""
+	}
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == leaf {
+			return ""
+		}
+	}
+	return leaf
+}
+
+// namedSessionLeaf is the bare form of a bound named session: its identity
+// without the binding prefix. A bindingless entry has none, and neither does
+// a dotted leaf, which no bare identity resolves to
+// (NamedSessionBareCandidates).
+func namedSessionLeaf(ns *NamedSession) string {
+	if ns == nil || ns.BindingName == "" {
 		return ""
 	}
 	leaf := strings.TrimPrefix(ns.IdentityName(), ns.BindingName+".")
-	if leaf == "" || leaf == ns.IdentityName() {
-		return ""
-	}
-	if FindNamedSession(cfg, leaf) != ns {
+	if strings.Contains(leaf, ".") {
 		return ""
 	}
 	return leaf

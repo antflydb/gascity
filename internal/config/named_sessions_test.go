@@ -115,3 +115,60 @@ func TestNamedSessionBareIdentity(t *testing.T) {
 		t.Fatalf("NamedSessionBareIdentity(top-level) = %q, want empty", got)
 	}
 }
+
+// NamedSessionPriorIdentity is the leaf of the entry itself, the bare form a
+// row renamed in place by a requalification answers to. Unlike the bare
+// identity, a second binding of the same leaf, such as a second rig importing
+// the same pack after the rename, does not take it; a top-level entry
+// configured under the leaf does.
+func TestNamedSessionPriorIdentity(t *testing.T) {
+	twoBindings := bareCandidateCity()
+	secondRig := &City{
+		NamedSessions: []NamedSession{
+			{Template: "golden-hon", Dir: "contentbuild", BindingName: "lane"},
+			{Template: "golden-hon", Dir: "other", BindingName: "lane"},
+		},
+	}
+	shadowed := &City{
+		NamedSessions: []NamedSession{
+			{Name: "golden-hon"},
+			{Template: "golden-hon", Dir: "contentbuild", BindingName: "lane"},
+		},
+	}
+	unique := &City{
+		NamedSessions: []NamedSession{
+			{Template: "golden-hon", Dir: "contentbuild", BindingName: "lane"},
+			{Name: "mayor"},
+			{Name: "a.b", Dir: "contentbuild", BindingName: "lane"},
+		},
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *City
+		ns   *NamedSession
+		want string
+	}{
+		{"unique leaf", unique, &unique.NamedSessions[0], "golden-hon"},
+		{"two bindings in one rig", twoBindings, &twoBindings.NamedSessions[0], "golden-hon"},
+		{"a second rig binding the leaf", secondRig, &secondRig.NamedSessions[0], "golden-hon"},
+		{"shadowed by a top-level entry", shadowed, &shadowed.NamedSessions[1], ""},
+		{"top-level entry", unique, &unique.NamedSessions[1], ""},
+		{"dotted leaf", unique, &unique.NamedSessions[2], ""},
+		{"nil entry", unique, nil, ""},
+		{"nil config", nil, &unique.NamedSessions[0], ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NamedSessionPriorIdentity(tc.cfg, tc.ns); got != tc.want {
+				t.Errorf("NamedSessionPriorIdentity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// The bare identity, by contrast, needs the leaf to resolve back to the
+	// entry alone.
+	if got := NamedSessionBareIdentity(secondRig, &secondRig.NamedSessions[0]); got != "" {
+		t.Errorf("NamedSessionBareIdentity across two rigs = %q, want empty", got)
+	}
+	if got := NamedSessionBareIdentity(unique, &unique.NamedSessions[2]); got != "" {
+		t.Errorf("NamedSessionBareIdentity of a dotted leaf = %q, want empty", got)
+	}
+}

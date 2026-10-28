@@ -224,6 +224,47 @@ func TestNamedAlways_AmbiguousLeafDoesNotResolveTheBareRow(t *testing.T) {
 	assertAsleep(t, result, "golden-hon")
 }
 
+// TestNamedOnDemand_RequalifiedRowBareClaimVetoesIdleSleep pins the #5957
+// ownership half: a row renamed in place still owns the work claimed under the
+// bare identity it was renamed from (RequalifiedFrom). A blocked in_progress
+// claim under that form keeps the running on_demand seat out of idle sleep —
+// the veto a claim under the qualified identity gets — even under a
+// session_template that keeps session_name off the bare form. A born-qualified
+// row never claims the bare form, so the same claim does not hold it.
+func TestNamedOnDemand_RequalifiedRowBareClaimVetoesIdleSleep(t *testing.T) {
+	idleSince := now.Add(-(defaultOnDemandIdleTimeout + time.Minute))
+	input := func(requalifiedFrom string) AwakeInput {
+		return AwakeInput{
+			Agents: []AwakeAgent{{QualifiedName: "contentbuild/lane.golden-hon"}},
+			NamedSessions: []AwakeNamedSession{{
+				Identity:     "contentbuild/lane.golden-hon",
+				Template:     "contentbuild/lane.golden-hon",
+				Mode:         "on_demand",
+				RuntimeName:  "test-city-contentbuild--lane__golden-hon",
+				BareIdentity: "golden-hon",
+			}},
+			SessionBeads: []AwakeSessionBead{{
+				ID:                     "mc-1",
+				SessionName:            "test-city-golden-hon",
+				Template:               "contentbuild/lane.golden-hon",
+				State:                  "active",
+				NamedIdentity:          "contentbuild/lane.golden-hon",
+				Alias:                  "contentbuild/lane.golden-hon",
+				RequalifiedFrom:        requalifiedFrom,
+				ConfiguredNamedSession: true,
+				IdleSince:              idleSince,
+			}},
+			WorkBeads:       []AwakeWorkBead{{ID: "hw-1", Assignee: "golden-hon", Status: "in_progress", Blocked: true}},
+			RunningSessions: map[string]bool{"test-city-golden-hon": true},
+			Now:             now,
+		}
+	}
+	renamed := computeAwakeSetChecked(t, input("golden-hon"))
+	assertAwake(t, renamed, "test-city-golden-hon")
+	assertReason(t, renamed, "test-city-golden-hon", "on-demand:running")
+	assertAsleep(t, computeAwakeSetChecked(t, input("")), "test-city-golden-hon")
+}
+
 func TestNamedOnDemand_MissingConfiguredIdentityAssignedWorkVetoesIdleSleep(t *testing.T) {
 	idleSince := now.Add(-(defaultOnDemandIdleTimeout + time.Minute))
 	result := computeAwakeSetChecked(t, AwakeInput{
