@@ -13,6 +13,9 @@ var Default = Config{
 		"time.NewTicker", "time.AfterFunc", "path/filepath.Abs", "path/filepath.EvalSymlinks",
 		"path/filepath.Glob", "path/filepath.Walk", "path/filepath.WalkDir",
 		"fmt.Print", "fmt.Printf", "fmt.Println", // os.Stdout
+		// A capability reached through a typed handle is a store read whose
+		// method (Counter.Count, Writer.Update, ...) no forbidden interface names.
+		"github.com/gastownhall/gascity/internal/beads.As", "github.com/gastownhall/gascity/internal/beads.HandlesFor",
 	},
 	ForbiddenInterfaces: []string{
 		"github.com/gastownhall/gascity/internal/beads.Store",
