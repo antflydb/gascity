@@ -1,4 +1,4 @@
-package nogo_test
+package nolinttest_test
 
 import (
 	"errors"
@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-// Under Bazel, storeclass_nolint_test passes the built nogo binary and
+// Under Bazel, //tools/nogo/nolinttest:nolinttest_test passes the built nogo binary and
 // internal/beads' export data; under plain `go test` the test skips.
 var (
-	nogoBinary  = flag.String("nogo", "", "the nogo binary (//tools/nogo:nogo)")
+	nogoBinary  = flag.String("nogo", "", "the nogo binary (//tools/nogo)")
 	beadsExport = flag.String("beads_export", "", "internal/beads' export data (//internal/beads)")
 )
 
@@ -26,7 +26,7 @@ var (
 // the whole file.
 func TestNolintNeverSuppressesStoreclass(t *testing.T) {
 	if *nogoBinary == "" || *beadsExport == "" {
-		t.Skip("needs the Bazel-built nogo binary and beads export data (bazel test //tools/nogo:storeclass_nolint_test)")
+		t.Skip("needs the Bazel-built nogo binary and beads export data (bazel test //tools/nogo/nolinttest:nolinttest_test)")
 	}
 	nogo, export := runfile(*nogoBinary), runfile(*beadsExport)
 	const imp = "package nolintfixture\n\nimport \"github.com/gastownhall/gascity/internal/beads\"\n\n"
