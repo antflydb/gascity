@@ -1026,6 +1026,9 @@ func TestProvider_NudgeResolvesDeadPane(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketName = testSocketName
+	// A dead pane never looks idle, so Nudge's best-effort idle wait would run
+	// its whole default window before sending.
+	cfg.NudgeIdleTimeout = time.Second
 	p := NewProviderWithConfig(cfg)
 	name := "gc-test-dead-pane-nudge"
 	_ = p.Stop(name)
@@ -1038,20 +1041,16 @@ func TestProvider_NudgeResolvesDeadPane(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	waitForValue(t, "session state", "dead", func() string {
 		has, err := p.Tmux().HasSession(name)
 		if err != nil {
 			t.Fatalf("HasSession: %v", err)
 		}
 		if has && !p.IsRunning(name) {
-			break
+			return "dead"
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if p.IsRunning(name) {
-		t.Fatal("IsRunning stayed true after one-shot command exited")
-	}
+		return "alive"
+	})
 
 	target, err := p.Tmux().agentInputTarget(name)
 	if err != nil || target == "" {
