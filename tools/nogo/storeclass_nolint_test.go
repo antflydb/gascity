@@ -1,0 +1,76 @@
+package nogo_test
+
+import (
+	"errors"
+	"flag"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// Under Bazel, storeclass_nolint_test passes the built nogo binary and
+// internal/beads' export data; under plain `go test` the test skips.
+var (
+	nogoBinary  = flag.String("nogo", "", "the nogo binary (//tools/nogo:nogo)")
+	beadsExport = flag.String("beads_export", "", "internal/beads' export data (//internal/beads)")
+)
+
+// TestNolintNeverSuppressesStoreclass runs the real nogo binary, with
+// rules_go's nolint handling as third_party/patches leaves it, over a package
+// that declares a raw beads.Store parameter under every nolint spelling and
+// placement. None may suppress storeclass: its baseline is the only
+// exemption. The file-doc and last-declaration placements matter because
+// ast.CommentMap ties those directives to the *ast.File, which would exempt
+// the whole file.
+func TestNolintNeverSuppressesStoreclass(t *testing.T) {
+	if *nogoBinary == "" || *beadsExport == "" {
+		t.Skip("needs the Bazel-built nogo binary and beads export data (bazel test //tools/nogo:storeclass_nolint_test)")
+	}
+	nogo, export := runfile(*nogoBinary), runfile(*beadsExport)
+	const imp = "package nolintfixture\n\nimport \"github.com/gastownhall/gascity/internal/beads\"\n\n"
+	for name, src := range map[string]string{
+		"trailing the last declaration": imp + "func zzNamed(_ beads.Store) {} //nolint:storeclass\n",
+		"the file's doc comment":        "//nolint:storeclass\n" + imp + "func zzNamed(_ beads.Store) {}\n",
+		"bare":                          imp + "func zzNamed(_ beads.Store) {} //nolint\n",
+		"all":                           imp + "func zzNamed(_ beads.Store) {} //nolint:all\n",
+		"with a space":                  imp + "func zzNamed(_ beads.Store) {} // nolint:storeclass\n",
+		"on the line above":             imp + "//nolint:storeclass // why\nfunc zzNamed(_ beads.Store) {}\n",
+		"none (control)":                imp + "func zzNamed(_ beads.Store) {}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "fixture.go")
+			cfg := filepath.Join(dir, "importcfg")
+			if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfg, []byte("packagefile github.com/gastownhall/gascity/internal/beads="+export+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(nogo, "-p", "github.com/gastownhall/gascity/cmd/nolintfixture", "-importcfg", cfg, "-go_version", "1.27.3", file)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("nogo did not report a violation (err %v):\n%s", err, out)
+			}
+			if !strings.Contains(string(out), "storeclass[raw-param]") {
+				t.Fatalf("nogo did not report storeclass[raw-param]; a nolint directive suppressed it:\n%s", out)
+			}
+		})
+	}
+}
+
+// runfile resolves a $(rootpath) argument: relative to the runfiles root, not
+// to the test's working directory (its package directory under rules_go).
+func runfile(p string) string {
+	if root, ws := os.Getenv("TEST_SRCDIR"), os.Getenv("TEST_WORKSPACE"); root != "" && ws != "" && !filepath.IsAbs(p) {
+		return filepath.Join(root, ws, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
+}
