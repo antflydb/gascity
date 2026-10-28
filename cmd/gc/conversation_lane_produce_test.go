@@ -311,10 +311,10 @@ func (c *cliLaneCity) cmdSubmitCity(t *testing.T, srv *httptest.Server) {
 	clearGCEnv(t)
 	c.cityOnDisk(t)
 	prevFactory, prevBuild := openStoreFactoryForCity, buildSessionProviderByName
-	prevAlive, prevClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	prevIdentity, prevClient := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() {
 		openStoreFactoryForCity, buildSessionProviderByName = prevFactory, prevBuild
-		apiRouteControllerAliveHook, apiRouteSupervisorClientHook = prevAlive, prevClient
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = prevIdentity, prevClient
 	})
 	openStoreFactoryForCity = func(context.Context, beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: c.store}, nil
@@ -322,7 +322,7 @@ func (c *cliLaneCity) cmdSubmitCity(t *testing.T, srv *httptest.Server) {
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return c.sp, nil
 	}
-	apiRouteControllerAliveHook = func(string) int { return 0 }
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{} }
 	apiRouteSupervisorClientHook = func(string) *api.Client {
 		if srv == nil {
 			return nil
@@ -1523,5 +1523,29 @@ func TestMailArchiveRetriesAFailedWithdrawal(t *testing.T) {
 				t.Fatalf("notice after the second archive = %s %+v, want it canceled; warnings %q", op.Status, op.Outcome, warn.String())
 			}
 		})
+	}
+}
+
+// Under the content gate's builtin default (no [ops] gate, no
+// GC_OPS_CONTENT), which records nothing on a sessions store that is not
+// SQLite-backed, a declined submit whose key names no op still claims the
+// key with its own op before the legacy path delivers, since the city lists
+// message: an API that commits its lane op under the key later finds the key
+// taken instead of delivering the message a second time.
+func TestSessionSubmitLaneDeclinedLegacyPathClaimsTheKeyUnderTheBuiltinDefault(t *testing.T) {
+	c := newCLILaneCity(t)
+	c.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	var sent string
+	c.cmdSubmitCity(t, lostAnswerServer(t, func(key string) { sent = key }))
+	c.sp.Calls = nil
+	code, stdout, stderr := c.cmdSubmit(session.SubmitIntentDefault, "", false)
+	if code != 0 {
+		t.Fatalf("submit = %d, %q, stderr %q", code, stdout, stderr)
+	}
+	if n := len(c.nudges()); n != 1 {
+		t.Fatalf("deliveries = %d, want the legacy path's one", n)
+	}
+	if op := c.only(t); op.ClientKey != sent || op.Executor != opjournal.ExecutorLegacyCLI || op.Status != opjournal.StatusClosed {
+		t.Fatalf("op = %+v, want the CLI's own closed op under the key %q the API was sent", op, sent)
 	}
 }
