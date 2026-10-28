@@ -497,6 +497,8 @@ cmd/gc/cmd_formula.go	ensureFormulaCookAttachDep	raw-param	1
 cmd/gc/cmd_formula.go	existingFormulaCookGraphV2Root	raw-param	1
 cmd/gc/cmd_formula.go	formulaCookLiveInputConvoyGraphRoots	raw-param	1
 cmd/gc/cmd_formula.go	newFormulaCookCmd	raw-result	1
+cmd/gc/cmd_formula.go	stampFormulaCookRootMetadata	raw-param	1
+cmd/gc/cmd_formula.go	wireFormulaCookGraphV2AttachRoot	raw-param	1
 cmd/gc/cmd_github.go	attachGitHubPRRepairWorkflow	raw-var	1
 cmd/gc/cmd_github.go	defaultAttachGitHubPRRepairWorkflow	raw-param	1
 cmd/gc/cmd_github.go	defaultAttachGitHubPRRepairWorkflow	unwrap	1
@@ -1334,6 +1336,8 @@ cmd/gc/session_reconciler.go	sessionHasReadyAssignedWorkForTier	raw-param	1
 cmd/gc/session_reconciler.go	strandedAssignedWork	raw-field	1
 cmd/gc/session_reconciler.go	triggerBeadOptionOverrides	raw-param	1
 cmd/gc/session_reconciler.go	v2SignaledStopHeldForAttach	raw-param	1
+cmd/gc/session_reconciler_interrupted_close.go	finishInterruptedClose	raw-param	1
+cmd/gc/session_reconciler_interrupted_close.go	rollBackInterruptedClose	raw-param	1
 cmd/gc/session_resolve.go	resolveConfiguredNamedSessionID	raw-param	1
 cmd/gc/session_resolve.go	resolveOpenQualifiedAliasBasename	raw-param	1
 cmd/gc/session_resolve.go	resolveSessionID	raw-param	1
@@ -1736,6 +1740,7 @@ internal/dispatch/control.go	closeWithMetadata	raw-param	1
 internal/dispatch/control.go	controlAttemptStrategy	raw-field	2
 internal/dispatch/control.go	controllerSpawnBoundaryPending	raw-param	1
 internal/dispatch/control.go	ensureBlockingDependency	raw-param	1
+internal/dispatch/control.go	ensureBlockingDependencyWithRetry	raw-param	1
 internal/dispatch/control.go	ensurePendingAttemptConverges	raw-param	1
 internal/dispatch/control.go	evaluateRalphIteration	raw-param	1
 internal/dispatch/control.go	evaluateRetryAttempt	raw-param	1
@@ -1750,6 +1755,7 @@ internal/dispatch/control.go	processAttemptControl	raw-param	1
 internal/dispatch/control.go	processRalphControl	raw-param	2
 internal/dispatch/control.go	processRetryControl	raw-param	2
 internal/dispatch/control.go	ralphIterationHardFailure	raw-param	1
+internal/dispatch/control.go	ralphIterationLiveMembers	raw-param	1
 internal/dispatch/control.go	resolveAttemptRouteBinding	raw-param	1
 internal/dispatch/control.go	spawnNextAttempt	raw-param	1
 internal/dispatch/control.go	syncControlEpochToAttempt	raw-param	1
