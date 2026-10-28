@@ -1379,6 +1379,12 @@ func TestRunPinsCallerServerFromTMUX(t *testing.T) {
 			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
 		},
 		{
+			name:       "unclean_path",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/../%d/tmux-%d/bright-lights,4242,0", uid, uid, uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
 			name:       "comma_leading",
 			socketName: "bright-lights",
 			tmux:       ",4242,0",
