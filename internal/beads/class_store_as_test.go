@@ -60,6 +60,12 @@ func TestAsIsNilSafe(t *testing.T) {
 	if _, ok := As[ConditionalWriter](WorkStore{}); ok {
 		t.Fatal("As on a zero handle for a provider-backed capability = true")
 	}
+	if s, ok := As[Store](WorkStore{}); ok {
+		t.Fatalf("As[Store] on a zero handle = %v, true; an absent handle is no store", s)
+	}
+	if _, ok := As[Store](GraphStore{WorkStore{}}); ok {
+		t.Fatal("As[Store] on a handle over a zero handle = true")
+	}
 }
 
 // TestAsMatchesTheOutermostLayer: a capability the handle itself has is

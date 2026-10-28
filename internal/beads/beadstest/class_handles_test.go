@@ -60,3 +60,7 @@ func TestConformanceCatchesAHiddenCapability(t *testing.T) {
 		t.Fatalf("probe through an opaque wrapper = %v, %v; the conformance would not catch a hidden capability", got, gotOK)
 	}
 }
+
+func TestClassHandleCapabilityConformanceBdStore(t *testing.T) {
+	RunClassHandleCapabilityConformance(t, func(*testing.T) beads.Store { return NewFakeBd().NewBdStore() })
+}

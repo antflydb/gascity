@@ -76,8 +76,9 @@ const classLayerMaxDepth = 8
 // ResolveConditionalWriter.
 //
 // A class-write capability (isClassWriteCapability) met at a class guard is
-// the guard's adapter or nothing. As is nil-safe: nil, a zero handle, or a
-// walk deeper than classLayerMaxDepth answers false.
+// the guard's adapter or nothing. As is nil-safe: nil, a zero handle (or a
+// handle over one), or a walk deeper than classLayerMaxDepth answers false,
+// before any layer is asked, so As[Store] never hands out an absent handle.
 func As[T any](s Store) (T, bool) {
 	var zero T
 	writes := isClassWriteCapability[T]()
@@ -89,6 +90,10 @@ func As[T any](s Store) (T, bool) {
 		if !isLayer {
 			return resolveCapability[T](s)
 		}
+		inner := layer.unwrapClassLayer()
+		if physicalStore(inner) == nil {
+			return zero, false // a zero handle, or one over a zero handle, is no store
+		}
 		if gate, ok := layer.(classGateLayer); ok && writes {
 			var v T
 			if gate.gateCapability(&v) {
@@ -99,7 +104,7 @@ func As[T any](s Store) (T, bool) {
 		if v, ok := s.(T); ok {
 			return v, true
 		}
-		s = layer.unwrapClassLayer()
+		s = inner
 	}
 	return zero, false
 }
