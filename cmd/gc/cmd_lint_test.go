@@ -370,7 +370,7 @@ inject_fragments = ["footer"]
 // city.PackDirsForRig(rigName), but config.LoadPackForLint only ever sees
 // the target pack's own recursive includes (empty here), so lint reported
 // the fragment "not found" even though real sessions rendered it correctly.
-// See lintFragmentSearchDirs in cmd_lint.go.
+// See lintCityResolver.searchDirs in cmd_lint.go.
 func TestLintResolvesFragmentComposedViaCityRigIncludes(t *testing.T) {
 	root := t.TempDir()
 	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
@@ -760,13 +760,15 @@ func TestLintNestedCityDoesNotShadowComposingCity(t *testing.T) {
 }
 
 // TestLintLoadsEachCandidateCityOncePerInvocation pins the memoization: two
-// leaves and a composition pack share two candidate cities, and each city is
-// loaded exactly once for the whole invocation.
+// leaves share two candidate cities, and each city is loaded exactly once for
+// the whole invocation.
 func TestLintLoadsEachCandidateCityOncePerInvocation(t *testing.T) {
 	f := writeLintNestedCityFixture(t, lintNestedCityToml)
 	loads := countLintCityLoads(t)
 
-	t.Chdir(f.root)
+	// Walk root is the nested city: it is the first candidate for both leaves,
+	// and the root city is the second.
+	t.Chdir(f.nested)
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"lint", "."}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc lint . = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
@@ -785,7 +787,7 @@ func TestLintWarnsOncePerCityThatFailsToLoad(t *testing.T) {
 	f := writeLintNestedCityFixture(t, "[workspace\nname = \n")
 	loads := countLintCityLoads(t)
 
-	t.Chdir(f.root)
+	t.Chdir(f.nested)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"lint", "."}, &stdout, &stderr)
 	if code != 0 || strings.Contains(stderr.String(), "inject_fragment") {
