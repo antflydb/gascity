@@ -1554,8 +1554,9 @@ func topoOrderRows(rows []sessionpkg.ReconcileSession, deps map[string][]string)
 // knownSessionStates is the set of bead metadata "state" values that the
 // current reconciler understands. Beads with unrecognized states are skipped
 // during reconciliation to allow forward-compatible rollback from newer
-// versions that add states, and to leave this binary's own archived and
-// draining rows alone. This binary's own close codes are not listed: a row
+// versions that add states, and to leave this binary's own parked rows alone
+// (archived, closing, and a draining without its drain-ack reason). This
+// binary's own close codes are not listed: a row
 // that still carries one is an interrupted close, which the reconciler
 // finishes, or rolls back, before the skip (interruptedCloseGate,
 // finishInterruptedClose).
@@ -1575,18 +1576,23 @@ var knownSessionStates = map[string]bool{
 	"":                                   true, // empty state is valid (legacy beads)
 }
 
-// isKnownStateInfo returns true if the session's metadata state is recognized by
-// the current reconciler. Unknown states (from a newer version) are skipped to
-// prevent panics during rollback. It keys off the RAW metadata state
+// isKnownStateInfo returns true if the session's metadata state is one this
+// gc version's controller manages. States outside the set are skipped during
+// reconciliation: both the ones another gc version wrote (forward-compatible
+// rollback in a mixed-version fleet) and this version's own parked rows (see
+// knownSessionStates). It keys off the RAW metadata state
 // (Info.MetadataState, untrimmed).
 func isKnownStateInfo(i sessionpkg.Info) bool {
 	return knownSessionStates[i.MetadataState]
 }
 
-// isUnknownStateInfo reports whether the controller skips info's row as a
-// state it does not manage: legacy's !isKnownStateInfo skip, which runs after
-// the drain-ack stop-pending handler has taken its rows, and v2's unknown-state
-// arm over the census flag.
+// isUnknownStateInfo returns true if the session's raw metadata state is one
+// this gc version's controller does not manage — exactly the rows the
+// reconciler skips, the census counts as unknown, and the v2 migration gate
+// refuses to boot over. A drain-ack stop-pending row is excluded: the
+// drain-ack stop-pending handler owns it outright and continues before the
+// skip. It keys off the RAW metadata state (Info.MetadataState, untrimmed),
+// like isKnownStateInfo.
 func isUnknownStateInfo(i sessionpkg.Info) bool {
 	return !isKnownStateInfo(i) && !isDrainAckStopPendingInfo(i)
 }
