@@ -194,8 +194,8 @@ func TestReconcileQuiescence_SecondPassIsSilent(t *testing.T) {
 			in := quiescentInputs(rows, deps, useFresh)
 
 			c.mu.Lock()
-			first := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
-			second := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+			first := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
+			second := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 			c.mu.Unlock()
 
 			// The first pass is allowed to settle representation drift. The
@@ -306,8 +306,8 @@ func TestReconcileQuiescence_FreshDepsOmitsKnownRow(t *testing.T) {
 
 	c, _ := newMergeHarnessStore(st)
 	c.mu.Lock()
-	first := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
-	second := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	first := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
+	second := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 	c.mu.Unlock()
 
 	t.Logf("first pass emitted %d notification(s)", len(first.notifications))
@@ -355,8 +355,8 @@ func TestReconcileQuiescence_IsBlockedProjectionDrift(t *testing.T) {
 			// Two passes: an absent projection must be settled by the first
 			// merge, not rediscovered on every subsequent one.
 			c.mu.Lock()
-			first := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
-			second := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+			first := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
+			second := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 			c.mu.Unlock()
 
 			t.Logf("first pass emitted %d notification(s)", len(first.notifications))
@@ -423,7 +423,7 @@ func TestReconcileQuiescence_SelfEmittedEventDoesNotSustainChurn(t *testing.T) {
 			const maxCycles = 5
 			for cycle := 1; cycle <= maxCycles; cycle++ {
 				c.mu.Lock()
-				res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+				res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 				c.mu.Unlock()
 
 				if len(res.notifications) == 0 {
