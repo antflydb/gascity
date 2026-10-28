@@ -143,13 +143,9 @@ human_duration() {
 should_probe_sql=false
 is_external=false
 if is_local_dolt_host "$host"; then
-  # The pids runtime state records go first, in port-resolution order, as
-  # managed_runtime_port's state pid does: a recorded server keeps its pid
-  # when a lower one shares its listener (an inherited or reuse-port
-  # socket).
-  pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" \
-    "$(read_runtime_state_number "$DOLT_STATE_FILE" pid)" \
-    "$(read_runtime_state_number "$DOLT_PROVIDER_STATE_FILE" pid)" || true)
+  # The pid of a state file port resolution trusts names the server ahead
+  # of a lower pid that also listens on the port.
+  pid=$(managed_runtime_server_pid "$GC_DOLT_PORT" || true)
   if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
     server_running=true
     [ -n "$pid" ] && server_pid="$pid"
