@@ -5390,6 +5390,57 @@ name = "mayor"
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
+// TestMailCheckInjectAsksASupervisorHostedCitysSupervisorNothing guards the
+// per-turn `gc mail check --inject` hook of a seat in a supervisor-hosted city
+// whose supervisor requires no city grant. The injecting check reads and
+// archives its mailbox locally whatever the API says (routeMailCheck), so it
+// resolves no supervisor client: resolving one asks the supervisor which cities
+// it runs, and the inbox read through it asks again, both in series ahead of
+// the local read on every prompt, which took the hook past its budget in
+// TestGcSeatHookLatencyBudget (ga-rxo15af). A plain check renders the
+// supervisor's answer, so it still resolves the client.
+func TestMailCheckInjectAsksASupervisorHostedCitysSupervisorNothing(t *testing.T) {
+	realMailCheckAPIClient := mailCheckAPIClient
+	f := newHookBudgetFixture(t)
+	// The fixture stubs the client out; its cleanup restores the real one.
+	mailCheckAPIClient = realMailCheckAPIClient
+	f.sendMail(t, "status please")
+
+	prevIdentity, prevClient, prevGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook = prevIdentity, prevClient, prevGrants
+	})
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+	resolved := 0
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		resolved++
+		// Supervisor-scoped, so every per-city call on it fails before it
+		// reaches the network.
+		return api.NewClient("http://supervisor.sentinel:1")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailCheckWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mail check --inject = %d; stderr=%s", code, stderr.String())
+	}
+	if resolved != 0 {
+		t.Fatalf("gc mail check --inject resolved the supervisor client %d time(s); want none, it reads the mailbox locally", resolved)
+	}
+	if !strings.Contains(stdout.String(), "status please") {
+		t.Fatalf("gc mail check --inject did not inject the seat's mail:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	_ = cmdMailCheckWithFormat(nil, false, "", &stdout, &stderr)
+	if resolved != 1 {
+		t.Fatalf("gc mail check resolved the supervisor client %d time(s); want one, it renders the supervisor's answer\nstderr=%s", resolved, stderr.String())
+	}
+}
+
 func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
 	cr := api.CachedRead[api.MailListView]{
 		Body: api.MailListView{

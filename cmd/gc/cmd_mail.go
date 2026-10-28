@@ -582,7 +582,11 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 	if cityPathErr != nil {
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
-	c, reason := mailCheckAPIClient(cityPath)
+	resolveClient := mailCheckAPIClient
+	if inject {
+		resolveClient = mailCheckInjectAPIClient
+	}
+	c, reason := resolveClient(cityPath)
 	// An injecting check reads the mailbox in process whatever the controller
 	// says (routeMailCheck), and any check without a controller does. Its config
 	// load above ran the builtin readiness pass the routing read needs, so
@@ -604,6 +608,16 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 	}
 	return nil, apiClientFallbackReason(cityPath)
 }
+
+// mailCheckInjectAPIClient is mailCheckAPIClient for an injecting check, which
+// asks the API only whether the mailbox read is degraded and then reads the
+// mailbox locally anyway (routeMailCheck). A supervisor-hosted city gets no
+// client (localWhenSupervisorHostedAPIClient): resolving the supervisor's
+// client and reading the whole inbox through it would run in series ahead of
+// the local read on every prompt, past the per-turn hook's budget (ga-rxo15af).
+// A standalone controller's [api] port is still asked. Indirected for tests, as
+// mailCheckAPIClient is.
+var mailCheckInjectAPIClient = localWhenSupervisorHostedAPIClient
 
 // routeMailCheck dispatches non-injecting `mail check` to the supervisor API
 // when a controller is up; otherwise falls back to the local mail-provider path.
