@@ -53,10 +53,13 @@ func main() {
 	initial := flag.Bool("init", false, "write the first ceiling.txt; refuse when one has rows")
 	since := flag.String("growth-since", "", "also fail on any baseline or ceiling raise against this git ref (the PR's merge-base)")
 	allowRaise := flag.Bool("allow-raise", false, "with -growth-since: report raises but pass (the PR carries the storeclass/baseline-raise label)")
+	gateOnly := flag.Bool("gate-only", false, "with -growth-since: skip the census; only compare against the ref")
 	flag.Parse()
-	if err := run(*repo, *write, *initial, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "storeclass-baseline:", err)
-		os.Exit(1)
+	if !*gateOnly {
+		if err := run(*repo, *write, *initial, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "storeclass-baseline:", err)
+			os.Exit(1)
+		}
 	}
 	if *since == "" {
 		return
@@ -406,6 +409,11 @@ func gate(repo, ref string, allowRaise bool, out io.Writer) error {
 		return err
 	}
 	rs := raises(oldRows, newRows, oldCeil, newCeil)
+	changed, err := exec.Command("git", "-C", repo, "diff", "--name-only", ref, "HEAD").Output()
+	if err != nil {
+		return fmt.Errorf("listing the files changed since %s: %w", ref, err)
+	}
+	rs = append(rs, protectedChanges(strings.Fields(string(changed)))...)
 	if len(rs) == 0 {
 		_, err := fmt.Fprintf(out, "no storeclass baseline raise against %s\n", ref)
 		return err
@@ -416,6 +424,34 @@ func gate(repo, ref string, allowRaise bool, out io.Writer) error {
 		return err
 	}
 	return fmt.Errorf("%snew raw-store debt needs the coordinator's approval: the storeclass/baseline-raise label (see the storeclass package doc)", msg)
+}
+
+// protectedPaths govern the lint and its gate: a change to any of them (the
+// analyzer, its allowlist and sealed lists, the generator, this workflow, the
+// code owners) needs the same approval as a baseline raise. baseline.txt and
+// ceiling.txt are judged by raises instead.
+var protectedPaths = []string{
+	"tools/nogo/analyzers/storeclass/",
+	".github/workflows/storeclass-baseline.yml",
+	".github/CODEOWNERS",
+}
+
+// protectedChanges is a refusal for each changed file under protectedPaths.
+func protectedChanges(changed []string) []string {
+	var out []string
+	for _, f := range changed {
+		if f == baselineRel || f == ceilingRel {
+			continue
+		}
+		for _, p := range protectedPaths {
+			if f == p || strings.HasSuffix(p, "/") && strings.HasPrefix(f, p) {
+				out = append(out, "protected path changed: "+f)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // raises is every way the new baseline and ceiling grow past the old.

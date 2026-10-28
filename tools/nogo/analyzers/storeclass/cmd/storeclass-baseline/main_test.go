@@ -105,3 +105,28 @@ func TestRaisesAgainstTheMergeBase(t *testing.T) {
 		})
 	}
 }
+
+func TestProtectedChanges(t *testing.T) {
+	got := protectedChanges([]string{
+		"tools/nogo/analyzers/storeclass/baseline.txt",
+		"tools/nogo/analyzers/storeclass/ceiling.txt",
+		"tools/nogo/analyzers/storeclass/config.go",
+		"tools/nogo/analyzers/storeclass/sealed_floor.txt",
+		"tools/nogo/analyzers/storeclass/storeclass.go",
+		"tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/main.go",
+		".github/workflows/storeclass-baseline.yml",
+		".github/CODEOWNERS",
+		"cmd/gc/main.go",
+	})
+	want := []string{
+		"protected path changed: .github/CODEOWNERS",
+		"protected path changed: .github/workflows/storeclass-baseline.yml",
+		"protected path changed: tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/main.go",
+		"protected path changed: tools/nogo/analyzers/storeclass/config.go",
+		"protected path changed: tools/nogo/analyzers/storeclass/sealed_floor.txt",
+		"protected path changed: tools/nogo/analyzers/storeclass/storeclass.go",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("protectedChanges = %q\nwant %q", got, want)
+	}
+}

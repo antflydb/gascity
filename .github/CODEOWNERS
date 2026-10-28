@@ -22,6 +22,11 @@
 /tools/nogo/analyzers/storeclass/baseline.txt @gastownhall/gascity-admin
 /tools/nogo/analyzers/storeclass/ceiling.txt @gastownhall/gascity-admin
 /tools/nogo/analyzers/storeclass/sealed_floor.txt @gastownhall/gascity-admin
+/tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/ @gastownhall/gascity-admin
+# The rules_go patches that make nolint unable to suppress storeclass and feed
+# it the baseline.
+/third_party/patches/rules_go_nogo_golangci_nolint.patch @gastownhall/gascity-admin
+/third_party/patches/rules_go_nogo_main_repo_data.patch @gastownhall/gascity-admin
 /contrib/k8s/ @gastownhall/gascity-admin
 /internal/buildimage/ @gastownhall/gascity-admin
 /internal/api/dashboardspa/web/package.json @gastownhall/gascity-admin
