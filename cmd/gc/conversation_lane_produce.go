@@ -21,14 +21,17 @@ package main
 // hook-claim continuation renew the notice (proposeRenewal). A mail notice
 // announces one message: a delivered or withdrawn notice replays, and one
 // that failed or was skipped is refused (mailLaneNoticeResult). gc session
-// submit replays only a success. Its key can also name the op its own legacy
-// path recorded, which the lane never takes: the submit answers from that op
-// (replayLegacy).
+// submit replays only a success. Its key can also name the op a legacy path
+// recorded, which the lane never takes: the submit answers from that op when
+// it recorded the same request, and refuses the key otherwise
+// (answerLegacy).
 //
 // After the Propose the producer rings the controller's lane host
 // (lane:<conversation>:<op id>) once, best effort. Only a prompt the caller
-// asks it for runs the CLI's content-only inline pass (cliLaneInlinePass);
-// every notice waits for the lane host.
+// asks it for runs the CLI's content-only inline pass (cliLaneInlinePass)
+// first; every notice waits for the lane host. gc session submit resumes the
+// session for its op before the ring, as the API's resume: true does once
+// it has proposed (sessionSubmitLane.resumeOpen).
 
 import (
 	"context"
@@ -85,6 +88,11 @@ type cliLaneProduction struct {
 	renew bool
 	// inline runs the content-only inline pass after the Propose.
 	inline bool
+	// resume, when set, runs for the op the Propose wrote or found, still
+	// open after the inline pass, before the ring: gc session submit's
+	// resume of the session (sessionSubmitLane.resumeOpen). An error ends
+	// the production with that error, the op unrung.
+	resume func(st *opjournal.Store, op opjournal.Op, created bool) error
 	// warn takes the inline pass's warnings; nil discards them.
 	warn io.Writer
 }
@@ -124,7 +132,8 @@ func (e *cliLaneKeyReuseError) Unwrap() error { return e.reuse }
 // nothing, otherwise. A proposal it cannot write is an error wrapping
 // errCLILaneUnavailable, and one whose key names a different request a
 // *cliLaneKeyReuseError, handled true. A key that names a legacy op
-// (keyedLegacyOp) returns that op, legacy set.
+// (keyedLegacyOp) returns that op, legacy set. A resume that fails
+// (p.resume) returns its error, handled true.
 func cliLaneProduce(ctx context.Context, p cliLaneProduction) (cliLaneProduced, error) {
 	if !cliLaneExecutesMessage(p.target.cfg) || p.target.sessionID == "" || isNilBeadStore(p.store) {
 		return cliLaneProduced{}, nil
@@ -172,14 +181,27 @@ func cliLaneProduce(ctx context.Context, p cliLaneProduction) (cliLaneProduced, 
 	if answer, done, answerErr := proposalAnswer(req, op, created, err); done {
 		return answer, answerErr
 	}
-	out := cliLaneProduced{handled: true, op: op, created: created, closedBefore: op.Status == opjournal.StatusClosed}
+	return cliLaneDeliver(ctx, p, sessions, st, cliLaneProduced{handled: true, op: op, created: created, closedBefore: op.Status == opjournal.StatusClosed})
+}
+
+// cliLaneDeliver delivers out.op, the op p's Propose wrote or found: the
+// content-only inline pass when p asks for it and the op was open, p's
+// resume for an op still open after it, and the ring. A resume that fails
+// ends it with that error, the op unrung.
+func cliLaneDeliver(ctx context.Context, p cliLaneProduction, sessions beads.Store, st *opjournal.Store, out cliLaneProduced) (cliLaneProduced, error) {
 	if p.inline && !out.closedBefore {
-		out.op, out.res = cliLaneProduceInline(ctx, p, sessions, st, op)
+		out.op, out.res = cliLaneProduceInline(ctx, p, sessions, st, out.op)
 	}
-	if out.op.Status != opjournal.StatusClosed {
-		// Best effort: the controller's anti-entropy scan finds the op too.
-		_, _ = cliLaneRing(p.target.cityPath, p.target.sessionID, op.ID)
+	if out.op.Status == opjournal.StatusClosed {
+		return out, nil
 	}
+	if p.resume != nil {
+		if err := p.resume(st, out.op, out.created); err != nil {
+			return out, err
+		}
+	}
+	// Best effort: the controller's anti-entropy scan finds the op too.
+	_, _ = cliLaneRing(p.target.cityPath, p.target.sessionID, out.op.ID)
 	return out, nil
 }
 
@@ -357,7 +379,7 @@ func submitPreflight(laneOn bool, lane sessionSubmitLane, op *cliOp) bool {
 // before any row is written; it is the refusal the proposal would answer
 // (refuseProduce). It reports false after reporting the refusal.
 func (s sessionSubmitLane) preflight() bool {
-	_, err := opjournal.NewLaneStore(beads.SessionStore{Store: cliSessionStore(s.store, s.cfg, s.cityPath)}, cliOpClock)
+	_, err := s.laneStore()
 	if err == nil {
 		err = opjournal.ValidateClientKey(s.key)
 	}
@@ -369,6 +391,11 @@ func (s sessionSubmitLane) preflight() bool {
 	}
 	s.refuseProduce(cliLaneRefusal(err))
 	return false
+}
+
+// laneStore opens the op store over s's sessions store.
+func (s sessionSubmitLane) laneStore() (*opjournal.Store, error) {
+	return opjournal.NewLaneStore(beads.SessionStore{Store: cliSessionStore(s.store, s.cfg, s.cityPath)}, cliOpClock)
 }
 
 // request is s's lane op without its conversation: the operator's message
@@ -387,13 +414,14 @@ func (s sessionSubmitLane) request() opjournal.Request {
 // message under s's key with api.LaneMessageOpPolicy, so it finds an op the
 // API proposed before the fallback. A boundary prompt runs the CLI's
 // content-only inline pass; a deliver-now (interrupt_now) unit is control,
-// which waits for the controller's lane host. It prints delivered or queued
-// as gc session nudge does. When no lane serves the session it answers from
-// the lane op s's key names (answerKeyedLaneOp), and reports handled false,
-// having written nothing, when the key names none. A key that names a legacy
-// op is answered from that op (replayLegacy). A refusal is reported as gc
-// session nudge's lane path reports one: on stderr, and under --json as the
-// failure envelope.
+// which waits for the controller's lane host. The session is resumed for an
+// op still open, before the lane host is rung (resumeOpen). It prints
+// delivered or queued as gc session nudge does. When no lane serves the
+// session it answers from the lane op s's key names (answerKeyedLaneOp), and
+// reports handled false, having written nothing, when the key names none. A
+// key that names a legacy op is answered from that op (answerLegacy). A
+// refusal is reported as gc session nudge's lane path reports one: on
+// stderr, and under --json as the failure envelope.
 func submitSessionLane(s sessionSubmitLane) (code int, handled bool) {
 	sp := s.sp
 	if sp == nil {
@@ -413,40 +441,67 @@ func submitSessionLane(s sessionSubmitLane) (code int, handled bool) {
 		sp:     sp,
 		req:    s.request(),
 		inline: s.intent != session.SubmitIntentInterruptNow,
+		resume: s.resumeOpen,
 		warn:   prefixWriter{prefix: "gc session submit: ", w: s.stderr},
 	})
 	if !prod.handled {
 		return s.answerKeyedLaneOp()
 	}
 	switch {
+	case errors.Is(err, errSubmitResumeRefused):
+		return 1, true
 	case err != nil:
 		return s.refuseProduce(err), true
 	case prod.legacy:
-		return s.replayLegacy(prod.op), true
-	}
-	if !s.resumeHeld(prod.op) {
-		return 1, true
+		return s.answerLegacy(prod.op), true
 	}
 	return s.report(prod), true
 }
 
-// resumeHeld is the resume: true the API applies once it has proposed a
-// submit's lane op (api.acceptMessageLane), run for op, the lane op this
-// fallback proposed or found open: a request that died between the API's
-// proposal and its resume left the op waiting on the session's operator
-// hold, so the fallback consumes the hold, as the legacy fallback does
-// (resumeForAcceptedLaneOp), consuming only a hold stamped by the op's
-// proposal. A closed op is left alone. It reports false, having printed the
-// error, when the session refuses the resume (a drain is stopping it).
-func (s sessionSubmitLane) resumeHeld(op opjournal.Op) bool {
-	if op.Status == opjournal.StatusClosed {
-		return true
+// errSubmitResumeRefused is a session's refusal of a submit's resume, which
+// resumeOpen has reported.
+var errSubmitResumeRefused = errors.New("the session refused the resume")
+
+// resumeOpen is the resume: true the API applies once it has proposed a
+// submit's lane op (api.acceptMessageLane), run for op, an open lane op this
+// fallback proposed (created) or found under s's key: a request that died
+// between the API's proposal and its resume left the op waiting on the
+// session's operator hold, so the fallback consumes the hold, as the legacy
+// fallback does (resumeForAcceptedLaneOp), consuming only a hold stamped by
+// the op's proposal. When the session refuses the resume (a drain is
+// stopping it) it reports the refusal and returns it, wrapping
+// errSubmitResumeRefused. An op this run owns, which it created or proposed
+// under a key it minted, is canceled first, as the API cancels the op of a
+// request whose resume it refused, so nothing delivers it once the hold
+// lifts (cancelSubmitOp); any other op under the key stands, as an earlier
+// answer may have accepted it.
+func (s sessionSubmitLane) resumeOpen(st *opjournal.Store, op opjournal.Op, created bool) error {
+	err := resumeForAcceptedLaneOp(cliSessionStore(s.store, s.cfg, s.cityPath), op)
+	if err == nil {
+		return nil
 	}
-	if err := resumeForAcceptedLaneOp(cliSessionStore(s.store, s.cfg, s.cityPath), op); err != nil {
-		fmt.Fprintf(s.stderr, "gc session submit: resuming %s for op %s: %v (key %s)\n", s.target, op.ID, err, s.key) //nolint:errcheck // best-effort stderr
-		return false
+	spent := ""
+	if created || s.minted {
+		spent = "; " + cancelSubmitOp(st, op)
 	}
-	return true
+	fmt.Fprintf(s.stderr, "gc session submit: resuming %s for op %s: %v%s (key %s)\n", s.target, op.ID, err, spent, s.key) //nolint:errcheck // best-effort stderr
+	return fmt.Errorf("%w: %w", errSubmitResumeRefused, err)
+}
+
+// cancelSubmitOp cancels op, a lane op this submit wrote whose resume the
+// session refused, and says what became of it. It runs before the ring, and
+// the inline pass cannot deliver into a held row, so the op closes canceled
+// unless the lane host's scan took it first: then the cancel is only
+// requested, and a rerun under the key reports what became of the op.
+func cancelSubmitOp(st *opjournal.Store, op opjournal.Op) string {
+	res, _, err := st.Cancel(op.ID, legacyop.PrincipalOperator, "the request's resume was refused")
+	switch {
+	case err != nil:
+		return fmt.Sprintf("canceling op %s, which this run wrote, failed (%v): rerun under this key to see what becomes of it", op.ID, err)
+	case res != opjournal.CancelClosed:
+		return fmt.Sprintf("op %s, which this run wrote, was taken before its cancel (%s): rerun under this key to see what becomes of it", op.ID, res)
+	}
+	return fmt.Sprintf("op %s, which this run wrote, was canceled: rerun without --key to send the message again", op.ID)
 }
 
 // answerKeyedLaneOp answers a submit to a session no lane serves (a
@@ -455,7 +510,7 @@ func (s sessionSubmitLane) resumeHeld(op opjournal.Op) bool {
 // under the key before an answer the CLI never got, which the controller's
 // lane host delivers, or one an earlier run proposed under --key. An open
 // op is the API's acceptance (emitSessionSubmitAccepted) once its hold is
-// consumed (resumeHeld), a closed one is reported as report reports a
+// consumed (resumeOpen), a closed one is reported as report reports a
 // replay, and a lane op of another request is refused as a key that names
 // a different request. It reports handled
 // false, having written nothing, when the key names no lane op, which a key
@@ -465,7 +520,7 @@ func (s sessionSubmitLane) answerKeyedLaneOp() (code int, handled bool) {
 	if s.minted {
 		return 0, false
 	}
-	st, err := opjournal.NewLaneStore(beads.SessionStore{Store: cliSessionStore(s.store, s.cfg, s.cityPath)}, cliOpClock)
+	st, err := s.laneStore()
 	if err != nil {
 		return s.refuseUnavailable(err), true
 	}
@@ -487,7 +542,7 @@ func (s sessionSubmitLane) answerKeyedLaneOp() (code int, handled bool) {
 	case op.PayloadDigest != want.PayloadDigest:
 		return s.refuseProduce(&opjournal.KeyReuseError{Existing: op}), true
 	case op.Status != opjournal.StatusClosed:
-		if !s.resumeHeld(op) {
+		if s.resumeOpen(st, op, false) != nil {
 			return 1, true
 		}
 		return emitSessionSubmitAccepted(s.stdout, s.stderr, s.target, s.intent, op.ID, s.key, s.asJSON), true
@@ -516,11 +571,39 @@ func (s sessionSubmitLane) report(prod cliLaneProduced) int {
 		sessionSubmitOp{id: op.ID, key: s.key, replayed: !prod.created})
 }
 
-// replayLegacy answers a key that names a legacy op, which the lane never
-// takes, closes or rewrites, as the API's lane path and gc session nudge's
-// answer one: an open op is in progress under its legacy path, one that
-// closed without success is refused, and any other replays its outcome,
-// queued when its legacy path only queued the message.
+// answerLegacy answers a key that names op, a legacy message op, which the
+// lane never takes, closes or rewrites, as gc session submit's legacy
+// admission (cliOp.start) and the API's lane path (api.acceptMessageLane)
+// answer it. op answers only the request it recorded, whose digest in the
+// legacy shape (op's executor, api.MessageOpPolicy of s's intent) is op's:
+// another is refused as a key that names a different request. An open
+// legacy:api op is the API's acceptance of this request, which the API
+// delivers and resumes for (emitSessionSubmitAccepted); any other replays
+// (replayLegacy).
+func (s sessionSubmitLane) answerLegacy(op opjournal.Op) int {
+	st, err := s.laneStore()
+	if err != nil {
+		return s.refuseUnavailable(err)
+	}
+	req := s.request()
+	req.Conversation, req.Kind, req.Executor, req.Policy = s.sessionID, opjournal.KindMessage, op.Executor, api.MessageOpPolicy(s.intent)
+	want, err := st.Preview(req)
+	switch {
+	case err != nil:
+		return s.refuseProduce(cliLaneRefusal(err))
+	case want.PayloadDigest != op.PayloadDigest:
+		return s.refuseProduce(&opjournal.KeyReuseError{Existing: op})
+	case op.Status != opjournal.StatusClosed && op.Executor == opjournal.ExecutorLegacyAPI:
+		return emitSessionSubmitAccepted(s.stdout, s.stderr, s.target, s.intent, op.ID, s.key, s.asJSON)
+	}
+	return s.replayLegacy(op)
+}
+
+// replayLegacy answers from op, a legacy op of this request (answerLegacy)
+// other than the API's open one, as the API's lane path and gc session
+// nudge's answer one: an open op is in progress under its legacy path, one
+// that closed without success is refused, and any other replays its
+// outcome, queued when its legacy path only queued the message.
 func (s sessionSubmitLane) replayLegacy(op opjournal.Op) int {
 	switch {
 	case op.Status != opjournal.StatusClosed:

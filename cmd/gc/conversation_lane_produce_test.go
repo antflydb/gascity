@@ -97,17 +97,25 @@ func (c *cliLaneCity) submitLaneOver(t *testing.T, store beads.Store, intent ses
 // op as stored.
 func (c *cliLaneCity) proposeLegacySubmit(t *testing.T, intent session.SubmitIntent, key string, outcome *opjournal.Outcome) opjournal.Op {
 	t.Helper()
+	return c.proposeLegacyMessage(t, opjournal.ExecutorLegacyCLI, intent, key, cliLaneTestMessage, outcome)
+}
+
+// proposeLegacyMessage records payload under key as executor's legacy path
+// records a submit of intent: under the operator, with api.MessageOpPolicy.
+// outcome closes it; nil leaves it open. It returns the op as stored.
+func (c *cliLaneCity) proposeLegacyMessage(t *testing.T, executor opjournal.ExecutorKind, intent session.SubmitIntent, key, payload string, outcome *opjournal.Outcome) opjournal.Op {
+	t.Helper()
 	st := c.laneStore(t)
 	op, _, err := st.Propose(opjournal.Request{
-		Conversation: c.id, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLegacyCLI, ClientKey: key,
+		Conversation: c.id, Kind: opjournal.KindMessage, Executor: executor, ClientKey: key,
 		Producer: opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
-		Payload:  cliLaneTestMessage, Policy: api.MessageOpPolicy(intent),
+		Payload:  payload, Policy: api.MessageOpPolicy(intent),
 	})
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
 	if outcome != nil {
-		if _, err := st.Close(op.ID, *outcome, string(opjournal.ExecutorLegacyCLI)); err != nil {
+		if _, err := st.Close(op.ID, *outcome, string(executor)); err != nil {
 			t.Fatalf("closing: %v", err)
 		}
 	}
@@ -201,6 +209,99 @@ func TestSessionSubmitFallbackNeverTakesALegacyOp(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A legacy op answers only the request it recorded: a key that names one of
+// another message or another intent is refused as a key that names a
+// different request, as the legacy admission, the declined path and the
+// API's lane path (sameLegacyMessage) refuse it, even where the lane's
+// policy of the submit's intent and the legacy one of the op's agree (a
+// follow_up's lane policy is the default's). Kills a served fallback that
+// replays another request's delivered op as this message's, delivering
+// nothing, or reports the API's acceptance of another message.
+func TestSessionSubmitServedFallbackRefusesAnotherRequestsLegacyOp(t *testing.T) {
+	delivered := &opjournal.Outcome{Arm: opjournal.ArmSucceeded}
+	for _, tc := range []struct {
+		name     string
+		executor opjournal.ExecutorKind
+		// recorded is the intent the legacy op was recorded for and payload
+		// its message; the submit sends the test message as intent.
+		recorded session.SubmitIntent
+		payload  string
+		outcome  *opjournal.Outcome
+		intent   session.SubmitIntent
+	}{
+		{
+			name: "a delivered op of another message", executor: opjournal.ExecutorLegacyCLI,
+			recorded: session.SubmitIntentDefault, payload: "an earlier message", outcome: delivered, intent: session.SubmitIntentDefault,
+		},
+		{
+			name: "a delivered op of another intent", executor: opjournal.ExecutorLegacyCLI,
+			recorded: session.SubmitIntentFollowUp, payload: cliLaneTestMessage, outcome: delivered, intent: session.SubmitIntentDefault,
+		},
+		{
+			name: "a delivered default op under a follow_up", executor: opjournal.ExecutorLegacyCLI,
+			recorded: session.SubmitIntentDefault, payload: cliLaneTestMessage, outcome: delivered, intent: session.SubmitIntentFollowUp,
+		},
+		{
+			name: "the API's open op of another message", executor: opjournal.ExecutorLegacyAPI,
+			recorded: session.SubmitIntentDefault, payload: "an earlier message", intent: session.SubmitIntentDefault,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLILaneCity(t)
+			c.sp.Calls = nil
+			legacy := c.proposeLegacyMessage(t, tc.executor, tc.recorded, "k-reused", tc.payload, tc.outcome)
+			code, stdout, stderr := c.submitLaneOver(t, c.store, tc.intent, "k-reused", cliLaneTestMessage, true)
+			if code != 1 || !strings.Contains(stderr, "the key names a different request (op "+legacy.ID+"); rerun with another --key (key k-reused)") {
+				t.Fatalf("submit = %d, stdout %q, stderr %q; want the key reuse refused", code, stdout, stderr)
+			}
+			if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeKeyMismatch {
+				t.Fatalf("failure code %q, want %s; stdout %s", got, cliOpCodeKeyMismatch, stdout)
+			}
+			if got := c.only(t); got.ID != legacy.ID || got.Status != legacy.Status || got.Revision != legacy.Revision {
+				t.Fatalf("the legacy op was taken or rewritten: %+v, was %+v", got, legacy)
+			}
+			if len(c.nudges()) != 0 || len(c.controlCalls()) != 0 || len(c.rings) != 0 {
+				t.Fatalf("the fallback delivered %+v, controlled %+v or rang %v for another request's op", c.nudges(), c.controlCalls(), c.rings)
+			}
+		})
+	}
+}
+
+// An API whose lane host latched kinds that do not list message yet records
+// a submit as a legacy:api op, while the CLI, reading city.toml, already
+// lists it: a fallback after that answer was lost, to a session the lane
+// serves, finds that op open under the key it sent. It is the API's
+// acceptance of this request, which the API delivers, as the legacy
+// admission answers it (cliOpAcceptedByAPI): reported accepted, exit 0,
+// nothing delivered or rung. Kills a served fallback that refuses it as in
+// progress, whose "rerun without --key" delivers the message twice.
+func TestSessionSubmitServedFallbackReportsTheAPIsOpenLegacyOpAccepted(t *testing.T) {
+	for _, intent := range []session.SubmitIntent{session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow} {
+		t.Run(string(intent), func(t *testing.T) {
+			c := newCLILaneCity(t)
+			var sent string
+			var apiOp opjournal.Op
+			c.cmdSubmitCity(t, lostAnswerServer(t, func(key string) {
+				sent = key
+				apiOp = c.proposeLegacyMessage(t, opjournal.ExecutorLegacyAPI, intent, key, cliLaneTestMessage, nil)
+			}))
+			c.sp.Calls = nil
+			code, stdout, stderr := c.cmdSubmit(intent, "", false)
+			want := fmt.Sprintf("Accepted by the controller for %s (op %s); gc session submit --key %s reports its outcome\n", c.id, apiOp.ID, sent)
+			if code != 0 || stdout != want {
+				t.Fatalf("submit = %d, %q, stderr %q; want %q", code, stdout, stderr, want)
+			}
+			c.assertNothingDelivered(t)
+			if got := c.only(t); got.ID != apiOp.ID || got.Status != apiOp.Status || got.Revision != apiOp.Revision {
+				t.Fatalf("op rows = %+v, want only the API's open op %+v, untouched", got, apiOp)
+			}
+			if len(c.rings) != 0 {
+				t.Fatalf("rings = %v, want none for a legacy op", c.rings)
+			}
+		})
 	}
 }
 
@@ -1605,6 +1706,85 @@ func TestSessionSubmitLaneFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
 				}
 				if code != 0 || !strings.Contains(stdout+stderr, apiOp.ID) {
 					t.Fatalf("submit = %d, stdout %q, stderr %q; want the API's op %s reported", code, stdout, stderr, apiOp.ID)
+				}
+				if meta["state"] != string(session.StateAsleep) || meta["wake_request"] != string(session.WakeCauseExplicit) {
+					t.Fatalf("session row = %v; want the hold consumed and its wake recorded", meta)
+				}
+			})
+		}
+	}
+}
+
+// The served fallback resumes the session for the op it proposed before it
+// rings the lane host, as the API resumes once it has proposed
+// (api.acceptMessageLane). A boundary prompt's inline pass, which runs
+// first, cannot deliver into the operator's hold (session.ContentGate), so
+// the op waits for the lane host, rung once the hold is consumed. A resume
+// the session refuses (its drain is stopping it) cancels the op this run
+// wrote, under a key it minted or a fresh --key, before any ring, and says
+// so, exit 1: nothing delivers that op once the hold lifts, so a rerun
+// without --key sends the message once. Kills a fallback that leaves its
+// own op open and rung after a refused resume, one that rings before the
+// resume, and one whose inline pass delivers through the hold.
+func TestSessionSubmitServedFallbackCancelsItsOpWhenTheResumeIsRefused(t *testing.T) {
+	for _, intent := range []session.SubmitIntent{session.SubmitIntentDefault, session.SubmitIntentInterruptNow} {
+		for _, tc := range []struct {
+			name     string
+			key      string
+			draining bool
+		}{
+			{name: "resumed"},
+			{name: "refused under a minted key", draining: true},
+			{name: "refused under a fresh key", key: "k-fresh", draining: true},
+		} {
+			t.Run(string(intent)+"/"+tc.name, func(t *testing.T) {
+				c := newCLILaneCity(t)
+				if _, err := sessionFrontDoor(c.store).OperatorSuspend(c.id, laneT0.Add(-time.Minute)); err != nil {
+					t.Fatalf("suspending the session: %v", err)
+				}
+				if tc.draining {
+					if err := c.store.SetMetadataBatch(c.id, map[string]string{"state": string(session.StateDraining)}); err != nil {
+						t.Fatalf("draining the session: %v", err)
+					}
+				}
+				c.cmdSubmitCity(t, nil)
+				ring := cliLaneRing
+				var stateAtRing []string
+				cliLaneRing = func(city, conv, opID string) (string, error) {
+					row, err := c.store.Get(c.id)
+					if err != nil {
+						t.Errorf("reading the session at the ring: %v", err)
+					}
+					stateAtRing = append(stateAtRing, row.Metadata["state"])
+					return ring(city, conv, opID)
+				}
+				c.sp.Calls = nil
+				code, stdout, stderr := c.cmdSubmit(intent, tc.key, false)
+				c.assertNothingDelivered(t)
+				op := c.only(t)
+				row, err := c.store.Get(c.id)
+				if err != nil {
+					t.Fatalf("reading the session: %v", err)
+				}
+				meta := row.Metadata
+				if tc.draining {
+					refused, spent := "resuming "+c.id+" for op "+op.ID+": ", "; op "+op.ID+", which this run wrote, was canceled"
+					if code != 1 || stdout != "" || !strings.Contains(stderr, refused) || !strings.Contains(stderr, spent) {
+						t.Fatalf("submit = %d, stdout %q, stderr %q; want exit 1 naming the refused resume and the canceled op", code, stdout, stderr)
+					}
+					if op.Status != opjournal.StatusClosed || op.Outcome.Arm != opjournal.ArmCanceled {
+						t.Fatalf("op = %+v, want this run's op canceled", op)
+					}
+					if len(c.rings) != 0 || meta["state"] != string(session.StateDraining) {
+						t.Fatalf("rings %v, row state %q; want no ring, the row left draining", c.rings, meta["state"])
+					}
+					return
+				}
+				if code != 0 || stdout != "Queued follow-up for "+c.id+"\n" || op.Status == opjournal.StatusClosed {
+					t.Fatalf("submit = %d, stdout %q, stderr %q, op %+v; want the open op queued", code, stdout, stderr, op)
+				}
+				if want := []string{c.id + ":" + op.ID}; !slices.Equal(c.rings, want) || !slices.Equal(stateAtRing, []string{string(session.StateAsleep)}) {
+					t.Fatalf("rings %v, the session's state at them %v; want %v, rung once the hold was consumed", c.rings, stateAtRing, want)
 				}
 				if meta["state"] != string(session.StateAsleep) || meta["wake_request"] != string(session.WakeCauseExplicit) {
 					t.Fatalf("session row = %v; want the hold consumed and its wake recorded", meta)
