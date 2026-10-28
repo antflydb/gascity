@@ -3091,7 +3091,9 @@ func confirmPendingStart(currentState string) bool {
 // the post-create demand floor (poolSessionWithinPostCreateProtection) for a
 // fresh pool worker — the first-run "orphaned" drain of a worker that had just
 // claimed its step. Both commit paths share this one predicate so they cannot
-// drift apart again.
+// drift apart again. The recovery commit also confirms an active row: there
+// it is the claimed residue of a commit that stopped part way, which heal
+// leaves active.
 //
 // It deliberately does NOT drive StartsAwakeInterval: re-confirming an
 // already-awake runtime must not reset its in-flight awake interval, so that
@@ -3760,8 +3762,12 @@ func recoverRunningPendingCreate(
 		// snapshot (Info.MetadataState is the raw state metadata verbatim, so the
 		// confirmPendingStart / StateAwake / sleep_reason checks are byte-identical
 		// to the former raw session.Metadata reads) — the two transitional W6
-		// lockstep mirrors that kept this raw read coherent are gone.
-		ConfirmState:     confirmStartCommitState(info.MetadataState),
+		// lockstep mirrors that kept this raw read coherent are gone. An active
+		// row is confirmed too: heal leaves the claimed residue of a commit that
+		// stopped part way active (healStatePatchWithRollbackInfo), and that
+		// commit may not have landed the state_reason the post-create demand
+		// floor reads.
+		ConfirmState:     confirmStartCommitState(info.MetadataState) || sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateActive,
 		ClearSleepReason: info.SleepReason != "",
 		// recoverRunningPendingCreate's caller (session_reconciler.go)
 		// already gates entry on shouldRollbackPendingCreateInfo(info), so
@@ -4348,12 +4354,13 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 // snapshot and before the flock was free would have its box stopped by a
 // decision made from the older read (#7751). So it re-reads the row from store
 // and tears down only while the fresh row still matches the snapshot
-// (teardownSnapshotCurrent); otherwise it holds without a stop, and the next
-// tick decides from a fresh snapshot. A bead-scoped pool row that has closed
-// is still torn down: its name embeds its bead ID, so no successor starts
-// under it and nothing else addresses a box left there (ga-vcjr9). A read
-// does not bump the row's revision. The identity reads and the post-stop confirmation are held
-// to postStartObservationBound each, so a wedged backend costs a tick at most
+// (teardownSnapshotCurrent); otherwise it holds without a stop, logs the hold
+// as row_moved_on, and the next tick decides from a fresh snapshot. A
+// bead-scoped pool row that has closed is still torn down: its name embeds
+// its bead ID, so no successor starts under it and nothing else addresses a
+// box left there (ga-vcjr9). A read does not bump the row's revision. The
+// identity reads and the post-stop confirmation are held to
+// postStartObservationBound each, so a wedged backend costs a tick at most
 // one unbounded Stop per held row; a read that does not answer in time holds.
 func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
 	if sp == nil {
@@ -4395,6 +4402,8 @@ func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessi
 		fresh := sessionInfoFromBead(b)
 		closedPoolRow := pool && fresh.Closed
 		if !closedPoolRow && !teardownSnapshotCurrent(info, fresh) {
+			hold("row_moved_on.pending_create_teardown", fmt.Sprintf(
+				"session reconciler: not tearing down runtime %q: pending create %s changed since this tick read it", name, info.ID))
 			return false
 		}
 	}

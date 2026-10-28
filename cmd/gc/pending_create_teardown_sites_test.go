@@ -376,14 +376,25 @@ func TestTearDownManualRowRuntime_Edges(t *testing.T) {
 	})
 }
 
+// heldTeardownHold is the one hold kind a held releaseRowOwnedRuntimeLeased
+// case logs: kind, or row_moved_on for a row that moved on since the snapshot.
+func heldTeardownHold(kind string) string {
+	if kind == "" {
+		return "row_moved_on.pending_create_teardown"
+	}
+	return kind
+}
+
 // TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock: a tick
 // decides from its snapshot, so a start that commits the row (or a writer that
 // closes it) after the snapshot must not have its box stopped. The tick
 // re-reads the row under the name's flock and stops only while it still
-// matches; a re-read that fails holds the row.
+// matches; a re-read that fails holds the row, and so does a row that moved
+// on, saying so.
 //
 // Kills: no fresh re-read under the flock; teardownSnapshotCurrent
-// without any one of its terms; a failed re-read that tears down.
+// without any one of its terms; a failed re-read that tears down; a moved-on
+// hold that logs nothing.
 func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -393,7 +404,8 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 		// store, when set, is the store the row is re-read from.
 		store    func(store beads.Store, id string) beads.Store
 		wantStop bool
-		// wantHold, when set, is the one hold kind the tick logs.
+		// wantHold is the one hold kind a held case logs; unset, the row
+		// moved on (heldTeardownHold).
 		wantHold string
 	}{
 		{name: "row unchanged", wantStop: true},
@@ -459,8 +471,8 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 			if !tc.wantStop && !env.sp.IsRunning(name) {
 				t.Fatal("the box of a row that moved on was stopped")
 			}
-			if tc.wantHold != "" && (len(holds) != 1 || holds[0] != tc.wantHold) {
-				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, tc.wantHold, stderr.String())
+			if want := heldTeardownHold(tc.wantHold); !tc.wantStop && (len(holds) != 1 || holds[0] != want) {
+				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, want, stderr.String())
 			}
 		})
 	}
@@ -473,11 +485,11 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 // re-reads the row under the flock and stops only while it still matches, or
 // once it is closed: the name embeds the row's bead ID, so nothing else
 // addresses a box left under it (ga-vcjr9). A re-read that fails holds the
-// row.
+// row, and so does a row that moved on, saying so.
 //
 // Kills: no fresh re-read for pool rows; teardownSnapshotCurrent without any
 // one of its terms; a closed pool row's box left running; a failed re-read
-// that tears down.
+// that tears down; a moved-on hold that logs nothing.
 func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -487,7 +499,8 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 		// store, when set, is the store the row is re-read from.
 		store    func(store beads.Store, id string) beads.Store
 		wantStop bool
-		// wantHold, when set, is the one hold kind the tick logs.
+		// wantHold is the one hold kind a held case logs; unset, the row
+		// moved on (heldTeardownHold).
 		wantHold string
 	}{
 		{name: "row unchanged", wantStop: true},
@@ -560,8 +573,8 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 			if !env.sp.IsRunning(name) {
 				t.Fatal("the box of a row that moved on was stopped")
 			}
-			if tc.wantHold != "" && (len(holds) != 1 || holds[0] != tc.wantHold) {
-				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, tc.wantHold, stderr.String())
+			if want := heldTeardownHold(tc.wantHold); len(holds) != 1 || holds[0] != want {
+				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, want, stderr.String())
 			}
 		})
 	}
