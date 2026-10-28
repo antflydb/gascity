@@ -14,10 +14,12 @@ package beads
 // Optional capabilities (e.g. Counter, GraphApplyStore, GraphApplyFor,
 // StorageCreateStore, Backing/ReadyLive) are NOT promoted through the embedding:
 // a type assertion on a typed store value asserts on the wrapper, not the
-// underlying store, and will fail. Access optional capabilities by asserting on
-// the embedded .Store field instead (e.g. `c, ok := s.Store.(beads.Counter)`).
-// Likewise pass the unwrapped .Store field when calling a generic Store helper
-// that is shared across multiple classes.
+// underlying store, and will fail. Reach an optional capability with
+// beads.As (class_store_as.go), which sees through the handle:
+// `c, ok := beads.As[beads.Counter](s)`. Older code asserts on the embedded
+// .Store field instead; the storeclass lint baselines those unwraps and
+// assertions, and they only shrink. A typed handle is itself a Store, so it
+// passes to a generic Store helper without an unwrap.
 
 // WorkStore is a strongly-typed view over a single Store holding work beads
 // (the city's general task ledger). It is backed by the same underlying store
