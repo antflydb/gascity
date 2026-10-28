@@ -163,6 +163,46 @@ func TestHoldLabelRoutedToCheckCleanStore(t *testing.T) {
 	}
 }
 
+// TestHoldLabelRoutedToCheckIgnoresClearedHold covers ga-uu1fpt: `bd set-state
+// <id> hold=cleared` is the documented way to release a hold and leaves a
+// hold:cleared label behind. "cleared" is the value the hold takes when there
+// is no hold, not an agent, so the check must not flag such a bead and --fix
+// must not backfill gc.routed_to=cleared over its real route.
+func TestHoldLabelRoutedToCheckIgnoresClearedHold(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Released hold, no route yet.
+		{ID: "C-1", Title: "released", Type: "task", Status: "open", Labels: []string{"hold:cleared"}},
+		// Released hold on a bead already routed on: --fix must keep the route.
+		{
+			ID: "C-2", Title: "released", Type: "task", Status: "open", Labels: []string{"hold:cleared"},
+			Metadata: map[string]string{"gc.routed_to": "gascity/deployer"},
+		},
+	}, nil)
+	check := newHoldLabelRoutedToCheck(nil, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("Run status = %v, want OK (hold:cleared is not a route): %#v", res.Status, res)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for id, want := range map[string]string{"C-1": "", "C-2": "gascity/deployer"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != want {
+			t.Errorf("%s gc.routed_to = %q, want %q (hold:cleared must leave the route alone)", id, got, want)
+		}
+	}
+}
+
 func TestHoldLabelRoutedToFixReportsOpenFailures(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := t.TempDir()
