@@ -40,7 +40,7 @@ func newMoleculeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 	}
 	cmd.AddCommand(newMoleculeAutocloseCmd(stdout, stderr))
-	cmd.AddCommand(newMoleculeReapOrphansCmd(stdout))
+	cmd.AddCommand(newMoleculeReapOrphansCmd(stdout, stderr))
 	return cmd
 }
 
@@ -309,6 +309,17 @@ func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Be
 		return false
 	}
 
+	recordMoleculeClosed(rec, mol, fromStatus, reason)
+
+	fmt.Fprintf(stdout, "Auto-closed molecule %s %q\n", mol.ID, mol.Title) //nolint:errcheck // best-effort stdout
+	return true
+}
+
+// recordMoleculeClosed publishes the bead.closed / molecule.resolved pair for a
+// molecule root that has just been closed. Shared by every path that closes a
+// molecule root (autoclose, reap-orphans) so each announces the same events.
+// fromStatus is the root's status captured before the close mutated it.
+func recordMoleculeClosed(rec events.Recorder, mol beads.Bead, fromStatus, reason string) {
 	rec.Record(events.Event{
 		Type:    events.BeadClosed,
 		Actor:   eventActor(),
@@ -337,9 +348,6 @@ func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Be
 			Ts:          time.Now().UTC(),
 		}),
 	})
-
-	fmt.Fprintf(stdout, "Auto-closed molecule %s %q\n", mol.ID, mol.Title) //nolint:errcheck // best-effort stdout
-	return true
 }
 
 // closeMoleculeWithReason mirrors closeConvoyWithReason: stamps a
