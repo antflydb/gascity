@@ -880,7 +880,7 @@ func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) 
 	if rigName != "" {
 		scope = rigGraphScope(rigName)
 	}
-	if _, relocated := graphClassBinding(routes); !relocated {
+	if _, relocated := graphClassBinding(routes); !relocated { // residency:allow — S4 placement rule: asks only whether the graph class is relocated (and refused); resolves no bead
 		if scope.isRig() {
 			return store
 		}

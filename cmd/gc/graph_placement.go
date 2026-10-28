@@ -99,7 +99,7 @@ func graphRelicLegForScope(routes *storageRoutes, scope graphScope) bool {
 	if !scope.isRig() {
 		return false
 	}
-	binding, relocated := graphClassBinding(routes)
+	binding, relocated := graphClassBinding(routes) // residency:allow — S4 placement rule: asks only whether the graph class is relocated (and refused); resolves no bead
 	if !relocated || binding == nil {
 		return false
 	}
@@ -115,7 +115,7 @@ func graphRelicLegForScope(routes *storageRoutes, scope graphScope) bool {
 // case — a single-store city, a refused city, a rig awaiting import — answers
 // false and keeps the rig leg.
 func splitRigGraphRelicFree(routes *storageRoutes, rig string) bool {
-	binding, relocated := graphClassBinding(routes)
+	binding, relocated := graphClassBinding(routes) // residency:allow — S4 placement rule: asks only whether the graph class is relocated (and refused); resolves no bead
 	if !relocated || binding == nil {
 		return false
 	}

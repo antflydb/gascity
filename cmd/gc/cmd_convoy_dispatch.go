@@ -1064,7 +1064,7 @@ func controlScopeTakesGraphClass(cityPath, storePath string) bool {
 	if scopeIsCity(cityPath, storePath) {
 		return true
 	}
-	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)) // residency:allow — S4 placement rule: asks only whether the graph class is relocated (and refused); resolves no bead
 	if !relocated || binding == nil {
 		return false
 	}
