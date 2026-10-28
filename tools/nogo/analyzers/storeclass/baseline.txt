@@ -589,6 +589,7 @@ cmd/gc/cmd_nudge.go	nudgeObserveTarget	raw-var	1
 cmd/gc/cmd_nudge.go	nudgePollDeliverQueued	raw-var	1
 cmd/gc/cmd_nudge.go	nudgeTargetPendingInteraction	raw-param	1
 cmd/gc/cmd_nudge.go	queueManagedSessionNudgeWake	raw-param	1
+cmd/gc/cmd_nudge.go	queueSessionNudgeWithNote	raw-param	1
 cmd/gc/cmd_nudge.go	queueSessionNudgeWithWorker	raw-param	1
 cmd/gc/cmd_nudge.go	refuseOrQueueNudgeBehindPendingInteraction	raw-param	1
 cmd/gc/cmd_nudge.go	requestWorkerSiteNudgeWake	raw-param	1

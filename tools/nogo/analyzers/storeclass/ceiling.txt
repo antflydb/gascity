@@ -6,7 +6,7 @@
 cmd/gc	cap-assert	99
 cmd/gc	mint	102
 cmd/gc	raw-field	158
-cmd/gc	raw-param	1010
+cmd/gc	raw-param	1011
 cmd/gc	raw-result	235
 cmd/gc	raw-type	4
 cmd/gc	raw-var	32
