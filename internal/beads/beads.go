@@ -238,12 +238,13 @@ type Bead struct {
 	// No read surface exposes it, so the two projections of the same bead
 	// disagree by design: a direct .gc/events.jsonl reader sees the
 	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
-	// --json surfaces re-project through this struct and report status="open",
-	// defer_until=null, is_blocked=false — three signals that all read as
-	// "ready" for a bead ready deliberately excludes. An operator asking why a
-	// bead is not being picked up has nothing to read; giving the exclusion a
-	// derived read-only representation is a wire-design decision, not a
-	// consequence of this tag.
+	// --json surfaces re-project through this struct and report status="open"
+	// and is_blocked=false, with a defer_until that is null (a dateless
+	// deferral) or already past (a dated one the store has not woken) — signals
+	// that all read as "ready" for a bead ready deliberately excludes. An
+	// operator asking why a bead is not being picked up has nothing to read;
+	// giving the exclusion a derived read-only representation is a wire-design
+	// decision, not a consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
 	// SourceStatus is the status the backing store recorded, as read, before
 	// Status folded it into Gas City's three-state model: bd's blocked,
@@ -940,8 +941,9 @@ func HasReadyExcludedLabel(b Bead) bool {
 // IsDeferred reports whether a bead is hidden by bd's deferred status (dated
 // or not, until the store itself lifts the deferral) or by a future
 // defer_until on a row the store does not record as deferred.
-// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
-// operates on raw bd JSON before this normalization.
+// cmd_hook's filterUnreadyHookCandidates mirrors both halves on raw bd JSON,
+// before this normalization: isStoreDeferredHookCandidate reads the raw
+// status and isFutureDeferredHookCandidate the date.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))

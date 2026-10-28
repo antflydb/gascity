@@ -33,16 +33,14 @@ func EncodeBeadEventPayload(b Bead) (json.RawMessage, error) {
 // consumes the stored bytes directly does not — see Bead.IndefinitelyDeferred,
 // which documents that a direct .gc/events.jsonl reader sees the
 // status="deferred" this wire carries. Do not widen the encoder's rewrite
-// without auditing those raw readers; the #6207 widening (dated deferrals
-// now re-emit status="deferred" with their date, as before) audited the
-// direct readers — cmd/gc/cmd_events.go, cmd/gc/hook_claim_bead_events.go,
-// cmd/gc/cmd_analyze_reliability.go, and internal/api/dashboardbff — and
-// none carries status-specific logic. The wrapped
-// {"bead":<snapshot>} shape (the registered BeadEventPayload contract) is
-// accepted as a tolerant fallback so a producer that ever emits it does not
-// silently starve consumers. A payload with an empty id, undecodable bytes, or
-// no bytes is a decode miss:
-// (Bead{}, false).
+// without auditing those raw readers. The direct readers
+// (cmd/gc/cmd_events.go, cmd/gc/hook_claim_bead_events.go,
+// cmd/gc/cmd_analyze_reliability.go and internal/api/dashboardbff) carry no
+// bead-status logic, so a dated deferral may carry status="deferred" with its
+// date on this wire. The wrapped {"bead":<snapshot>} shape (the registered
+// BeadEventPayload contract) is accepted as a tolerant fallback so a producer
+// that ever emits it does not silently starve consumers. A payload with an
+// empty id, undecodable bytes, or no bytes is a decode miss: (Bead{}, false).
 //
 // Bead's own json tags round-trip the raw wire faithfully (issue_type→Type,
 // parent→ParentID, ref/from/needs/metadata/dependencies, and StringMap coerces
@@ -69,7 +67,7 @@ func DecodeBeadEventPayload(payload json.RawMessage) (Bead, bool) {
 }
 
 // decodeRawBead unmarshals a raw bead snapshot, preserves bd's status-based
-// indefinite deferral, and applies the exec-style "type" alias for issue_type.
+// deferral, and applies the exec-style "type" alias for issue_type.
 // Returns false on decode error or empty id.
 func decodeRawBead(data json.RawMessage) (Bead, bool) {
 	var b Bead

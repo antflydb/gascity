@@ -246,22 +246,25 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 		upstream           beadslib.Status
 		upstreamDeferUntil *time.Time
 		want               string
-		wantIndefiniteHold bool
+		wantStoreDeferred  bool // IndefinitelyDeferred: the store records the deferral
+		wantDeferred       bool // IsDeferred: either half of the deferral holds
 	}{
-		{beadslib.StatusOpen, nil, "open", false},
-		{beadslib.StatusInProgress, nil, "in_progress", false},
-		{beadslib.StatusClosed, nil, "closed", false},
-		{beadslib.Status("blocked"), nil, "open", false},
-		{beadslib.Status("deferred"), nil, "open", true},
+		{beadslib.StatusOpen, nil, "open", false, false},
+		{beadslib.StatusInProgress, nil, "in_progress", false, false},
+		{beadslib.StatusClosed, nil, "closed", false, false},
+		{beadslib.Status("blocked"), nil, "open", false, false},
+		{beadslib.Status("deferred"), nil, "open", true, true},
 		// bd's deferred status is a deferral in its own right, dated or not
 		// (#6207): the date only says when bd's sweep may lift it, so both
 		// dated rows stay deferred until the store records the wake.
-		{beadslib.Status("deferred"), &past, "open", true},
-		{beadslib.Status("deferred"), &future, "open", true},
-		// A raw-open row keeps governing a deferral through the date alone.
-		{beadslib.StatusOpen, &past, "open", false},
-		{beadslib.Status("pinned"), nil, "open", false},
-		{beadslib.Status("hooked"), nil, "open", false},
+		{beadslib.Status("deferred"), &past, "open", true, true},
+		{beadslib.Status("deferred"), &future, "open", true, true},
+		// A raw-open row keeps governing a deferral through the date alone:
+		// deferred until the date passes, with no store-recorded hold.
+		{beadslib.StatusOpen, &past, "open", false, false},
+		{beadslib.StatusOpen, &future, "open", false, true},
+		{beadslib.Status("pinned"), nil, "open", false, false},
+		{beadslib.Status("hooked"), nil, "open", false, false},
 	}
 
 	for _, tt := range tests {
@@ -287,11 +290,11 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			if bead.Status != tt.want {
 				t.Fatalf("Status = %q, want %q", bead.Status, tt.want)
 			}
-			if bead.IndefinitelyDeferred != tt.wantIndefiniteHold {
-				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantIndefiniteHold)
+			if bead.IndefinitelyDeferred != tt.wantStoreDeferred {
+				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantStoreDeferred)
 			}
-			if IsDeferred(bead, now) != tt.wantIndefiniteHold {
-				t.Fatalf("IsDeferred(status %q, defer %v) = %v, want %v", tt.upstream, tt.upstreamDeferUntil, IsDeferred(bead, now), tt.wantIndefiniteHold)
+			if IsDeferred(bead, now) != tt.wantDeferred {
+				t.Fatalf("IsDeferred(status %q, defer %v) = %v, want %v", tt.upstream, tt.upstreamDeferUntil, IsDeferred(bead, now), tt.wantDeferred)
 			}
 			if bead.SourceStatus != string(tt.upstream) {
 				t.Fatalf("SourceStatus = %q, want bd's %q", bead.SourceStatus, tt.upstream)
