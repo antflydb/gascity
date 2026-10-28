@@ -541,7 +541,7 @@ func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, s
 			return syncAnswer{}, err
 		}
 	}
-	return s.answerLaneRespond(ctx, st, id, key, op, !created)
+	return s.answerLaneRespond(ctx, id, key, op, !created)
 }
 
 // laneRespondPending is a lane /respond's front door, OJ-4's: the pending
@@ -583,7 +583,7 @@ func (s *Server) retryLaneRespond(ctx context.Context, st *opjournal.Store, id, 
 	if err != nil {
 		return syncAnswer{}, err
 	}
-	return s.answerLaneRespond(ctx, st, id, key, target, true)
+	return s.answerLaneRespond(ctx, id, key, target, true)
 }
 
 // sameRespondRequest reports whether resp asks again what prior, the respond
@@ -678,7 +678,7 @@ func recordLaneRespondUnderKey(st *opjournal.Store, conv, key string, scope opjo
 // The answer carries key, the request's Idempotency-Key, or the op's own key
 // when the request carried none. A legacy op a key names is answered as OJ-4
 // replays it.
-func (s *Server) answerLaneRespond(ctx context.Context, st *opjournal.Store, id, key string, op opjournal.Op, replayed bool) (syncAnswer, error) {
+func (s *Server) answerLaneRespond(ctx context.Context, id, key string, op opjournal.Op, replayed bool) (syncAnswer, error) {
 	if op.Executor != opjournal.ExecutorLane {
 		if op.Status != opjournal.StatusClosed {
 			return syncAnswer{}, requestInFlight()
