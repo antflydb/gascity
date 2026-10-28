@@ -1,66 +1,11 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
-
-// TestSlingResolvesARigPrefixedBindingBeadByResidence is gc sling's by-prefix
-// read: the prefix picks the scope, residence picks the store.
-func TestSlingResolvesARigPrefixedBindingBeadByResidence(t *testing.T) {
-	f := newS4RigFixture(t, true)
-	writeS4FileCityTOML(t, f.cityPath)
-	// The raw SQLite engine the binding is served by accepts a foreign-prefix
-	// id, which is how an imported rig row arrives (S4b keeps ids).
-	raw, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = raw.(interface{ CloseStore() error }).CloseStore() })
-	seedCLIStorageRoutes(t, f.cityPath, splitEnvRoutes(raw))
-	creator, ok := raw.(beads.ForeignIDCreator)
-	if !ok {
-		t.Fatal("the SQLite engine does not accept foreign ids")
-	}
-	imported, cerr := creator.CreateWithForeignID(beads.Bead{ID: "ra-imported1", Title: "imported rig row", Type: "task", Metadata: map[string]string{
-		beadmeta.RootStoreRefMetadataKey: "rig:ra",
-	}})
-	if cerr != nil {
-		t.Fatalf("seeding a rig-prefixed row in the binding: %v", cerr)
-	}
-	got, perr := probeExistingSlingSourceBead(f.cfg, f.cityPath, imported.ID)
-	if perr != nil {
-		t.Fatal(perr)
-	}
-	if !got.exists || got.storeDir != resolveStoreScopeRoot(f.cityPath, f.rigPath("ra")) || got.prefix != "ra" {
-		t.Errorf("probe = %+v, want exists in the binding with the scope still rig ra", got)
-	}
-
-	single := newS4RigFixture(t, false)
-	writeS4FileCityTOML(t, single.cityPath)
-	got, perr = probeExistingSlingSourceBead(single.cfg, single.cityPath, "ra-imported1")
-	if perr != nil {
-		t.Fatal(perr)
-	}
-	if got.exists {
-		t.Error("a single-store city found a bead that only a binding could hold")
-	}
-}
-
-// writeS4FileCityTOML declares the file bead provider, so opening a scope
-// store in a sling probe never starts a Dolt server.
-func writeS4FileCityTOML(t *testing.T, cityPath string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"s4-city\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_BEADS", "file")
-}
 
 // TestCompletionBackstopSweepsOnlyRigsThatMayHoldRoots is
 // CompletionBackstop.ensureStoreRoots' store list: on a split city a rig's

@@ -120,3 +120,29 @@ func TestIsGraphConvoyIDSkipsARelicFreeRig(t *testing.T) {
 		t.Error("retiring the rig leg lost the binding's graph convoy")
 	}
 }
+
+// TestWorkflowEventRootResolvesATwinToTheBinding: an id both the binding and
+// the rig store hold (an import's copy before its clear) resolves to the
+// binding's row, even though gc.root_store_ref names the rig.
+func TestWorkflowEventRootResolvesATwinToTheBinding(t *testing.T) {
+	state, binding, rig := newS4APIState(t, true)
+	rigRoot := workflowRoot(t, rig, "rig copy")
+	creator, ok := binding.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatal("the SQLite binding does not accept foreign ids")
+	}
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: rigRoot.ID, Title: "binding copy", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:         beadmeta.KindWorkflow,
+		beadmeta.RootStoreRefMetadataKey: "rig:myrig",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	step := beads.Bead{ID: "evt", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:   rigRoot.ID,
+		beadmeta.RootStoreRefMetadataKey: "rig:myrig",
+	}}
+	info, got, ok := workflowEventRoot(state, step)
+	if !ok || got.Title != "binding copy" || info.store != binding {
+		t.Fatalf("workflowEventRoot for a twin = (%v, %q), want the binding's copy", ok, got.Title)
+	}
+}

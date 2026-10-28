@@ -463,6 +463,7 @@ go_test(
         "rigidem_class_pin_test.go",
         "rigidem_hardening_test.go",
         "rigidem_test.go",
+        "root_store_ref_residence_guard_test.go",
         "run_cancel_read_your_writes_test.go",
         "run_detail_retired_sessions_test.go",
         "run_out_of_process_claim_test.go",

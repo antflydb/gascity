@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -228,4 +229,44 @@ func TestOpenStorageRoutesLocatesTheRigRecords(t *testing.T) {
 	if got := routes.rigGraphScopeForDir(root, filepath.Join(root, "rigs", "ra")); got.rig != "ra" {
 		t.Errorf("rigGraphScopeForDir = %+v, want rig ra", got)
 	}
+}
+
+// bindingGetFault fails every Get with a non-not-found error.
+type bindingGetFault struct{ beads.Store }
+
+var errBindingDown = errors.New("binding briefly unreachable")
+
+func (bindingGetFault) Get(string) (beads.Bead, error) { return beads.Bead{}, errBindingDown }
+
+// TestGraphResidenceNeverFallsBackOnAFailedBindingRead: a binding read that
+// FAILED says nothing about absence, so the relic leg must not answer it — a
+// relic copy found that way could be an import's stale twin.
+func TestGraphResidenceNeverFallsBackOnAFailedBindingRead(t *testing.T) {
+	relic := beads.NewMemStore()
+	held, err := relic.Create(beads.Bead{Title: "relic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, store, err := graphResidenceForTree(bindingGetFault{Store: beads.NewMemStore()}, relic, held.ID, nil)
+	if !errors.Is(err, errBindingDown) || store == relic {
+		t.Fatalf("graphResidenceForTree over a failing binding = (store %T, err %v), want the binding's error and no fallback", store, err)
+	}
+	// Control: a clean miss does fall back.
+	if _, store, err := graphResidenceForTree(beads.NewMemStoreFrom(100, nil, nil), relic, held.ID, nil); err != nil || store != relic {
+		t.Fatalf("clean miss = (store %T, err %v), want the relic leg", store, err)
+	}
+}
+
+// writeS4FileCityTOML declares the file bead provider and the fixture's rigs,
+// so opening a scope store never starts a Dolt server.
+func writeS4FileCityTOML(t *testing.T, f s4RigFixture) {
+	t.Helper()
+	body := "[workspace]\nname = \"s4-city\"\n\n[beads]\nprovider = \"file\"\n"
+	for _, rig := range f.cfg.Rigs {
+		body += fmt.Sprintf("\n[[rigs]]\nname = %q\npath = %q\nprefix = %q\n", rig.Name, rig.Path, rig.Prefix)
+	}
+	if err := os.WriteFile(filepath.Join(f.cityPath, "city.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
 }
