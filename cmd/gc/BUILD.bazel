@@ -1873,6 +1873,7 @@ go_test(
         "rig_control_dispatch_s4_test.go",
         "rig_convergence_s4_test.go",
         "rig_fresh_inherited_scope_test.go",
+        "rig_graph_readers_s4_test.go",
         "rig_include_imports_test.go",
         "rig_inherited_endpoint_test.go",
         "rig_pool_scale_hook_4189_test.go",
