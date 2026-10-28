@@ -45,6 +45,26 @@
 // baseline at all. Test files and generated files are not linted, and a
 // //nolint:storeclass directive is itself a finding: the baseline is the only
 // exemption.
+//
+// # Raising the baseline
+//
+// New raw-store debt is refused, not baselined. A change that cannot avoid
+// it (a slice that lands before the router or the retyping phase for its
+// package: S3b, S4a and S7 are expected to) raises the baseline this way:
+//
+//  1. Regenerate: from tools/nogo, go run ./analyzers/storeclass/cmd/storeclass-baseline -write.
+//     It refuses growth, so raise ceiling.txt by hand to the totals it
+//     reports, and rerun.
+//  2. List the new rows and why each cannot use a typed handle yet in the
+//     pull request description.
+//  3. The typed-store programme's coordinator reviews the rows and applies
+//     the storeclass/baseline-raise label. Without it the storeclass
+//     baseline workflow fails on any new or raised row or ceiling against
+//     the merge-base. CODEOWNERS (gascity-admin) gates baseline.txt,
+//     ceiling.txt, config.go and sealed_floor.txt.
+//
+// Shrinking needs no approval: regenerate with -write, which lowers the
+// ceiling, in the commit that retires the sites.
 package storeclass
 
 import (

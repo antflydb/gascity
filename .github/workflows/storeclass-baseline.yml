@@ -1,0 +1,94 @@
+name: storeclass baseline
+
+# The storeclass lint (tools/nogo/analyzers/storeclass) holds today's raw-store
+# debt in a baseline that only shrinks. nogo enforces it per package on every
+# compile; this workflow adds the two checks nogo cannot make:
+#
+#   1. The baseline and ceiling match the tree exactly, across every build-tag
+#      variant: a row for a file no Bazel target compiles (a tag-only file, a
+#      deleted file) is caught here, not by nogo.
+#   2. The growth gate: against the pull request's merge-base, any new baseline
+#      row, raised count, new ceiling row or raised ceiling fails, unless the
+#      pull request carries the storeclass/baseline-raise label. Only the
+#      typed-store programme's coordinator applies that label; the raise
+#      procedure is in the storeclass package doc.
+#
+# Labeling or unlabeling reruns the gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, 'hotfix/**', 'release/**']
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storeclass-baseline-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
+  baseline:
+    name: storeclass baseline and growth gate
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+
+      - name: Check the baseline against the tree and the merge-base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          RAISE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'storeclass/baseline-raise') }}
+        run: |
+          set -euo pipefail
+          args=(-repo "$GITHUB_WORKSPACE")
+          if [ "$EVENT_NAME" = pull_request ]; then
+            base="$(git merge-base "origin/$BASE_REF" HEAD)"
+            args+=(-growth-since "$base")
+            if [ "$RAISE_APPROVED" = true ]; then
+              args+=(-allow-raise)
+            fi
+          fi
+          cd tools/nogo
+          go run ./analyzers/storeclass/cmd/storeclass-baseline "${args[@]}"

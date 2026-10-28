@@ -16,6 +16,12 @@
 /go.sum @gastownhall/gascity-admin
 /Dockerfile* @gastownhall/gascity-admin
 /scripts/ @gastownhall/gascity-admin
+# The storeclass lint's baseline, ceiling, allowlist and sealed lists: raising
+# raw-store debt is a coordinator decision (tools/nogo/analyzers/storeclass).
+/tools/nogo/analyzers/storeclass/config.go @gastownhall/gascity-admin
+/tools/nogo/analyzers/storeclass/baseline.txt @gastownhall/gascity-admin
+/tools/nogo/analyzers/storeclass/ceiling.txt @gastownhall/gascity-admin
+/tools/nogo/analyzers/storeclass/sealed_floor.txt @gastownhall/gascity-admin
 /contrib/k8s/ @gastownhall/gascity-admin
 /internal/buildimage/ @gastownhall/gascity-admin
 /internal/api/dashboardspa/web/package.json @gastownhall/gascity-admin

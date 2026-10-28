@@ -15,6 +15,11 @@
 // lacks, or when a Sealed package would get a row. -init writes the first
 // ceiling and refuses once one exists.
 //
+// -growth-since <ref> (CI passes the pull request's merge-base) also fails
+// on any new or raised baseline row or ceiling row against ref, unless
+// -allow-raise: the storeclass/baseline-raise label (see the storeclass
+// package doc for the raise procedure).
+//
 // Run it from tools/nogo:
 //
 //	go run ./analyzers/storeclass/cmd/storeclass-baseline -write
