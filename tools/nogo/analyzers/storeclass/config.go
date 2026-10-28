@@ -1,8 +1,10 @@
 package storeclass
 
 import (
-	_ "embed"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 )
 
 const (
@@ -10,11 +12,35 @@ const (
 	beads   = gascity + "internal/beads"
 )
 
-//go:embed baseline.txt
-var baselineText string
+// MainRepoDataEnv names the files rules_go hands a main-repository nogo
+// action (third_party/patches/rules_go_nogo_main_repo_data.patch), comma
+// separated, relative to the execution root. The baseline is one of them
+// rather than part of the nogo binary, so editing it re-lints only gascity
+// packages.
+const MainRepoDataEnv = "GC_NOGO_MAIN_REPO_DATA"
 
-// BaselineText is the embedded baseline, as generated.
-func BaselineText() string { return baselineText }
+// LoadBaselineFromEnv reads the baseline from the MainRepoDataEnv file
+// ending in storeclass/baseline.txt.
+func LoadBaselineFromEnv() (map[Key]int, error) {
+	files := os.Getenv(MainRepoDataEnv)
+	if files == "" {
+		return nil, errors.New("storeclass: no baseline: " + MainRepoDataEnv + " is unset (nogo must run through the patched rules_go)")
+	}
+	for _, f := range strings.Split(files, ",") {
+		if strings.HasSuffix(f, "storeclass/baseline.txt") {
+			text, err := os.ReadFile(f)
+			if err != nil {
+				return nil, fmt.Errorf("storeclass: reading the baseline: %w", err)
+			}
+			rows, err := ParseBaseline(string(text))
+			if err != nil {
+				return nil, fmt.Errorf("storeclass: %s: %w", f, err)
+			}
+			return rows, nil
+		}
+	}
+	return nil, fmt.Errorf("storeclass: no storeclass/baseline.txt among %s=%s", MainRepoDataEnv, files)
+}
 
 // Default is the gascity configuration nogo runs.
 var Default = Config{
@@ -63,7 +89,7 @@ var Default = Config{
 	Sealed: []string{
 		"internal/workladder",
 	},
-	Baseline: mustParseBaseline(baselineText),
+	LoadBaseline: LoadBaselineFromEnv,
 }
 
 // rawRules are the raw-signature rules: the migration engine takes physical
@@ -72,11 +98,3 @@ var rawRules = []Rule{RawParam, RawResult, RawField, RawVar, RawType}
 
 // Analyzer runs the rules with Default.
 var Analyzer = New(Default)
-
-func mustParseBaseline(text string) map[Key]int {
-	rows, err := ParseBaseline(text)
-	if err != nil {
-		panic(fmt.Sprintf("storeclass: embedded baseline.txt: %v", err))
-	}
-	return rows
-}

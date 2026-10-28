@@ -38,6 +38,7 @@ func TestNolintNeverSuppressesStoreclass(t *testing.T) {
 		"with a space":                  imp + "func zzNamed(_ beads.Store) {} // nolint:storeclass\n",
 		"on the line above":             imp + "//nolint:storeclass // why\nfunc zzNamed(_ beads.Store) {}\n",
 		"none (control)":                imp + "func zzNamed(_ beads.Store) {}\n",
+		"no baseline input":             imp + "func zzNamed(_ beads.Store) {}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -49,7 +50,23 @@ func TestNolintNeverSuppressesStoreclass(t *testing.T) {
 			if err := os.WriteFile(cfg, []byte("packagefile github.com/gastownhall/gascity/internal/beads="+export+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			baseline := filepath.Join(dir, "storeclass", "baseline.txt")
+			if err := os.MkdirAll(filepath.Dir(baseline), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(baseline, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
 			cmd := exec.Command(nogo, "-p", "github.com/gastownhall/gascity/cmd/nolintfixture", "-importcfg", cfg, "-go_version", "1.27.3", file)
+			cmd.Env = append(os.Environ(), "GC_NOGO_MAIN_REPO_DATA="+baseline)
+			if name == "no baseline input" {
+				cmd.Env = append(os.Environ(), "GC_NOGO_MAIN_REPO_DATA=")
+				out, err := cmd.CombinedOutput()
+				if err == nil || !strings.Contains(string(out), "storeclass: no baseline") {
+					t.Fatalf("nogo without a baseline input: err %v, output:\n%s", err, out)
+				}
+				return
+			}
 			out, err := cmd.CombinedOutput()
 			var exit *exec.ExitError
 			if !errors.As(err, &exit) {

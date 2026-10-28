@@ -14,6 +14,19 @@ import (
 //go:embed ceiling.txt
 var ceilingText string
 
+//go:embed baseline.txt
+var baselineText string
+
+// baseline is baseline.txt as the analyzer loads it.
+func baseline(t *testing.T) map[storeclass.Key]int {
+	t.Helper()
+	rows, err := storeclass.ParseBaseline(baselineText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
 // sealedFloorText is every package ever sealed (sealed_floor.txt, one per
 // line). Default.Sealed must keep each: a sealed package never reopens. Seal a
 // package by adding it to both; CODEOWNERS gates both files.
@@ -25,7 +38,7 @@ var sealedFloorText string
 // generator writes, so a hand edit that reorders, duplicates or zeroes a row
 // fails here before review has to spot it.
 func TestBaselineIsCanonical(t *testing.T) {
-	if got, want := storeclass.BaselineText(), storeclass.FormatBaseline(storeclass.Default.Baseline); got != want {
+	if got, want := baselineText, storeclass.FormatBaseline(baseline(t)); got != want {
 		t.Fatal("baseline.txt is not canonical: regenerate it with go run ./analyzers/storeclass/cmd/storeclass-baseline -write (from tools/nogo)")
 	}
 	ceiling, err := storeclass.ParseCeiling(ceilingText)
@@ -46,7 +59,7 @@ func TestBaselineOnlyShrinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	totals := storeclass.Totals(storeclass.Default.Baseline)
+	totals := storeclass.Totals(baseline(t))
 	var keys []storeclass.CeilingKey
 	for k := range totals {
 		keys = append(keys, k)
@@ -85,7 +98,7 @@ func TestSealedOnlyGrows(t *testing.T) {
 	if !slices.IsSorted(sealed) || len(slices.Compact(slices.Clone(sealed))) != len(sealed) {
 		t.Errorf("Default.Sealed is not sorted and unique: %v", sealed)
 	}
-	for k := range storeclass.Default.Baseline {
+	for k := range baseline(t) {
 		if slices.Contains(sealed, k.Package()) {
 			t.Errorf("sealed package %s has a baseline row: %s", k.Package(), k)
 		}
@@ -95,7 +108,7 @@ func TestSealedOnlyGrows(t *testing.T) {
 // TestBaselineHasNoAllowlistedRows: a row the allowlist covers is dead
 // weight that would hide a later removal of the allowlist entry.
 func TestBaselineHasNoAllowlistedRows(t *testing.T) {
-	for k := range storeclass.Default.Baseline {
+	for k := range baseline(t) {
 		for _, a := range storeclass.Default.Allow {
 			if allowCovers(a, k) {
 				t.Errorf("baseline row %s is allowlisted (%s %s)", k, a.Package, a.File)

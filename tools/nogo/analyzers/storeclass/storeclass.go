@@ -136,7 +136,10 @@ type Config struct {
 	Markers          []string // federated/relic read marker functions
 	Allow            []Allow
 	Sealed           []string    // module-relative packages with no baseline
-	Baseline         map[Key]int // the pinned counts
+	Baseline         map[Key]int // the pinned counts, or nil to load them
+	// LoadBaseline, when Baseline is nil, loads the pinned counts the first
+	// time a module package is checked.
+	LoadBaseline func() (map[Key]int, error)
 }
 
 // Finding is one site: its baseline key, where it is, and what it is.
@@ -148,10 +151,23 @@ type Finding struct {
 
 // New builds the analyzer for cfg.
 func New(cfg Config) *analysis.Analyzer {
+	var once sync.Once
+	var loaded map[Key]int
+	var loadErr error
 	return &analysis.Analyzer{
 		Name: "storeclass",
 		Doc:  "reports raw beads.Store signatures, handle mints, unwraps and capability assertions outside the residency layer, against a shrink-only baseline (typed-stores T1)",
-		Run:  func(pass *analysis.Pass) (any, error) { return nil, run(pass, cfg, nil) },
+		Run: func(pass *analysis.Pass) (any, error) {
+			c := cfg
+			if _, ok := relPackage(c, pass.Pkg.Path()); ok && c.Baseline == nil && c.LoadBaseline != nil {
+				once.Do(func() { loaded, loadErr = c.LoadBaseline() })
+				if loadErr != nil {
+					return nil, loadErr
+				}
+				c.Baseline = loaded
+			}
+			return nil, run(pass, c, nil)
+		},
 	}
 }
 

@@ -2,6 +2,7 @@ package storeclass_test
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -534,5 +535,44 @@ func TestStoreclassNolintIsAFinding(t *testing.T) {
 	}
 	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], "callers.go:1 ") {
 		t.Fatalf("nolint findings = %q", msgs)
+	}
+}
+
+func TestLoadBaselineFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/tools/nogo/analyzers/storeclass/baseline.txt"
+	if err := os.MkdirAll(dir+"/tools/nogo/analyzers/storeclass", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("cmd/gc/a.go\tf\traw-param\t2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(storeclass.MainRepoDataEnv, dir+"/other.txt,"+path)
+	rows, err := storeclass.LoadBaselineFromEnv()
+	if err != nil || rows[storeclass.Key{Path: "cmd/gc/a.go", Func: "f", Rule: storeclass.RawParam}] != 2 {
+		t.Fatalf("rows = %v, %v", rows, err)
+	}
+	t.Setenv(storeclass.MainRepoDataEnv, "")
+	if _, err := storeclass.LoadBaselineFromEnv(); err == nil {
+		t.Fatal("an unset baseline input loaded")
+	}
+}
+
+// TestStoreclassLoadsTheBaselineOnce: with no Baseline, the analyzer loads
+// it for module packages, and a load failure fails the pass loudly.
+func TestStoreclassLoadsTheBaselineOnce(t *testing.T) {
+	cfg := config()
+	loads := 0
+	cfg.LoadBaseline = func() (map[storeclass.Key]int, error) {
+		loads++
+		return map[storeclass.Key]int{{Path: "cmd/gc/callers.go", Func: "two", Rule: storeclass.RawParam}: 2}, nil
+	}
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(cfg), graph(callers)) {
+		if d.Line == lineOf(callers, "func two(") {
+			t.Fatalf("a loaded pin did not silence %s", d.Message)
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("loads = %d, want 1", loads)
 	}
 }
