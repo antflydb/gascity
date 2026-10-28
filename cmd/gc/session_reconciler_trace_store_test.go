@@ -338,6 +338,88 @@ func TestTraceStoreFailedRollbackAbandonsSegment(t *testing.T) {
 	}
 }
 
+// TestTraceStoreRecoveryDistrustsOutdatedHead covers a head that a later
+// batch outdated: the batch was synced to a segment the head does not
+// describe, and the process died (or the head write failed) before the next
+// head was saved. The next process must not reuse that batch's seqs.
+func TestTraceStoreRecoveryDistrustsOutdatedHead(t *testing.T) {
+	cases := []struct {
+		name string
+		// prepare leaves on disk the head the case is about.
+		prepare func(t *testing.T, store *SessionReconcilerTraceStore, now time.Time)
+	}{
+		{"head saved by recovery", func(*testing.T, *SessionReconcilerTraceStore, time.Time) {}},
+		{"head saved when a failed rollback abandoned the segment", func(t *testing.T, store *SessionReconcilerTraceStore, now time.Time) {
+			if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-a", now)}, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch a: %v", err)
+			}
+			injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, errors.New("truncate refused"))
+			failed := []SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-b", now.Add(time.Second))}
+			if err := store.AppendBatch(failed, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
+				t.Fatalf("append batch b error = %v, want ENOSPC", err)
+			}
+		}},
+		{"head naming a segment older than the newest", func(t *testing.T, store *SessionReconcilerTraceStore, now time.Time) {
+			if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-a", now)}, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch a: %v", err)
+			}
+			// The segment is full, so the next batch rotates to a new one.
+			store.currentBatches = sessionReconcilerTraceMaxBatches
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			root := traceStoreTestRoot(cityDir)
+			store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+			if err != nil {
+				t.Fatalf("new store: %v", err)
+			}
+			now := time.Now().UTC()
+			tc.prepare(t, store, now)
+			headPath := filepath.Join(root, sessionReconcilerTraceHeadFile)
+			outdated, err := os.ReadFile(headPath)
+			if err != nil {
+				t.Fatalf("read head: %v", err)
+			}
+			if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-c", now.Add(2*time.Second))}, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch c: %v", err)
+			}
+			commitC, err := store.LatestSeq()
+			if err != nil {
+				t.Fatalf("LatestSeq: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			// The head describing batch c never reached the disk.
+			if err := os.WriteFile(headPath, outdated, sessionReconcilerTraceOwnerFilePerm); err != nil {
+				t.Fatalf("restore outdated head: %v", err)
+			}
+
+			reopened, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+			if err != nil {
+				t.Fatalf("reopen store: %v", err)
+			}
+			defer reopened.Close() //nolint:errcheck
+			if latest, err := reopened.LatestSeq(); err != nil || latest != commitC {
+				t.Fatalf("LatestSeq after reopen = %d, %v; want %d (batch c's commit)", latest, err, commitC)
+			}
+			if err := reopened.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-d", now.Add(3*time.Second))}, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch d: %v", err)
+			}
+			records, err := ReadTraceRecords(root, TraceFilter{})
+			if err != nil {
+				t.Fatalf("ReadTraceRecords: %v", err)
+			}
+			assertTraceSeqsUnique(t, records)
+			if counts := traceRecordCounts(records); counts["cycle-c"] != 2 || counts["cycle-d"] != 2 {
+				t.Fatalf("records by trace = %v, want cycle-c=2 and cycle-d=2", counts)
+			}
+		})
+	}
+}
+
 // traceTestBatchLines renders a committed batch the way AppendBatch writes
 // it: n record lines with seqs from firstSeq, then the batch_commit line.
 func traceTestBatchLines(t *testing.T, traceID string, firstSeq uint64, n int) [][]byte {
@@ -448,6 +530,34 @@ func TestTraceReaderSkipsTornBatchGluedToNextBatch(t *testing.T) {
 				t.Fatalf("records after seq 3 by trace = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestTraceReaderKeepsVerifiedBatchAfterTornLine builds an old-writer double
+// failure: batch b cut inside its second record, batch c (reusing b's seqs)
+// cut right after its first record line, which glues onto b's torn bytes,
+// then batch d (reusing them again) written whole. d is the first commit
+// after the torn line and verifies on its own, so the reader keeps it.
+func TestTraceReaderKeepsVerifiedBatchAfterTornLine(t *testing.T) {
+	b := traceTestBatchLines(t, "cycle-b", 4, 2)
+	c := traceTestBatchLines(t, "cycle-c", 4, 2)
+	var data []byte
+	data = append(data, bytes.Join(traceTestBatchLines(t, "cycle-a", 1, 2), nil)...)
+	data = append(data, b[0]...)
+	data = append(data, b[1][:30]...)
+	data = append(data, c[0]...)
+	data = append(data, bytes.Join(traceTestBatchLines(t, "cycle-d", 4, 2), nil)...)
+	root := t.TempDir()
+	writeTraceSegmentFile(t, root, data)
+
+	records, err := ReadTraceRecords(root, TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	assertTraceSeqsUnique(t, records)
+	want := map[string]int{"cycle-a": 3, "cycle-d": 3}
+	if got := traceRecordCounts(records); len(got) != len(want) || got["cycle-a"] != 3 || got["cycle-d"] != 3 {
+		t.Fatalf("records by trace = %v, want %v", got, want)
 	}
 }
 

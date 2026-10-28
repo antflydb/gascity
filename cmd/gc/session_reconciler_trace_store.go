@@ -77,12 +77,14 @@ func newSessionReconcilerTraceStore(cityPath string, stderr io.Writer) (*Session
 	if err := store.ensureRoot(); err != nil {
 		return nil, err
 	}
-	if ok, err := store.recoverFromHead(); err != nil {
+	floor, ok, err := store.recoverFromHead()
+	if err != nil {
 		return nil, err
-	} else if ok {
+	}
+	if ok {
 		return store, nil
 	}
-	if err := store.recoverExisting(); err != nil {
+	if err := store.recoverExisting(floor); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -102,13 +104,15 @@ func (s *SessionReconcilerTraceStore) ensureRoot() error {
 	return nil
 }
 
-func (s *SessionReconcilerTraceStore) recoverExisting() error {
-	paths, err := filepath.Glob(filepath.Join(s.rootDir, sessionReconcilerTraceSegments, "*", "*", "*", "*.jsonl"))
+// recoverExisting sets seq to the highest verified batch commit in any
+// segment, or to floor when that is higher, and quarantines segments that do
+// not read.
+func (s *SessionReconcilerTraceStore) recoverExisting(floor uint64) error {
+	paths, err := traceSegmentPaths(s.rootDir)
 	if err != nil {
-		return fmt.Errorf("glob trace segments: %w", err)
+		return err
 	}
-	sort.Strings(paths)
-	var maxSeq uint64
+	maxSeq := floor
 	for _, path := range paths {
 		seq, ok, scanErr := scanTraceSegment(path)
 		if scanErr != nil {
@@ -126,6 +130,18 @@ func (s *SessionReconcilerTraceStore) recoverExisting() error {
 		fmt.Fprintf(s.stderr, "trace: save head: %v\n", err) //nolint:errcheck
 	}
 	return nil
+}
+
+// traceSegmentPaths lists the segments under rootDir oldest first: day
+// directories and zero-padded segment numbers sort in the order they were
+// written.
+func traceSegmentPaths(rootDir string) ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(rootDir, sessionReconcilerTraceSegments, "*", "*", "*", "*.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("glob trace segments: %w", err)
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func scanTraceSegment(path string) (maxSeq uint64, ok bool, err error) {
@@ -214,31 +230,43 @@ func countBatchesInSegment(path string) int {
 	return count
 }
 
-func (s *SessionReconcilerTraceStore) recoverFromHead() (bool, error) {
+// recoverFromHead takes seq from head.json when the head still describes the
+// newest segment: it names that segment and the segment's size matches. Any
+// other head may predate a batch that was synced before the process died, or
+// before a head write failed, so it reports false and returns the head's seq
+// as the floor for a scan of every segment. The floor keeps the seqs a head
+// retired (see discardFailedWriteLocked) from being issued again.
+func (s *SessionReconcilerTraceStore) recoverFromHead() (uint64, bool, error) {
 	head, err := s.loadHead()
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return 0, false, nil
 		}
-		return false, err
+		return 0, false, err
 	}
 	if head.CurrentPath == "" {
-		s.seq = head.Seq
-		return true, nil
+		return head.Seq, false, nil
 	}
 	path := filepath.Join(s.rootDir, filepath.FromSlash(head.CurrentPath))
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return head.Seq, false, nil
 		}
-		return false, err
+		return 0, false, err
 	}
 	if info.Size() != head.CurrentBytes {
-		return false, nil
+		return head.Seq, false, nil
+	}
+	paths, err := traceSegmentPaths(s.rootDir)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(paths) == 0 || paths[len(paths)-1] != path {
+		return head.Seq, false, nil
 	}
 	s.seq = head.Seq
-	return true, nil
+	return head.Seq, true, nil
 }
 
 func (s *SessionReconcilerTraceStore) loadHead() (sessionReconcilerTraceHead, error) {
@@ -636,12 +664,10 @@ func sortTraceArms(arms []TraceArm) {
 }
 
 func ReadTraceRecords(rootDir string, filter TraceFilter) ([]SessionReconcilerTraceRecord, error) {
-	segmentRoot := filepath.Join(rootDir, sessionReconcilerTraceSegments)
-	paths, err := filepath.Glob(filepath.Join(segmentRoot, "*", "*", "*", "*.jsonl"))
+	paths, err := traceSegmentPaths(rootDir)
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(paths)
 	if filter.SeqAfter > 0 && len(paths) > 0 {
 		var filtered []string
 		for i := len(paths) - 1; i >= 0; i-- {
