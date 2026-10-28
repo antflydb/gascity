@@ -139,23 +139,23 @@ func TestSessionListJSONRouteConformance(t *testing.T) {
 		escapeHatch bool
 		pid         int
 		mode        controllerHostingMode
-		supervisor  bool // the supervisor client resolves to supervisorClient
+		supervisor  bool // the supervisor client resolves to supervisorClient; on a row that must stay local it proves the route, not a nil client, kept it off the API
 		grants      bool
 		args        []string
 		rendering   string
 		empty       bool
 		route       string
 	}{
-		{name: "supervisor-hosted", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
-		{name: "supervisor-hosted-requiring-grants", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, grants: true, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
-		{name: "supervisor-hosted-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
+		{name: "supervisor-hosted", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
+		{name: "supervisor-hosted-requiring-grants", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, grants: true, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
+		{name: "supervisor-hosted-with-api-port", city: apiCity, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
 		{name: "standalone-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingStandalone, rendering: "api", route: toAPI},
 		{name: "unknown-hosting-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingUnknown, rendering: "api", route: toAPI},
 		{name: "no-controller-supervisor-reachable", city: h.cityPath, supervisor: true, rendering: "api", route: toAPI},
 		{name: "no-controller-supervisor-unreachable", city: h.cityPath, rendering: "local", route: "route=fallback reason=controller-down"},
-		{name: "escape-hatch", city: h.cityPath, escapeHatch: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=escape-hatch"},
+		{name: "escape-hatch", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=escape-hatch"},
 		{name: "api-empty-list", city: h.cityPath, supervisor: true, args: []string{noMatch}, rendering: "api", empty: true, route: toAPI},
-		{name: "local-empty-list", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
+		{name: "local-empty-list", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
