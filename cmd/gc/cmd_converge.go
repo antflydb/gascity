@@ -874,7 +874,6 @@ type convergeScopeReader interface {
 // the city root, where its path IS the city path, and the controller's scope
 // map keys on the rig name.
 func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) convergeScopeReader {
-	_ = storePath
 	routes := cliStorageRoutes(cityPath)
 	scope := cityGraphScope()
 	if rigName != "" {
@@ -888,7 +887,10 @@ func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) 
 	}
 	adapter := newConvergenceStoreAdapter(graphPlacementForScope(routes, nil, cityPath, scope, store), nil, true)
 	adapter.scopeRef = scope.rootStoreRef("")
-	if graphRelicLegForScope(routes, scope) {
+	// storePath is the scope's root directory. A rig registered at the city
+	// root has the city's store, whose rows are the city's retained copies,
+	// so it gets no relic leg (as buildConvergenceScopes).
+	if graphRelicLegForScope(routes, scope) && !scopeIsCity(cityPath, storePath) {
 		adapter.relic = store
 	}
 	return convergeAdapterReader{adapter: adapter}

@@ -117,7 +117,13 @@ func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
 		rig := cr.newConvergenceScope(
 			rigName, graphStore, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName), true)
 		rig.adapter.scopeRef = scope.rootStoreRef(cr.cityName)
-		if graphRelicLegForScope(cr.storageRoutes, scope) {
+		// A rig whose store IS the city's (a rig registered at the city root)
+		// has no relic leg: that store holds the city's retained copies, and
+		// reading them as the rig's loops would drive frozen city loops
+		// (design §3.2). graphRelicLegForScope answers false on refused routes,
+		// so a refused city gets no relic leg either; its binding refuses every
+		// read, which is the standing refusal the boot gate already reports.
+		if graphRelicLegForScope(cr.storageRoutes, scope) && !rigStoreIsCityStore(cr.cityPath, rigStorePaths[rigName], store, cityStore) {
 			rig.adapter.relic = store
 		}
 		scopes[rigName] = rig
@@ -690,4 +696,13 @@ func currentUsername() string {
 		return "unknown"
 	}
 	return u.Username
+}
+
+// rigStoreIsCityStore reports whether a rig's store is the city's own: the
+// same handle, or a rig registered at the city root.
+func rigStoreIsCityStore(cityPath, rigStorePath string, rigStore, cityStore beads.Store) bool {
+	if rigStore == cityStore {
+		return true
+	}
+	return rigStorePath != "" && scopeIsCity(cityPath, rigStorePath)
 }

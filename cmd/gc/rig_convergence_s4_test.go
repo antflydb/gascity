@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
@@ -218,5 +220,128 @@ func TestConvergeCLIReadsTheScopeTheControllerWrites(t *testing.T) {
 	single := newS4RigFixture(t, false)
 	if got := convergeScopeStore(single.cityPath, "ra", single.rigPath("ra"), single.rigs["ra"]); got != convergeScopeReader(single.rigs["ra"]) {
 		t.Errorf("single-store converge reader = %T, want the rig store itself", got)
+	}
+}
+
+// TestConvergenceScopesRefuseAnotherScopesLoop is the isolation half of the
+// shared binding: the city scope and a second rig scope must fail every by-id
+// call on rig ra's loop — no read, no write, no index entry, no pour — so a
+// `gc converge iterate|approve|stop|retry <id>` with the wrong --rig cannot
+// drive another scope's loop.
+func TestConvergenceScopesRefuseAnotherScopesLoop(t *testing.T) {
+	f := newS4RigFixture(t, true)
+	scopes := f.runtime().buildConvergenceScopes()
+	raRoot := convergenceRootIn(t, scopes["ra"], "ra loop")
+	for _, field := range [][2]string{{convergence.FieldState, convergence.StateActive}, {convergence.FieldTarget, "worker"}, {convergence.FieldMaxIterations, "3"}, {convergence.FieldFormula, convergenceVaporFormula}, {convergence.FieldGateMode, convergence.GateModeManual}} {
+		if err := f.binding.SetMetadata(raRoot.ID, field[0], field[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := beadByID(t, f.binding, raRoot.ID)
+
+	for _, name := range []string{"", "rb"} {
+		scope := scopes[name]
+		a := scope.adapter
+		if err := a.populateIndex(); err != nil {
+			t.Fatal(err)
+		}
+		mustRefuse := func(call string, err error) {
+			t.Helper()
+			if err == nil {
+				t.Errorf("scope %q: %s on rig ra's loop %s succeeded; another scope's loop must read as not found", name, call, raRoot.ID)
+			} else if !errors.Is(err, beads.ErrNotFound) {
+				t.Errorf("scope %q: %s = %v, want a not-found", name, call, err)
+			}
+		}
+		_, err := a.GetBead(raRoot.ID)
+		mustRefuse("GetBead", err)
+		_, err = a.GetMetadata(raRoot.ID)
+		mustRefuse("GetMetadata", err)
+		mustRefuse("SetMetadata", a.SetMetadata(raRoot.ID, convergence.FieldState, convergence.StateActive))
+		mustRefuse("CloseBead", a.CloseBead(raRoot.ID, "x"))
+		mustRefuse("DeleteBead", a.DeleteBead(raRoot.ID))
+		_, err = a.Children(raRoot.ID)
+		mustRefuse("Children", err)
+		_, _, err = a.FindByIdempotencyKey("converge:" + raRoot.ID + ":iter:1")
+		mustRefuse("FindByIdempotencyKey", err)
+		_, err = a.PourWisp(raRoot.ID, convergenceVaporFormula, "converge:"+raRoot.ID+":iter:1", nil, "")
+		mustRefuse("PourWisp", err)
+		mustRefuse("ActivateWisp", a.ActivateWisp(raRoot.ID))
+		if _, indexed := a.activeIndex[raRoot.ID]; indexed {
+			t.Errorf("scope %q indexed rig ra's loop into its active set; it would be ticked twice", name)
+		}
+		ctx := context.Background()
+		_, err = scope.handler.ApproveHandler(ctx, raRoot.ID, "op", "")
+		mustRefuse("ApproveHandler", err)
+		_, err = scope.handler.IterateHandler(ctx, raRoot.ID, "op", "")
+		mustRefuse("IterateHandler", err)
+		_, err = scope.handler.StopHandler(ctx, raRoot.ID, "op", "")
+		mustRefuse("StopHandler", err)
+		_, err = scope.handler.RetryHandler(ctx, raRoot.ID, "op", 1)
+		mustRefuse("RetryHandler", err)
+	}
+	after := beadByID(t, f.binding, raRoot.ID)
+	if after.Status != before.Status || len(after.Metadata) != len(before.Metadata) {
+		t.Errorf("rig ra's loop changed under other scopes' calls: %+v -> %+v", before, after)
+	}
+	if kids, err := f.binding.List(beads.ListQuery{ParentID: raRoot.ID}); err != nil || len(kids) != 0 {
+		t.Errorf("other scopes poured %d wisp(s) under rig ra's loop (err=%v)", len(kids), err)
+	}
+	// Control: rig ra's own scope still reaches it.
+	if _, err := scopes["ra"].adapter.GetBead(raRoot.ID); err != nil {
+		t.Fatalf("rig ra cannot read its own loop: %v", err)
+	}
+}
+
+// TestPreS4PouredRigLoopKeepsPouringWhereItLives: an in-flight v1 poured loop
+// in the rig's own store pours its next iteration there (the rig's work
+// ledger, so nothing is stranded), while a NEW rig loop with the same formula
+// is refused.
+func TestPreS4PouredRigLoopKeepsPouringWhereItLives(t *testing.T) {
+	f := newS4RigFixture(t, true)
+	legacy, err := f.rigs["ra"].Create(beads.Bead{Title: "pre-S4 poured loop", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra := f.runtime().buildConvergenceScopes()["ra"]
+	before := countBeads(t, f.binding)
+	assertConvergencePours(t, ra, legacy, convergencePouredFormula, 1, f.rigs["ra"], "rig ra (pre-S4 poured)")
+	if after := countBeads(t, f.binding); after != before {
+		t.Errorf("a relic loop's poured iteration wrote %d bead(s) to the binding", after-before)
+	}
+	fresh := convergenceRootIn(t, ra, "new ra loop")
+	if _, err := ra.adapter.PourWisp(fresh.ID, convergencePouredFormula, "converge:"+fresh.ID+":iter:1", nil, ""); err == nil {
+		t.Error("a NEW rig loop poured a v1 poured formula into the binding")
+	}
+}
+
+// TestRigAtCityRootHasNoRelicLeg: a rig registered at the city root has the
+// city's store, whose convergence rows are the city's retained copies; it must
+// not read them as its own loops (design §3.2), in the controller or the CLI.
+func TestRigAtCityRootHasNoRelicLeg(t *testing.T) {
+	f := newS4RigFixture(t, true)
+	f.cfg.Rigs = append(f.cfg.Rigs, config.Rig{Name: "root", Path: f.cityPath, Prefix: "gc"})
+	f.rigs["root"] = f.work
+	retained, err := f.work.Create(beads.Bead{Title: "retained city loop", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := f.runtime().buildConvergenceScopes()["root"]
+	if scope == nil {
+		t.Fatal("no scope for the city-root rig")
+	}
+	if scope.adapter.relic != nil {
+		t.Fatal("a rig whose store is the city's got a relic leg")
+	}
+	if _, err := scope.adapter.GetBead(retained.ID); err == nil {
+		t.Error("the city-root rig reads the city's retained loop copy")
+	}
+	reader := convergeScopeStore(f.cityPath, "root", f.cityPath, f.work)
+	listed, err := reader.List(beads.ListQuery{Type: "convergence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(listed, retained.ID) {
+		t.Error("gc converge list --rig root lists the city's retained loop copy")
 	}
 }

@@ -108,25 +108,41 @@ func (a *convergenceStoreAdapter) listConvergence() ([]beads.Bead, error) {
 }
 
 // get reads id by residence: the placement store first, then the relic leg.
+//
+// The placement store is shared by every scope on a split city, so a row it
+// returns for another scope reads as not found here: the city scope, or a
+// second rig, must never read, write, index or pour on rig ra's loop.
 func (a *convergenceStoreAdapter) get(id string) (beads.Bead, beads.Store, error) {
-	return graphResidenceForTree(a.store, a.relic, id)
+	var accept func(beads.Bead) bool
+	if a.scopeRef != "" {
+		accept = a.inScope
+	}
+	return graphResidenceForTree(a.store, a.relic, id, accept)
 }
 
 // storeHolding is R-S4.2 for this scope: the store a write on id, or on a
 // bead extending id's tree, goes to. Without a relic leg that is always the
 // placement store and nothing is read.
+//
+// A bead the shared binding holds for ANOTHER scope is refused (not found),
+// never written: that is what keeps `gc converge ... --rig` with the wrong rig
+// from driving another scope's loop. A bead no leg holds resolves to the
+// placement store, whose own operation then reports the miss as before.
 func (a *convergenceStoreAdapter) storeHolding(id string) (beads.Store, error) {
-	if a.relic == nil {
+	if a.relic == nil && a.scopeRef == "" {
 		return a.store, nil
 	}
 	_, store, err := a.get(id)
-	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return a.store, nil
-		}
+	switch {
+	case err == nil:
+		return store, nil
+	case errors.Is(err, errGraphOutOfScope):
+		return nil, err
+	case errors.Is(err, beads.ErrNotFound):
+		return a.store, nil
+	default:
 		return nil, err
 	}
-	return store, nil
 }
 
 // populateIndex performs a one-time scan of all beads to build the
@@ -322,7 +338,15 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formulaName, idempotencyKey
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
 		return "", err
 	}
-	if a.relocated && recipeCoordClass(recipe) != coordclass.ClassGraph {
+	target, err := a.storeHolding(parentID)
+	if err != nil {
+		return "", fmt.Errorf("resolving the store holding convergence root %q: %w", parentID, err)
+	}
+	// A loop a rig created in its own store before S4 (a relic) keeps pouring
+	// where it lives: that store is the rig's work ledger, so a work-class pour
+	// there strands nothing, and refusing it would stop an in-flight loop with
+	// advice it cannot take. Only a pour into the binding is refused.
+	if a.relocated && target == a.store && recipeCoordClass(recipe) != coordclass.ClassGraph {
 		// Refuse rather than split the molecule off its parent. The convergence
 		// root is graph class and lives in the graph binding; a work-class
 		// molecule poured there is a strand the per-boot containment re-check
@@ -334,10 +358,6 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formulaName, idempotencyKey
 		// roots live in the binding too, so a rig scope is no longer a place a
 		// poured formula can go.
 		return "", fmt.Errorf("convergence formula %q compiles to work-class beads (a v1 poured formula), which this city cannot pour: it serves the graph class from its own binding, where every convergence loop lives at every scope, city and rig alike, and a work-class molecule there would be a stranded write; make the formula root-only (phase = \"vapor\") so it compiles to a graph-class wisp", formulaName)
-	}
-	target, err := a.storeHolding(parentID)
-	if err != nil {
-		return "", fmt.Errorf("resolving the store holding convergence root %q: %w", parentID, err)
 	}
 	if a.scopeRef != "" && target == a.store {
 		// Every graph row carries its scope (S4 §2.2): the wisp shares the

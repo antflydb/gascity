@@ -651,17 +651,6 @@ func probeExistingSlingSourceBead(cfg *config.City, cityPath, beadID string) (ex
 	if err != nil {
 		return existingSlingSourceBead{}, fmt.Errorf("opening store %s: %w", storeDir, err)
 	}
-	// The prefix selects the SCOPE (storeDir, prefix), never the bead's
-	// location. On a split city a rig-prefixed id may be a graph bead the city
-	// binding holds (a relic of a rig tree, or a row an import moved), so the
-	// bead is resolved by residence: the binding first, then the scope store.
-	// A city that relocates nothing has no binding and reads the scope store
-	// exactly as before.
-	if binding := cityGraphClassBinding(cityPath); binding != nil {
-		if store, err = classRoutedStoreForIDIn(binding, beadID, store); err != nil {
-			return existingSlingSourceBead{}, fmt.Errorf("checking bead candidate %q: %w", beadID, err)
-		}
-	}
 	exists, err := sling.ProbeBeadInStore(store, beadID)
 	if err != nil {
 		return existingSlingSourceBead{}, fmt.Errorf("checking bead candidate %q: %w", beadID, err)

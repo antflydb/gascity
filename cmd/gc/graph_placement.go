@@ -29,6 +29,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,7 +77,7 @@ func (s graphScope) rootStoreRef(cityName string) string {
 // signature so T2 can move this to Stores.Graph(scope) without changing a
 // caller.
 func graphPlacementForScope(routes *storageRoutes, cfg *config.City, cityPath string, scope graphScope, scopeStore beads.Store) beads.Store {
-	_ = scope
+	_ = scope // deliberately unused: the rule is scope-independent; kept for Stores.Graph(scope) (T2)
 	return resolveGraphStore(routes, scopeStore, cfg, cityPath, nil)
 }
 
@@ -130,10 +131,21 @@ func splitRigGraphRelicFree(routes *storageRoutes, rig string) bool {
 // first; relic, when non-nil (graphRelicLegForScope), answers only a clean
 // miss there. It returns the bead and the store that holds it.
 //
-// An error is a read that failed, never absence; a miss on both legs joins
-// both not-found errors so errors.Is(err, beads.ErrNotFound) still holds.
-func graphResidenceForTree(placement, relic beads.Store, id string) (beads.Bead, beads.Store, error) {
+// accept, when non-nil, is the caller's scope check on a row the placement
+// store returned: the binding is shared by every scope, so a row of another
+// scope is NOT this scope's and reads as not found (errGraphOutOfScope, which
+// also matches beads.ErrNotFound). A relic store is the rig's own, so its rows
+// need no check.
+//
+// An error is a read that failed, never absence: a placement read that failed
+// for any other reason is returned as is, and the relic leg is not asked. A
+// miss on both legs joins both errors, so errors.Is(err, beads.ErrNotFound)
+// still holds.
+func graphResidenceForTree(placement, relic beads.Store, id string, accept func(beads.Bead) bool) (beads.Bead, beads.Store, error) {
 	b, err := placement.Get(id)
+	if err == nil && accept != nil && !accept(b) {
+		b, err = beads.Bead{}, fmt.Errorf("%w: %s %w", beads.ErrNotFound, id, errGraphOutOfScope)
+	}
 	if err == nil || relic == nil || relic == placement || !errors.Is(err, beads.ErrNotFound) {
 		return b, placement, err
 	}
@@ -143,6 +155,9 @@ func graphResidenceForTree(placement, relic beads.Store, id string) (beads.Bead,
 	}
 	return rb, relic, nil
 }
+
+// errGraphOutOfScope marks a row the shared binding holds for ANOTHER scope.
+var errGraphOutOfScope = errors.New("belongs to another scope")
 
 // rigNameForScopeDir returns the name of the rig whose root is storePath.
 func rigNameForScopeDir(cityPath, storePath string, rigs []config.Rig) (string, bool) {
