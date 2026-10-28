@@ -241,3 +241,72 @@ func TestWorkflowExpandedBackfillCheckFixLeavesRootOnlyNeighborsUnstamped(t *tes
 		t.Fatalf("post-fix Run details must not name the root-only roots: %#v", res)
 	}
 }
+
+// TestWorkflowExpandedBackfillCheckOmitsARefusedGraphBinding covers a city
+// whose graph binding this process may not read, so the graph class resolves
+// to refusedClassStore: a worker site whose descriptor does not attach the
+// binding, and a city whose storage the gate refused. The refusal says nothing
+// about any root and --fix cannot clear it, so the check omits that scope
+// rather than warn on every run and fail every --fix: it still names and
+// stamps the work store's legacy root, then reports OK.
+func TestWorkflowExpandedBackfillCheckOmitsARefusedGraphBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, cityDir string)
+	}{
+		{"worker site without the graph binding", func(t *testing.T, cityDir string) {
+			routes := splitRoutes(beads.NewMemStore())
+			routes.binding = "infra"
+			seedCLIStorageRoutes(t, cityDir, routes)
+			resetControlPlaneForTest(t)
+			writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
+		}},
+		{"refused city storage", func(t *testing.T, cityDir string) {
+			seedCLIStorageRoutes(t, cityDir, splitRoutes(refusedClassStore{err: standingStorageRefusal{err: errStorageRefusedForTest{}}}))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			tc.setup(t, cityDir)
+			store := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "WR-1", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+					"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "repo/worker",
+				}},
+				{ID: "WR-1.finalize", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
+					"gc.kind": "workflow-finalize", "gc.root_bead_id": "WR-1",
+				}},
+			}, nil)
+			if _, refused := scopeGraphStore(cityDir, cityDir, nil, store).(refusedClassStore); !refused {
+				t.Fatal("fixture: the city graph class does not resolve to a refused store; the case proves nothing")
+			}
+			check := newWorkflowExpandedBackfillCheck(nil, cityDir, func(path string) (beads.Store, error) {
+				if path != cityDir {
+					return nil, fmt.Errorf("unexpected store path %q", path)
+				}
+				return store, nil
+			})
+
+			res := check.Run(&doctor.CheckContext{})
+			details := strings.Join(res.Details, "\n")
+			if res.Status != doctor.StatusWarning || !strings.Contains(details, "city bead WR-1") {
+				t.Fatalf("Run = %v, want a warning naming the work store's root WR-1: %#v", res.Status, res)
+			}
+			if strings.Contains(details, "skipped") {
+				t.Fatalf("Run counted the refused graph binding as a skipped scope:\n%s", details)
+			}
+			if err := check.Fix(&doctor.CheckContext{}); err != nil {
+				t.Fatalf("Fix: %v; a refused graph binding must not fail --fix", err)
+			}
+			root, err := store.Get("WR-1")
+			if err != nil {
+				t.Fatalf("get WR-1: %v", err)
+			}
+			if got := root.Metadata["gc.workflow_expanded"]; got != "true" {
+				t.Fatalf("WR-1 gc.workflow_expanded = %q, want true", got)
+			}
+			if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+				t.Fatalf("post-fix Run status = %v, want OK: %#v", res.Status, res)
+			}
+		})
+	}
+}

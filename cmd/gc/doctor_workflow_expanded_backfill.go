@@ -77,9 +77,15 @@ func (c *workflowExpandedBackfillCheck) scopes() (scopes []workflowExpandedScope
 			continue
 		}
 		scopes = append(scopes, workflowExpandedScope{label: p.label, store: store})
-		// Split cities keep graph.v2 roots in the city-keyed graph binding.
+		// Split cities keep graph.v2 roots in the city-keyed graph binding. A
+		// binding this process may not read is not a scope: a worker site
+		// holds no copy of it, and a refused city's storage gate has already
+		// printed its own refusal. That refusal says nothing about any root and
+		// --fix cannot clear it, so counting it as a skip would keep this check
+		// warning on every run.
 		if p.label == "city" {
-			if graphStore := scopeGraphStore(c.cityPath, p.path, c.cfg, store); graphStore != nil && graphStore != store {
+			graphStore := scopeGraphStore(c.cityPath, p.path, c.cfg, store)
+			if _, refused := graphStore.(refusedClassStore); !refused && graphStore != nil && graphStore != store {
 				scopes = append(scopes, workflowExpandedScope{label: "city graph", store: graphStore})
 			}
 		}
