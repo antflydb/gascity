@@ -1,0 +1,498 @@
+package storeclass_test
+
+import (
+	"fmt"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/tools/nogo/analyzers/internal/analyzertest"
+	"github.com/gastownhall/gascity/tools/nogo/analyzers/storeclass"
+)
+
+const module = "example.com/m/"
+
+const beadsSrc = `package beads
+
+type Bead struct{ ID string }
+
+type Store interface{ Get(id string) (Bead, error) }
+
+type Counter interface{ Count() int }
+
+type CachingStore struct{ Store }
+
+type WorkStore struct{ Store }
+
+type GraphStore struct{ Store }
+
+func (s WorkStore) Raw() Store  { return s.Store }
+func (s GraphStore) Raw() Store { return s.Store }
+
+func MintClassStores(s Store) (WorkStore, GraphStore) { return WorkStore{s}, GraphStore{s} }
+
+func FederatedRead(s Store) Store { return s }
+
+func As[T any](s Store) (T, bool) { v, ok := s.(T); return v, ok }
+`
+
+const beadstestSrc = `package beadstest
+
+import "example.com/m/internal/beads"
+
+func Work(s beads.Store) beads.WorkStore { return beads.WorkStore{Store: s} }
+`
+
+// storerefSrc is allowlisted for every rule but cap-assert.
+const storerefSrc = `package storeref
+
+import "example.com/m/internal/beads"
+
+type Leg struct{ Store beads.Store }
+
+func Mint(s beads.Store) beads.GraphStore { _, g := beads.MintClassStores(s); return g }
+
+func Probe(s beads.Store) beads.Store { return beads.FederatedRead(s) }
+
+func peek(s beads.Store) bool { _, ok := s.(beads.Counter); return ok } // cap-assert
+`
+
+// callers' trailing comments name the rules each line must report, once per
+// occurrence.
+const callers = `package gc
+
+import (
+	"example.com/m/internal/beads"
+	"example.com/m/internal/beads/beadstest" // test-mint-import
+)
+
+type holder struct {
+	store  beads.Store             // raw-field
+	stores []beads.Store           // raw-field
+	open   func() beads.Store      // raw-field
+	graph  beads.GraphStore
+	inner  struct{ s beads.Store } // raw-field
+	count  int
+}
+
+type opener func(string) beads.Store // raw-type
+
+type rawIface interface { beads.Store; Extra() } // raw-type
+
+type alias = beads.Store // raw-type
+
+type typedMap map[string]beads.GraphStore
+
+var cityStore beads.Store // raw-var
+
+var cityStores, rigStores map[string]beads.Store // raw-var raw-var
+
+func param(s beads.Store) {} // raw-param
+
+func two(a, b beads.Store) {} // raw-param raw-param
+
+func result() beads.Store { return nil } // raw-result
+
+func viaMap(m map[string]beads.Store, p *beads.Store) {} // raw-param raw-param
+
+func generic(p chan []beads.Store) {} // raw-param
+
+func typed(g beads.GraphStore, w beads.WorkStore, m typedMap) {}
+
+func lit() { f := func(s beads.Store) beads.Store { return s }; _ = f } // raw-param raw-result
+
+type rigs struct{}
+
+func (rigs) method(s beads.Store) {} // raw-param
+
+type box[T any] struct{ v T }
+
+func (b *box[T]) put(s beads.Store) {} // raw-param
+
+func ifaceMethod() { var _ interface{ Open(beads.Store) } } // raw-param
+
+func localType() { type local struct{ s beads.Store }; _ = local{} } // raw-field
+
+func mint(g beads.GraphStore) beads.WorkStore { return beads.WorkStore{Store: g.Store} } // mint unwrap
+
+func convert(w beads.WorkStore) beads.GraphStore { return beads.GraphStore(w) } // mint
+
+func mintCall(g beads.GraphStore) { beads.MintClassStores(g) } // mint
+
+func mintValue() { f := beads.MintClassStores; _ = f } // mint
+
+func zero() beads.GraphStore { return beads.GraphStore{} }
+
+func elided(g beads.GraphStore) []beads.WorkStore { return []beads.WorkStore{{g}} } // mint
+
+func pointer(g beads.GraphStore) *beads.WorkStore { return &beads.WorkStore{g} } // mint
+
+func unwrapped(g beads.GraphStore) { _ = g.Store } // unwrap
+
+func raw(g beads.GraphStore) { _ = g.Raw() } // unwrap
+
+func rawValue(g beads.GraphStore) { f := g.Raw; _ = f } // unwrap
+
+type embeds struct{ beads.GraphStore }
+
+func promoted(e embeds) { _ = e.Store } // unwrap
+
+func methodOK(g beads.GraphStore) { _, _ = g.Get("x") }
+
+func upcastOK(g beads.GraphStore) { var s interface{ Get(string) (beads.Bead, error) } = g; _ = s }
+
+func assert(w beads.WorkStore) { _, _ = w.Store.(beads.Counter) } // unwrap cap-assert
+
+func assertAnon(g beads.GraphStore) { s := g.Raw(); _, _ = s.(interface{ Count() int }) } // unwrap cap-assert
+
+func assertCaching(w beads.WorkStore) { var s beads.Store = w; _, _ = s.(*beads.CachingStore) } // cap-assert
+
+func assertSwitch(w beads.WorkStore) { var s beads.Store = w; switch s.(type) { case beads.Counter: } } // cap-assert
+
+func assertBoxed(g beads.GraphStore) { _, _ = any(g).(beads.Counter) } // cap-assert
+
+func assertWide(s rawIface) { _, _ = s.(beads.Counter) } // cap-assert
+
+func assertOther(x any) { _, _ = x.(beads.Counter) }
+
+func asOK(g beads.GraphStore) { _, _ = beads.As[beads.Counter](g) }
+
+func marker(g beads.GraphStore) { beads.FederatedRead(g) } // read-marker
+
+func testMint(g beads.GraphStore) beads.WorkStore { return beadstest.Work(g) }
+`
+
+// bootSrc is an allowlisted file: nothing in it reports.
+const bootSrc = `package gc
+
+import "example.com/m/internal/beads"
+
+func boot(s beads.Store) beads.GraphStore { return beads.GraphStore{Store: s} }
+`
+
+const fixtureTest = `package gc
+
+import "example.com/m/internal/beads"
+
+func fixture(s beads.Store) beads.GraphStore { return beads.GraphStore{Store: s} }
+`
+
+func config() storeclass.Config {
+	return storeclass.Config{
+		Module:           module,
+		Store:            module + "internal/beads.Store",
+		Handles:          []string{module + "internal/beads.WorkStore", module + "internal/beads.GraphStore"},
+		HandleField:      "Store",
+		UnwrapMethods:    []string{"Raw"},
+		MintFuncs:        []string{module + "internal/beads.MintClassStores"},
+		TestMintPackages: []string{module + "internal/beads/beadstest"},
+		Markers:          []string{module + "internal/beads.FederatedRead"},
+		Allow: []storeclass.Allow{
+			{Package: "internal/beads/...", Reason: "the engines and handles"},
+			{Package: "internal/storeref", Rules: storeclass.AllRulesBut(storeclass.CapAssert), Reason: "the mint and executors"},
+			{Package: "cmd/gc", File: "storage_boot.go", Reason: "boot routing"},
+		},
+	}
+}
+
+func graph(callersSrc string) []analyzertest.Package {
+	return []analyzertest.Package{
+		{Path: module + "internal/beads", Files: map[string]string{"beads.go": beadsSrc}},
+		{Path: module + "internal/beads/beadstest", Files: map[string]string{"beadstest.go": beadstestSrc}},
+		{Path: module + "internal/storeref", Files: map[string]string{"storeref.go": storerefSrc}},
+		{Path: module + "cmd/gc", Files: map[string]string{
+			"callers.go":      callersSrc,
+			"storage_boot.go": bootSrc,
+			"fixture_test.go": fixtureTest,
+		}},
+	}
+}
+
+var ruleRE = regexp.MustCompile(`^storeclass\[([a-z-]+)\]`)
+
+// findings is "file:line rule" for every diagnostic, sorted.
+func findings(t *testing.T, cfg storeclass.Config) []string {
+	t.Helper()
+	var got []string
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(cfg), graph(callers)) {
+		m := ruleRE.FindStringSubmatch(d.Message)
+		if m == nil {
+			got = append(got, fmt.Sprintf("%s:%d ? %s", d.File, d.Line, d.Message))
+			continue
+		}
+		got = append(got, fmt.Sprintf("%s:%d %s", d.File, d.Line, m[1]))
+	}
+	sort.Strings(got)
+	return got
+}
+
+// expected is "file:line rule" for every rule a trailing comment of src
+// names, once per name.
+func expected(file, src string) []string {
+	var want []string
+	for i, line := range strings.Split(src, "\n") {
+		_, comment, ok := strings.Cut(line, "// ")
+		if !ok {
+			continue
+		}
+		for _, f := range strings.Fields(comment) {
+			if slices.Contains(storeclass.Rules, storeclass.Rule(f)) {
+				want = append(want, fmt.Sprintf("%s:%d %s", file, i+1, f))
+			}
+		}
+	}
+	return want
+}
+
+func TestStoreclassRules(t *testing.T) {
+	got := findings(t, config())
+	want := expected("callers.go", callers)
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("findings differ\n got: %s\nwant: %s", strings.Join(got, "\n      "), strings.Join(want, "\n      "))
+	}
+}
+
+// storerefGraph analyzes the allowlisted storeref package (analyzertest runs
+// the analyzer on the graph's last package).
+func storerefGraph() []analyzertest.Package {
+	return graph(callers)[:3]
+}
+
+// TestStoreclassAllowlistByRule: storeref is allowlisted for every rule but
+// cap-assert.
+func TestStoreclassAllowlistByRule(t *testing.T) {
+	var got []string
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(config()), storerefGraph()) {
+		m := ruleRE.FindStringSubmatch(d.Message)
+		if m == nil {
+			t.Fatalf("unexpected finding %s:%d %s", d.File, d.Line, d.Message)
+		}
+		got = append(got, fmt.Sprintf("%s:%d %s", d.File, d.Line, m[1]))
+	}
+	want := expected("storeref.go", storerefSrc)
+	if !slices.Equal(got, want) {
+		t.Errorf("findings = %v, want %v", got, want)
+	}
+}
+
+func TestStoreclassEveryRuleExercised(t *testing.T) {
+	seen := map[storeclass.Rule]bool{}
+	for _, w := range append(expected("callers.go", callers), expected("storeref.go", storerefSrc)...) {
+		seen[storeclass.Rule(w[strings.LastIndex(w, " ")+1:])] = true
+	}
+	for _, r := range storeclass.Rules {
+		if !seen[r] {
+			t.Errorf("rule %s has no fixture line", r)
+		}
+	}
+}
+
+// TestStoreclassMessages pins the message shape a developer sees.
+func TestStoreclassMessages(t *testing.T) {
+	var msgs []string
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(config()), graph(callers)) {
+		if d.File == "callers.go" && d.Line == lineOf(callers, "func param(") {
+			msgs = append(msgs, d.Message)
+		}
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("param: %d findings, want 1: %v", len(msgs), msgs)
+	}
+	for _, want := range []string{"storeclass[raw-param]", "parameter s", "raw beads.Store", "cmd/gc/callers.go", "param", "1 here, baseline 0"} {
+		if !strings.Contains(msgs[0], want) {
+			t.Errorf("message %q lacks %q", msgs[0], want)
+		}
+	}
+}
+
+func lineOf(src, prefix string) int {
+	for i, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+func TestStoreclassBaseline(t *testing.T) {
+	cfg := config()
+	cfg.Baseline = map[storeclass.Key]int{
+		// pinned at the tree: silent.
+		{Path: "cmd/gc/callers.go", Func: "two", Rule: storeclass.RawParam}:            2,
+		{Path: "cmd/gc/callers.go", Func: "rigs.method", Rule: storeclass.RawParam}:    1,
+		{Path: "cmd/gc/callers.go", Func: "box.put", Rule: storeclass.RawParam}:        1,
+		{Path: "cmd/gc/callers.go", Func: "cityStores", Rule: storeclass.RawVar}:       1,
+		{Path: "cmd/gc/callers.go", Func: "rigStores", Rule: storeclass.RawVar}:        1,
+		{Path: "cmd/gc/callers.go", Func: "lit", Rule: storeclass.RawResult}:           1,
+		{Path: "cmd/gc/callers.go", Func: "(import)", Rule: storeclass.TestMintImport}: 1,
+		// above the pin: every site of the key reports.
+		{Path: "cmd/gc/callers.go", Func: "holder", Rule: storeclass.RawField}: 3,
+		// below the pin: stale.
+		{Path: "cmd/gc/callers.go", Func: "param", Rule: storeclass.RawParam}: 2,
+		// a file this pass does not compile (another build-tag variant's, or
+		// deleted): not this pass's to judge. The generator's check catches a
+		// deleted file's row.
+		{Path: "cmd/gc/gone.go", Func: "f", Rule: storeclass.Mint}: 1,
+		// another package's row is not this package's business.
+		{Path: "internal/other/x.go", Func: "f", Rule: storeclass.Mint}: 1,
+	}
+	got := findings(t, cfg)
+	all := findings(t, config())
+	silenced := []string{
+		at("func two(", "raw-param"), at("func two(", "raw-param"),
+		at("func (rigs) method(", "raw-param"), at("func (b *box[T]) put(", "raw-param"),
+		at("var cityStores, rigStores", "raw-var"), at("var cityStores, rigStores", "raw-var"),
+		at("func lit()", "raw-result"),
+		at("\t\"example.com/m/internal/beads/beadstest\"", "test-mint-import"),
+		// under its (stale) pin: the site is silent, the row reports.
+		at("func param(", "raw-param"),
+	}
+	want := slices.Clone(all)
+	for _, s := range silenced {
+		i := slices.Index(want, s)
+		if i < 0 {
+			t.Fatalf("no unpinned finding %q to silence", s)
+		}
+		want = slices.Delete(want, i, i+1)
+	}
+	// the stale row reports at the package clause of the first linted file.
+	want = append(want, "callers.go:1 baseline")
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("findings differ\n got: %s\nwant: %s", strings.Join(got, "\n      "), strings.Join(want, "\n      "))
+	}
+}
+
+func at(prefix, rule string) string {
+	return fmt.Sprintf("callers.go:%d %s", lineOf(callers, prefix), rule)
+}
+
+func TestStoreclassStaleMessages(t *testing.T) {
+	cfg := config()
+	cfg.Baseline = map[storeclass.Key]int{
+		{Path: "cmd/gc/callers.go", Func: "param", Rule: storeclass.RawParam}: 2,
+	}
+	var stale []string
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(cfg), graph(callers)) {
+		if strings.HasPrefix(d.Message, "storeclass[baseline]") {
+			stale = append(stale, d.Message)
+		}
+	}
+	if len(stale) != 1 || !strings.Contains(stale[0], "cmd/gc/callers.go\tparam\traw-param pins 2, the tree has 1") || !strings.Contains(stale[0], "only shrink") {
+		t.Fatalf("stale findings = %q", stale)
+	}
+}
+
+// TestStoreclassSealed: a sealed package reports every finding, whatever the
+// baseline pins for it.
+func TestStoreclassSealed(t *testing.T) {
+	cfg := config()
+	cfg.Sealed = []string{"cmd/gc"}
+	cfg.Baseline = map[storeclass.Key]int{
+		{Path: "cmd/gc/callers.go", Func: "two", Rule: storeclass.RawParam}: 2,
+	}
+	got := findings(t, cfg)
+	want := findings(t, config())
+	want = append(want, "callers.go:1 baseline")
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("findings differ\n got: %s\nwant: %s", strings.Join(got, "\n      "), strings.Join(want, "\n      "))
+	}
+}
+
+func TestStoreclassStaleAllowlistFile(t *testing.T) {
+	cfg := config()
+	cfg.Allow = append(cfg.Allow, storeclass.Allow{Package: "cmd/gc", File: "gone.go", Reason: "a stale entry"})
+	var msgs []string
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(cfg), graph(callers)) {
+		if strings.Contains(d.Message, "gone.go") {
+			msgs = append(msgs, d.Message)
+		}
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "allowlisted file cmd/gc/gone.go names nothing") {
+		t.Fatalf("stale allowlist findings = %q", msgs)
+	}
+}
+
+// TestStoreclassOutsideModule: a package outside the module is not linted.
+func TestStoreclassOutsideModule(t *testing.T) {
+	cfg := config()
+	cfg.Module = "example.com/other/"
+	if got := analyzertest.RunGraph(t, storeclass.New(cfg), graph(callers)); len(got) != 0 {
+		t.Fatalf("a package outside the module reported %v", got)
+	}
+}
+
+// TestStoreclassCollect: the collector the baseline generator runs sees every
+// finding, keyed as the baseline keys it, and reports nothing itself.
+func TestStoreclassCollect(t *testing.T) {
+	var keys []storeclass.Key
+	cfg := config()
+	a := storeclass.NewCollector(cfg, func(f storeclass.Finding) { keys = append(keys, f.Key) })
+	if got := analyzertest.RunGraph(t, a, graph(callers)); len(got) != 0 {
+		t.Fatalf("the collector reported %v", got)
+	}
+	counts := map[storeclass.Key]int{}
+	for _, k := range keys {
+		counts[k]++
+	}
+	for k, want := range map[storeclass.Key]int{
+		{Path: "cmd/gc/callers.go", Func: "two", Rule: storeclass.RawParam}:            2,
+		{Path: "cmd/gc/callers.go", Func: "holder", Rule: storeclass.RawField}:         4,
+		{Path: "cmd/gc/callers.go", Func: "rigs.method", Rule: storeclass.RawParam}:    1,
+		{Path: "cmd/gc/callers.go", Func: "box.put", Rule: storeclass.RawParam}:        1,
+		{Path: "cmd/gc/callers.go", Func: "localType", Rule: storeclass.RawField}:      1,
+		{Path: "cmd/gc/callers.go", Func: "(import)", Rule: storeclass.TestMintImport}: 1,
+	} {
+		if counts[k] != want {
+			t.Errorf("%v: %d, want %d", k, counts[k], want)
+		}
+	}
+	if counts[storeclass.Key{Path: "cmd/gc/storage_boot.go", Func: "boot", Rule: storeclass.RawParam}] != 0 {
+		t.Error("the collector counted an allowlisted file")
+	}
+}
+
+func TestParseBaseline(t *testing.T) {
+	rows, err := storeclass.ParseBaseline("# a comment\n\ncmd/gc/a.go\tf\traw-param\t2\ncmd/gc/a.go\tT.m\tmint\t1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[storeclass.Key{Path: "cmd/gc/a.go", Func: "f", Rule: storeclass.RawParam}] != 2 || len(rows) != 2 {
+		t.Fatalf("rows = %v", rows)
+	}
+	for _, bad := range []string{
+		"cmd/gc/a.go\tf\traw-param\n",                                  // no count
+		"cmd/gc/a.go\tf\tnot-a-rule\t1\n",                              // unknown rule
+		"cmd/gc/a.go\tf\traw-param\t0\n",                               // a zero row
+		"cmd/gc/a.go\tf\traw-param\t1\ncmd/gc/a.go\tf\traw-param\t1\n", // a duplicate
+	} {
+		if _, err := storeclass.ParseBaseline(bad); err == nil {
+			t.Errorf("ParseBaseline(%q) accepted it", bad)
+		}
+	}
+	text := storeclass.FormatBaseline(rows)
+	again, err := storeclass.ParseBaseline(text)
+	if err != nil || len(again) != 2 {
+		t.Fatalf("round trip: %v %v", again, err)
+	}
+}
+
+// TestStoreclassNolintIsAFinding: the baseline is the only exemption, so a
+// //nolint:storeclass directive reports at its file's package clause, where
+// it cannot suppress itself.
+func TestStoreclassNolintIsAFinding(t *testing.T) {
+	src := callers + "\nfunc hidden(s beads.Store) {} //nolint:storeclass,unparam // why\n"
+	var msgs []string
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(config()), graph(src)) {
+		if strings.HasPrefix(d.Message, "storeclass[nolint]") {
+			msgs = append(msgs, fmt.Sprintf("%s:%d %s", d.File, d.Line, d.Message))
+		}
+	}
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], "callers.go:1 ") {
+		t.Fatalf("nolint findings = %q", msgs)
+	}
+}
