@@ -292,7 +292,7 @@ func TestRewatchWorkflow_NoPayloadInRunScripts(t *testing.T) {
 		}
 		for k, v := range env {
 			s, _ := v.(string)
-			if strings.Contains(s, "github.event") && !(k == "HEAD_SHA" && s == "${{ github.event.workflow_run.head_sha }}") {
+			if strings.Contains(s, "github.event") && (k != "HEAD_SHA" || s != "${{ github.event.workflow_run.head_sha }}") {
 				t.Fatalf("step %d env %s = %q reads the payload; only HEAD_SHA may, from workflow_run.head_sha", i, k, s)
 			}
 		}

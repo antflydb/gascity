@@ -1,0 +1,75 @@
+name: PR evidence rewatch
+
+# Why this exists (ga-j1jd7k): the PR evidence watchdog observes a head commit
+# for 25 minutes and then fails closed. Evidence that arrives after that (CI
+# queued behind a busy runner pool, a Mac run that finishes late) left a
+# permanent red check that nothing ever re-evaluated. This workflow re-runs the
+# watchdog's latest failed or cancelled run once the evidence has passed. It
+# re-runs; it never publishes a check of its own, so the watchdog stays the one
+# author of "Evidence / critical-path suites".
+#
+# Trigger: workflow_run [completed] of the workflows that define the four
+# tracked checks (CI, Mac Regression, Review Formulas). The watchdog's own
+# workflow is never listed, or its completion would trigger a re-run of itself.
+# Every completion for a pull_request event is a trigger, whatever the
+# conclusion; scripts/prwatchdog/cmd/rewatch decides, and nearly always exits 0
+# as a no-op.
+#
+# Security model: workflow_run runs the default branch's workflow with a
+# write-capable GITHUB_TOKEN even for fork PRs, so nothing from the PR is ever
+# executed or trusted.
+#   - Checkout is github.workflow_sha only (trusted default-branch content, which
+#     also carries ./.github/actions), with no persisted credentials.
+#   - The payload is read in two places: workflow_run.event, in the job guard,
+#     and workflow_run.head_sha, passed through env and validated by the program
+#     as 40 lowercase hex characters. Nothing else, and no run script
+#     interpolates an expression.
+#   - Permissions: contents: read at workflow level; the job adds only
+#     actions: write (the re-run POST) beside checks, contents and pull-requests
+#     read. No secrets and no PAT: GITHUB_TOKEN only.
+#   - The "uses:" allowlist is closed to actions/checkout, actions/setup-go and
+#     ./.github/actions/go-mod-download.
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Mac Regression
+      - Review Formulas
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-evidence-rewatch-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  rewatch:
+    name: Rewatch / re-run PR evidence watchdog
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Re-run the watchdog if the evidence has since passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: go run ./scripts/prwatchdog/cmd/rewatch

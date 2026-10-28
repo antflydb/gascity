@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_test")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_test(
     name = "rewatch_test",
@@ -6,6 +6,7 @@ go_test(
         "main_test.go",
         "testenv_import_test.go",
     ],
+    embed = [":rewatch_lib"],
     deps = [
         "//internal/testenv",
         "//scripts/prwatchdog",
@@ -40,5 +41,19 @@ filegroup(
         ["**/*_test.go"],
         allow_empty = True,
     ),
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "rewatch_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/scripts/prwatchdog/cmd/rewatch",
+    visibility = ["//visibility:private"],
+    deps = ["//scripts/prwatchdog"],
+)
+
+go_binary(
+    name = "rewatch",
+    embed = [":rewatch_lib"],
     visibility = ["//visibility:public"],
 )

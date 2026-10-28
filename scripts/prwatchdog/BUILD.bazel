@@ -4,6 +4,9 @@ go_library(
     name = "prwatchdog",
     srcs = [
         "evaluate.go",
+        "github.go",
+        "rewatch.go",
+        "rewatch_github.go",
         "watch.go",
     ],
     importpath = "github.com/gastownhall/gascity/scripts/prwatchdog",

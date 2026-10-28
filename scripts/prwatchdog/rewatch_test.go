@@ -164,7 +164,7 @@ func TestRewatch_OnlyFailureAndCancelledConclusionsContinue(t *testing.T) {
 		{"stale", false},
 		{"startup_failure", false},
 		// The check-run constant spells it with one l; the workflow-run API
-		// does not, so the one-l form must not be treated as cancelled.
+		// uses two, so the one-l form must not be treated as that conclusion.
 		{string(ConclusionCancelled), false},
 	} {
 		t.Run(tc.conclusion, func(t *testing.T) {
