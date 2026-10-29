@@ -79,3 +79,14 @@ Build PASS preceded a remote disk-admission timeout in which vet never ran. Supp
 The exact-equality 47/4 ratchet can change if another PR changes invocation lines before merge. All policy expiry dates, including the new row, are 2026-10-31; results here are as of 2026-10-29. These are recorded constraints for the merge authority.
 
 Publication setup disclosure: the deployer initially forced the gate-record commit hook to remote execution without checking the source-only worker-env pin. The source pin is older than the merged tree/base pin, leaving two hook actions queued. The owned publication service was stopped before the docsync test executed, before a commit/push, and without a test verdict. The full gate above is unchanged. Publication continues on the same reviewed source/isolated branch using supported local Bazel hooks under ordinary local admission/load limits; no source re-pin, rebase, hook bypass or gate rerun.
+
+## Publication pre-push attribution
+
+The normal local pre-push run on `4560711a4cbb981b8c1861a09d0be94cb8568293` reported two failing targets, then was stopped to prevent the generic dry-run fallback from repeating a failed test. Its partial output is not claimed green. 158 raw hook logs were copied and hashed before cleanup; cancellation diagnostics from interrupted steps are retained separately from the two completed failing-target reports.
+
+failure_attribution (publication hook only):
+- TestWaitTurnEnded/never_ends -> ga-vkhfnj; the 100ms snapshot deadline loses the last-read state under whole-suite load.
+- TestRenderOnceRefusesAFIFOParentWithoutBlocking -> ga-vkhfnj; the 10s completion guard expires under whole-suite load.
+- TestWriteTokenFileKeepsGroup -> ga-bwvl64t; known local sandbox supplementary-group chown EINVAL.
+
+Clauses 1–4: all three failure sites are mechanically UNCHANGED with zero shared hunks; both trackers were opened and predate this run (ga-vkhfnj 2026-08-29, ga-bwvl64t 2026-10-24), and this deploy's first sightings were appended/read back. Clause3(a) MECHANISM lands: the complete failing test-binary import closures (19 module packages for t3bridge,48 for tokenrender) contain none of the changed non-test package inputs; the only changed production Go package is resourcecensus. No package/path overlap, so clause4 passes. No inconclusive inference, no waiver and no failed candidate rerun. This is the standing pre-push exact-head exception in non-diff-owned-gate-failure.md.tmpl; the final publication head is rebound after this record is committed, with only gate Markdown changed. It does not replace or stitch the completed full criterion3 evidence above.
