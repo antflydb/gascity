@@ -4,6 +4,8 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # gazelle:prefix github.com/gastownhall/gascity
+# gazelle:exclude .bazel-cache
+# gazelle:exclude .tools
 # gazelle:build_tags integration
 
 # internal/config has two libraries sharing one importpath (hand-written bounded
@@ -508,6 +510,7 @@ filegroup(
         "//internal/sourceworkflow:bazel_repo_srcs",
         "//internal/ssrf:bazel_repo_srcs",
         "//internal/storebinding:bazel_repo_srcs",
+        "//internal/storebinding/antfly:bazel_repo_srcs",
         "//internal/storebinding/beadsworkspace:bazel_repo_srcs",
         "//internal/storebinding/sqlite:bazel_repo_srcs",
         "//internal/storebinding/storebindingtest:bazel_repo_srcs",
@@ -781,6 +784,7 @@ filegroup(
         "//internal/sourceworkflow:bazel_go_srcs",
         "//internal/ssrf:bazel_go_srcs",
         "//internal/storebinding:bazel_go_srcs",
+        "//internal/storebinding/antfly:bazel_go_srcs",
         "//internal/storebinding/beadsworkspace:bazel_go_srcs",
         "//internal/storebinding/sqlite:bazel_go_srcs",
         "//internal/storebinding/storebindingtest:bazel_go_srcs",
@@ -1051,6 +1055,7 @@ filegroup(
         "//internal/sourceworkflow:bazel_go_test_srcs",
         "//internal/ssrf:bazel_go_test_srcs",
         "//internal/storebinding:bazel_go_test_srcs",
+        "//internal/storebinding/antfly:bazel_go_test_srcs",
         "//internal/storebinding/beadsworkspace:bazel_go_test_srcs",
         "//internal/storebinding/sqlite:bazel_go_test_srcs",
         "//internal/storebinding/storebindingtest:bazel_go_test_srcs",

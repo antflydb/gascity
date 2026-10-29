@@ -53,6 +53,19 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("passes_reviewed_antfly_fork_pin", func(t *testing.T) {
+		out, code := runScript(t, "module example.com/mod\n\nreplace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261029200716-58c1014e9b47\n")
+		if code != 0 {
+			t.Fatalf("reviewed fork pin rejected: %d %s", code, out)
+		}
+	})
+	t.Run("rejects_unreviewed_antfly_fork_pin", func(t *testing.T) {
+		out, code := runScript(t, "module example.com/mod\n\nreplace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261029200716-000000000000\n")
+		if code == 0 {
+			t.Fatalf("unreviewed fork pin accepted: %s", out)
+		}
+	})
+
 	t.Run("passes_released_semver_replace", func(t *testing.T) {
 		gomod := fmt.Sprintf("module github.com/example/mod\n\ngo 1.22\n\nreplace %s\n",
 			"github.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5")

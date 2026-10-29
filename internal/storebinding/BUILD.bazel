@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "beads_adapter.go",
         "beads_nudge_queue.go",
+        "beads_nudge_queue_runtime.go",
         "beads_nudge_queue_batch.go",
         "beads_nudge_shadow_view.go",
         "builder_publication.go",

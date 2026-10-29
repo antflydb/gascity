@@ -261,6 +261,14 @@ go_deps.module_override(
     path = "github.com/steveyegge/beads",
 )
 
+# The Antfly fork carries its own root-module Bazel macros. Regenerate plain
+# dependency BUILD rules so its module-local repositories do not leak into gc.
+go_deps.gazelle_override(
+    path = "github.com/steveyegge/beads",
+    build_file_generation = "clean",
+    directives = ["gazelle:proto disable_global"],
+)
+
 # protoc-gen-validate's validate package regenerates the checked-in
 # validate.pb.go with go_proto_library, both in gazelle's default proto mode
 # and in the module's own validate/BUILD, which pulls the C++ protoc and

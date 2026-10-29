@@ -348,3 +348,20 @@ Before considering any task complete:
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
+
+## Antfly downstream dependency
+
+The operator requested a native Antfly integration using the antflydb/beads
+fork. This branch permits exactly the public immutable SDK replacement
+`github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261029200716-58c1014e9b47`.
+The composition boundary test and scripts/check-gomod-replace.sh pin this one
+exception. Local checkout replacements and unreviewed updates remain forbidden.
+Infrastructure must use conditional Antfly snapshots and must not introduce a
+SQLite persistence mirror; see internal/storebinding/antfly/AGENTS.md.
+
+Antfly's nudge queue selection is a store capability, `BeadsNudgeQueueMode`.
+The native path must use the canonical bead queue, its state-aware shadow view
+and the existing whole-batch file-to-beads migration shim. Never fall back to
+file delivery after selecting the native queue. Dispatch skip counters remain
+file diagnostics outside the delivery-state contract. Other engines retain
+their existing queue authority until explicitly migrated.

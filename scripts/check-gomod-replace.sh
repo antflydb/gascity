@@ -47,6 +47,13 @@ check_replace_rhs() {
 		version="${BASH_REMATCH[2]}"
 	fi
 
+	# This downstream fork was explicitly requested to use antflydb/beads.
+	# Admit only its reviewed immutable SDK pin; local paths, other forks and
+	# any newer commit still follow the ordinary release policy below.
+	if [[ "$stripped" == "replace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261029200716-58c1014e9b47" && "$path_part" == "github.com/antflydb/beads" && "$version" == "v1.3.1-0.20261029200716-58c1014e9b47" ]]; then
+		return 0
+	fi
+
 	# Local filesystem paths are always unreleased.
 	if [[ "$path_part" == ./* || "$path_part" == ../* || "$path_part" == /* ]]; then
 		echo "check-gomod-replace: BLOCKED — replace directive targets a local path:" >&2
@@ -117,4 +124,4 @@ if [[ $failed -ne 0 ]]; then
 	exit 1
 fi
 
-echo "check-gomod-replace: OK (no unreleased replace directives)"
+echo "check-gomod-replace: OK (all replace directives satisfy policy)"

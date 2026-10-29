@@ -53,9 +53,10 @@ const (
 // sanctionedProviderIDs are the provider IDs compiled into this binary:
 // "sqlite" for the SQLite graph-engine inspection surface, "sqlite-beads" for
 // the bead-store provider over it, and "beads-workspace" for the provider that
-// serves a binding from a beads workspace directory. An out-of-tree provider
+// serves a binding from a beads workspace directory; antfly-beads serves
+// infrastructure from conditional Antfly snapshots. An out-of-tree provider
 // registers its own ID from its own tree, never from this one.
-var sanctionedProviderIDs = map[string]bool{"sqlite": true, "sqlite-beads": true, "beads-workspace": true}
+var sanctionedProviderIDs = map[string]bool{"sqlite": true, "sqlite-beads": true, "beads-workspace": true, "antfly-beads": true}
 
 // storageSurfaceDirs are the module-local directories that make up the storage
 // class surface. They are the packages the CGO invariance assertion covers.
@@ -202,15 +203,15 @@ func TestStorageSurfaceCompilesIdenticallyWithAndWithoutCGO(t *testing.T) {
 	}
 }
 
-// TestModuleGraphCarriesNoReplaceDirective is the module-graph guarantee a
-// downstream fork builds on: this repo's dependencies are exactly what its
-// manifest names, at released versions, with nothing redirected. It is the
+// TestModuleGraphCarriesOnlyReviewedForkPin is the module-graph guarantee a
+// downstream fork builds on: every dependency is explicit and reproducible.
+// This Antfly fork permits exactly one reviewed immutable Beads SDK pin. It is the
 // tree-side companion to scripts/check-gomod-replace.sh's released-semver-only
 // policy — that script gates what a change adds, this arm gates the result.
 //
 // A replace this parser cannot read is a violation, not a pass: silently
 // ignoring a line we cannot parse is how a guard goes blind.
-func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
+func TestModuleGraphCarriesOnlyReviewedForkPin(t *testing.T) {
 	root := moduleRoot(t)
 	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
@@ -221,6 +222,10 @@ func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
 		t.Fatalf("go.mod has replace directives this guard cannot parse (lines %v); a manifest we cannot read is a violation, not a pass", malformed)
 	}
 	for _, directive := range directives {
+		// The operator-requested Antfly fork needs this exact published SDK commit.
+		if directive.oldPath == "github.com/steveyegge/beads" && directive.oldVersion == "" && directive.newPath == "github.com/antflydb/beads" && directive.newVersion == "v1.3.1-0.20261029200716-58c1014e9b47" {
+			continue
+		}
 		t.Errorf("go.mod line %d replaces %q with %q; this module graph carries no replace directive, so a build resolves the dependencies the manifest names and nothing else",
 			directive.line, directive.oldPath, directive.newPath)
 	}
@@ -413,7 +418,7 @@ func anyGoWorkFile(t *testing.T, root string) bool {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", "node_modules", "vendor", "testdata", ".claude", "worktrees":
+			case ".git", "node_modules", "vendor", "testdata", ".claude", "worktrees", ".worktrees", ".bazel-cache", ".tools":
 				return filepath.SkipDir
 			}
 			return nil

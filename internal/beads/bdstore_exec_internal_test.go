@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"go.opentelemetry.io/otel/attribute"
-	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
@@ -347,11 +348,11 @@ func installBeadsRecordingLogExporter(t *testing.T) *beadsRecordingLogExporter {
 	t.Helper()
 	exp := &beadsRecordingLogExporter{}
 	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
-	prev := otellogglobal.GetLoggerProvider()
-	otellogglobal.SetLoggerProvider(provider)
+	prev := otel.GetLoggerProvider()
+	otel.SetLoggerProvider(provider)
 	t.Cleanup(func() {
 		_ = provider.Shutdown(context.Background())
-		otellogglobal.SetLoggerProvider(prev)
+		otel.SetLoggerProvider(prev)
 	})
 	return exp
 }

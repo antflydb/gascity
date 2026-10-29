@@ -29,6 +29,8 @@ go_library(
         "//internal/rollout/gate",
         "//internal/telemetry",
         "@com_github_steveyegge_beads//:beads",
+        "@com_github_steveyegge_beads//backend/antfly",
+        "@com_github_steveyegge_beads//backend",
         "@com_github_steveyegge_beads//issueops",
         "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -48,6 +50,7 @@ go_library(
 go_test(
     name = "beads_test",
     srcs = [
+        "antfly_store_test.go",
         "absent_blocked_test.go",
         "atomic_close_memstore_test.go",
         "bdsql_relocation_internal_test.go",
@@ -340,9 +343,11 @@ go_test(
         "//test/toolhome",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_steveyegge_beads//:beads",
+        "@com_github_steveyegge_beads//backend/antfly",
         "@com_github_steveyegge_beads//backend",
         "@com_github_steveyegge_beads//issueops",
         "@com_github_steveyegge_beads//journalops",
+        "@io_opentelemetry_go_otel//:otel",
         "@org_modernc_sqlite//:sqlite",
     ] + select({
         "@rules_go//go/platform:aix": [
