@@ -144,3 +144,64 @@ func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: a seat whose only open wisp is mail has an empty frontier.
+func TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	mail := `{"id":"gcg-mail-1","status":"open","issue_type":"message","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), mailTestEnv(), fakeBdEphemeralStore(mail))
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("mail-only store: work query printed %q, want an empty frontier []", out)
+	}
+}
+
+// The identity loop probes GC_SESSION_ID, GC_SESSION_NAME and GC_ALIAS, so a
+// message addressed to the seat's alias identity must be skipped too.
+func TestEffectiveWorkQuerySkipsMailAddressedToAliasIdentity(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	env := mailTestEnv()
+	env["GC_ALIAS"] = a.QualifiedName()
+	mail := `{"id":"gcg-mail-alias","status":"open","issue_type":"message","assignee":"` + a.QualifiedName() + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	routed := `{"id":"gcg-routed-wisp","status":"open","issue_type":"task","assignee":"","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{"gc.routed_to":"` + a.QualifiedName() + `"}}`
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env, fakeBdEphemeralStore(mail+","+routed))
+	if strings.Contains(out, "gcg-mail-alias") || !strings.Contains(out, "gcg-routed-wisp") {
+		t.Fatalf("mail to the alias identity starved routed work: served %q, want gcg-routed-wisp and no message bead", out)
+	}
+}
+
+// The legacy control-dispatcher loop probes each identity's workflow-control
+// candidate too, so a message addressed to that candidate identity must not
+// exit the query ahead of the dispatcher's own routed work.
+func TestEffectiveWorkQueryLegacyControlSkipsMailAddressedToCandidateIdentity(t *testing.T) {
+	requireJQ(t)
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	env := map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}
+	mail := `{"id":"gcg-mail-legacy","status":"open","issue_type":"message","assignee":"gascity/workflow-control","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	routed := `{"id":"gcg-dispatch-wisp","status":"open","issue_type":"task","assignee":"","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{"gc.routed_to":"gascity/control-dispatcher"}}`
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env, fakeBdEphemeralStore(mail+","+routed))
+	if strings.Contains(out, "gcg-mail-legacy") || !strings.Contains(out, "gcg-dispatch-wisp") {
+		t.Fatalf("mail to the legacy candidate identity starved dispatcher work: served %q, want gcg-dispatch-wisp and no message bead", out)
+	}
+}
+
+// Mail is withheld at the jq ephemeral probes, so no generated `bd ready` /
+// `gc ready` read may grow an --exclude-type=message flag: the ready path
+// already excludes infra types natively (readyExcludeTypes; bd's own ready
+// policy), and the flag would churn every deployed command for nothing.
+func TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType(t *testing.T) {
+	a := singleSessionConfigAgent()
+	for name, topo := range map[string]QueryTopology{
+		"bd104":     {},
+		"bd105":     {Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}},
+		"federated": {FederatedReady: true},
+	} {
+		if got := a.EffectiveWorkQueryFor(topo); strings.Contains(got, "--exclude-type=message") {
+			t.Errorf("%s: generated work query renders --exclude-type=message on a ready read: %q", name, got)
+		}
+	}
+}
