@@ -105,6 +105,7 @@ go_test(
         "nudge_clear_before_paste_integration_test.go",
         "nudge_confirm_lag_integration_test.go",
         "nudge_dismiss_besteffort_test.go",
+        "nudge_hidden_question_test.go",
         "nudge_poke_hidden_test.go",
         "nudge_poke_integration_test.go",
         "nudge_prompt_guard_test.go",
