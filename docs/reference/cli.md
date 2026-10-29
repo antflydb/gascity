@@ -5248,18 +5248,32 @@ choices that remove a row, and each first backs up the row it removes, with
 every edge touching it, to infra.recover-choices.jsonl at the binding root.
 --dry-run shows both rows of each such id.
 
+--purge-type message is the other answer for stranded mail nobody will read:
+instead of copying, it backs up and then deletes every row the containment
+check calls stranded whose type is message (each must also classify as
+messaging). It selects by that check, never by manifest id, because bd reuses
+short wisp ids. --dry-run lists the count, id range, dates and titles and
+writes nothing; the delete needs --fleet-stopped and --confirm-purge. Every
+row, with its metadata, labels and edges, is first written to a timestamped
+infra.purged-stranded-&lt;time&gt;.jsonl at the binding root and proven from disk;
+the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
+after the backup resumes from it. A row the binding holds as the same bead is
+never deleted, and stranded rows of other types are left where they are.
+
 ```
 gc storage recover-stranded [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--confirm-purge` | bool |  | with --purge-type: confirm the delete (without it the run lists the rows and deletes nothing) |
 | `--drop-work-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated) |
 | `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 | `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
+| `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded, each also message-class; --dry-run lists them |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |
 

@@ -186,6 +186,8 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		carriedIDs   []string
 		replaceIDs   []string
 		dropIDs      []string
+		purgeType    string
+		confirmPurge bool
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -232,11 +234,31 @@ work-store row replaces the binding's) or --drop-work-row <id> (the
 work-store row is removed and the binding's stays). These are the only
 choices that remove a row, and each first backs up the row it removes, with
 every edge touching it, to infra.recover-choices.jsonl at the binding root.
---dry-run shows both rows of each such id.`,
+--dry-run shows both rows of each such id.
+
+--purge-type message is the other answer for stranded mail nobody will read:
+instead of copying, it backs up and then deletes every row the containment
+check calls stranded whose type is message (each must also classify as
+messaging). It selects by that check, never by manifest id, because bd reuses
+short wisp ids. --dry-run lists the count, id range, dates and titles and
+writes nothing; the delete needs --fleet-stopped and --confirm-purge. Every
+row, with its metadata, labels and edges, is first written to a timestamped
+infra.purged-stranded-<time>.jsonl at the binding root and proven from disk;
+the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
+after the backup resumes from it. A row the binding holds as the same bead is
+never deleted, and stranded rows of other types are left where they are.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
 					surface.Namespace, surface.Verb, surface.Flag)
+				return errExit
+			}
+			if err := validateStrandedPurgeFlags(purgeType, confirmPurge, map[string]bool{
+				strandedMoveFlag: len(moveIDs) > 0, strandedRecordCarriedFlag: len(carriedIDs) > 0,
+				strandedReplaceBindingRowFlag: len(replaceIDs) > 0, strandedDropWorkRowFlag: len(dropIDs) > 0,
+				"dump": dumpPath != "",
+			}); err != nil {
+				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			request, err := resolveStorageOperatorRequest()
@@ -245,6 +267,11 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 				return errExit
 			}
 			request.FleetStopped = fleetStopped
+			if purgeType != "" {
+				return exitForCode(doStoragePurgeStranded(cmd.Context(), request, strandedPurgeOptions{
+					Type: purgeType, DryRun: dryRun, Confirm: confirmPurge,
+				}, stdout, stderr))
+			}
 			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{
 				DryRun: dryRun, DumpPath: dumpPath,
 				Move: setOf(moveIDs), RecordCarried: setOf(carriedIDs),
@@ -266,6 +293,10 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 		"for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated)")
 	cmd.Flags().StringSliceVar(&replaceIDs, strandedReplaceBindingRowFlag, nil,
 		"for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated)")
+	cmd.Flags().StringVar(&purgeType, strandedPurgeTypeFlag, "",
+		"instead of copying, back up and then DELETE every stranded work-store row of this type (only \"message\"): the rows the containment check calls stranded, each also message-class; --dry-run lists them")
+	cmd.Flags().BoolVar(&confirmPurge, strandedConfirmPurgeFlag, false,
+		"with --"+strandedPurgeTypeFlag+": confirm the delete (without it the run lists the rows and deletes nothing)")
 	cmd.Flags().StringSliceVar(&dropIDs, strandedDropWorkRowFlag, nil,
 		"for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated)")
 	return cmd
