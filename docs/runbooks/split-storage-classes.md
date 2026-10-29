@@ -238,6 +238,18 @@ until the re-run finishes it.
 `gc storage status` exits non-zero while any rig awaits import, holds a pending
 clear, or holds rows written after its import.
 
+The import refuses, before writing anything, a rig store another registered
+city also uses (shared or company stores wait for the single-writer
+attestation), rows scoped to another rig or city, open rows another city's
+agent claims, and a bd CLI rig whose edges it would have to copy. While an
+import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
+every gc command refuse; re-run the import to finish it. If a rig store is
+gone for good after its import wrote its marker, `gc storage migrate
+--from-rigs --rig <rig> --abandon-rig-store --fleet-stopped` proves the binding
+holds every row the manifest records and then records the clear complete. Rig
+records name the store they speak for: a new store under a reused rig name is
+not taken for the old one.
+
 ## Step 5: start, and verify
 
 ```
