@@ -1787,23 +1787,23 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 // path must know when its candidate was NOT neutralized, because an
 // unmarked candidate could otherwise be selected by idempotency recovery.
 func markFailedReporting(store beads.Store, ids []string) error {
-	return errors.Join(stampFailed(store, ids)...)
+	_, errs := stampFailed(store, ids)
+	return errors.Join(errs...)
 }
 
 // failInstantiation stamps the created beads as failed and returns the mint's
 // cause. When every stamp landed it returns cause itself; otherwise it appends
-// the beads whose stamp it could not confirm. The stamp faults are text only,
-// so errors.Is and errors.As answer for the mint failure alone.
+// the ids of the beads whose stamp it could not confirm. The stamp faults stay
+// out of the error, text included: the controller classifies a spawn failure
+// by its message as well as its identity, and a stamp refused with a transient
+// store fault must not turn a hard mint failure into a retry that adopts the
+// bead the stamp could not mark.
 func failInstantiation(store beads.Store, ids []string, cause error) error {
-	errs := stampFailed(store, ids)
-	if len(errs) == 0 {
+	unconfirmed, _ := stampFailed(store, ids)
+	if len(unconfirmed) == 0 {
 		return cause
 	}
-	msgs := make([]string, len(errs))
-	for i, err := range errs {
-		msgs[i] = err.Error()
-	}
-	return fmt.Errorf("%w (failure stamp not confirmed: %s)", cause, strings.Join(msgs, "; "))
+	return fmt.Errorf("%w (failure stamp not confirmed on %s)", cause, strings.Join(unconfirmed, ", "))
 }
 
 // stampFailed sets beadmeta.MoleculeFailedMetadataKey and clears the
@@ -1811,8 +1811,9 @@ func failInstantiation(store beads.Store, ids []string, cause error) error {
 // once, after every other bead has been stamped, so a transient fault on the
 // row that just failed the mint has the whole loop to clear. The batch is
 // idempotent, so the retry also completes a batch a key-by-key store
-// half-applied. It returns one error per bead whose retry was refused too.
-func stampFailed(store beads.Store, ids []string) []error {
+// half-applied. It returns the beads whose retry was refused too, and one
+// error per such bead.
+func stampFailed(store beads.Store, ids []string) (unconfirmed []string, errs []error) {
 	stamp := map[string]string{
 		beadmeta.MoleculeFailedMetadataKey: "true",
 		InstantiatingMetadataKey:           "",
@@ -1823,13 +1824,13 @@ func stampFailed(store beads.Store, ids []string) []error {
 			refused = append(refused, id)
 		}
 	}
-	var errs []error
 	for _, id := range refused {
 		if err := store.SetMetadataBatch(id, stamp); err != nil {
+			unconfirmed = append(unconfirmed, id)
 			errs = append(errs, fmt.Errorf("marking %s molecule_failed: %w", id, err))
 		}
 	}
-	return errs
+	return unconfirmed, errs
 }
 
 func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {

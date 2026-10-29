@@ -4095,8 +4095,9 @@ func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
 }
 
 // A mint whose root stamp is refused on both attempts still stamps the body,
-// and its error names the root it could not confirm without letting the stamp
-// fault take over the error's typed identity.
+// and its error names the root it could not confirm without carrying the
+// stamp fault: neither its typed identity nor its text, which the controller
+// would classify as if the mint itself had failed that way.
 func TestInstantiateFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -4129,7 +4130,10 @@ func TestInstantiateFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
 			if errors.Is(err, tc.fault) {
 				t.Fatalf("err = %v wraps the stamp fault; the mint cause must keep the error's identity", err)
 			}
-			suffix := fmt.Sprintf("(failure stamp not confirmed: marking %s molecule_failed: %v on %s)", root, tc.fault, root)
+			if strings.Contains(err.Error(), tc.fault.Error()) {
+				t.Fatalf("err = %q carries the stamp fault's text %q; only the cause may speak for the mint", err.Error(), tc.fault.Error())
+			}
+			suffix := fmt.Sprintf("(failure stamp not confirmed on %s)", root)
 			if !strings.HasSuffix(err.Error(), suffix) {
 				t.Fatalf("err = %q, want suffix %q", err.Error(), suffix)
 			}
@@ -4208,8 +4212,7 @@ func TestInstantiateFragmentFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
 	if err == nil {
 		t.Fatal("InstantiateFragment succeeded; want the dep wiring failure")
 	}
-	want := fmt.Sprintf("wiring fragment dep frag.b->frag.a: injected dep failure (failure stamp not confirmed: marking %s molecule_failed: %v on %s)",
-		refused, errInjectedStamp, refused)
+	want := fmt.Sprintf("wiring fragment dep frag.b->frag.a: injected dep failure (failure stamp not confirmed on %s)", refused)
 	if err.Error() != want {
 		t.Fatalf("err = %q, want %q", err.Error(), want)
 	}
