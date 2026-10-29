@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -922,7 +923,20 @@ func cityMigrationGuardDirectory(cityPath string) string {
 
 // openStorageScopeStore opens one scope's bead store for the rig-residue
 // census. Overridden by tests, which have no real rig workspaces to open.
-var openStorageScopeStore = openStoreAtForCity
+var openStorageScopeStore = openPhysicalScopeStore
+
+// openPhysicalScopeStore opens a scope's store as the storage-admin commands
+// read it: every physical row, whatever its class. The rig importer and its
+// census move infrastructure rows out of a rig ledger, so they read the rows
+// a runtime reader is never handed; under the split-strict test gate the
+// one-shot open would hand out the work view, which hides exactly those rows.
+func openPhysicalScopeStore(storePath, cityPath string) (beads.Store, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, nil, gate.ModeUnset, false, false, false, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
 
 // censusRigInfraResidue refuses a copy while any rig scope holds a bead this
 // migration classifies as infrastructure. A city that already converged copies

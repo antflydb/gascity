@@ -505,7 +505,7 @@ func TestReviewPreflightWordsARigRefusalAsTheRigImports(t *testing.T) {
 }
 
 // Should-fix: the importer through the production open path: a file-provider
-// city whose rig store openStoreAtForCity opens, no seam.
+// city whose rig store the storage-admin opener opens, no seam.
 func TestReviewImportThroughTheProductionOpenPath(t *testing.T) {
 	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil), workRow("gp-w", "open")}, nil)
@@ -514,7 +514,7 @@ func TestReviewImportThroughTheProductionOpenPath(t *testing.T) {
 	}
 	prev := rigImportStoreOpener
 	rigImportStoreOpener = func(cityPath string, rig config.Rig) (beads.Store, error) {
-		return openStoreAtForCity(rig.Path, cityPath)
+		return openPhysicalScopeStore(rig.Path, cityPath)
 	}
 	t.Cleanup(func() { rigImportStoreOpener = prev })
 	if code, o, e := f.importRigs(); code != 0 {

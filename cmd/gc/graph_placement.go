@@ -152,7 +152,9 @@ func graphResidenceForTree(placement, relic beads.Store, id string, accept func(
 	if err == nil || relic == nil || relic == placement || !errors.Is(err, beads.ErrNotFound) {
 		return b, placement, err
 	}
-	rb, rerr := relic.Get(id)
+	// Relic leg (S4 debt): a rig ledger holds graph rows only until the rig
+	// is imported (gc storage migrate --from-rigs); the leg retires with it.
+	rb, rerr := beads.RelicGet(relic, id)
 	switch {
 	case rerr == nil:
 		return rb, relic, nil
