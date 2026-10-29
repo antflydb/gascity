@@ -89,13 +89,13 @@ func censusRigs(cityPath string, cfg *config.City, target infraBindingTarget, fu
 	cityName := loadedCityName(cfg, cityPath)
 	rows := make([]rigCensusRow, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		rows = append(rows, censusRig(cityPath, cityName, target, rig, full))
+		rows = append(rows, censusRig(cityPath, cityName, cfg, target, rig, full))
 	}
 	return rows
 }
 
 // censusRig censuses one rig. It writes nothing anywhere.
-func censusRig(cityPath, cityName string, target infraBindingTarget, rig config.Rig, full bool) rigCensusRow {
+func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingTarget, rig config.Rig, full bool) rigCensusRow {
 	row := rigCensusRow{Rig: rig.Name}
 	if strings.TrimSpace(rig.Path) == "" {
 		row.State, row.Why = rigCensusSkipped, "unbound"
@@ -110,6 +110,10 @@ func censusRig(cityPath, cityName string, target infraBindingTarget, rig config.
 		return row
 	}
 	loc := newRigImportLocation(target, cityPath, rig.Name)
+	if err := loc.storeIdentityRefusal(rigStoreRoot(cityPath, rig)); err != nil {
+		row.State, row.Err = rigCensusUnreachable, err
+		return row
+	}
 	manifest, marked, err := loc.readManifest()
 	if err != nil {
 		row.State, row.Err = rigCensusUnreachable, err
@@ -164,6 +168,8 @@ func censusRig(cityPath, cityName string, target infraBindingTarget, rig config.
 	sort.Strings(row.Reused)
 	clean := fileExists(loc.CleanPath())
 	switch {
+	case fileExists(loc.InFlightPath()):
+		row.State, row.Why = rigCensusRetained, "an import is in flight"
 	case notePresent && !note.Complete:
 		row.State = rigCensusRetained
 	case marked && len(row.Retained) > 0:
@@ -178,19 +184,27 @@ func censusRig(cityPath, cityName string, target infraBindingTarget, rig config.
 		row.State = rigCensusAwaiting
 	}
 	if full {
-		var held map[string]beads.Bead
+		env := rigImportEnv{CityPath: cityPath, CityName: cityName, Cfg: cfg, Target: target}
+		ctx := rigPlanContext{Rig: rig.Name, CityName: cityName, Snap: snap, Manifest: manifest}
 		if present, _ := infraPathExists(target.Database); present {
 			if binding, oerr := openInfraBindingReadOnly(target); oerr == nil {
-				held, err = beads.GetMany(binding, bindingIDsToProbe(snap, gen))
-				_ = closeBeadStoreHandle(binding)
-				if err != nil {
-					row.Err = fmt.Errorf("reading the city binding: %w", err)
+				if c, cerr := rigImportPlanContext(env, rig, snap, manifest, binding, store); cerr == nil {
+					ctx = c
+				} else {
+					row.Err = cerr
 				}
+				_ = closeBeadStoreHandle(binding)
 			} else {
 				row.Err = fmt.Errorf("opening the city binding: %w", oerr)
 			}
 		}
-		plan := planRigImport(rig.Name, cityName, snap, manifest, held)
+		plan := planRigImport(ctx)
+		if err := rigImportSharedStoreRefusal(env, rig); err != nil {
+			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "give the rig a store of its own"})
+		}
+		if _, err := rigImportHashConfigOpener(cityPath, cfg, rig); err != nil {
+			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "serve the rig from a bd or file provider"})
+		}
 		row.Plan = &plan
 	}
 	return row
@@ -210,6 +224,9 @@ func rigCensusLine(r rigCensusRow) string {
 	case rigCensusAwaiting:
 		return fmt.Sprintf("rig %s: awaiting import (%d infrastructure bead(s), %d open); run `%s`", r.Rig, r.Infra, r.Open, rigImportInstruction(r.Rig))
 	case rigCensusRetained:
+		if r.Why != "" {
+			return fmt.Sprintf("rig %s: retained — %s; finish it with `%s`", r.Rig, r.Why, rigImportInstruction(r.Rig))
+		}
 		return fmt.Sprintf("rig %s: retained — the rig still holds %d bead(s) its import carried (the clear is pending); finish it with `%s`", r.Rig, len(r.Retained), rigImportInstruction(r.Rig))
 	case rigCensusStranded:
 		return fmt.Sprintf("rig %s: stranded — %d infrastructure bead(s) the import never carried: %s; copy them in with `%s`", r.Rig, len(r.Stranded), infraStrandedIDList(r.Stranded), rigImportInstruction(r.Rig))
@@ -245,6 +262,10 @@ func rigBootRefusal(cityPath string, cfg *config.City, target infraBindingTarget
 			continue
 		}
 		loc := newRigImportLocation(target, cityPath, rig.Name)
+		if fileExists(loc.InFlightPath()) {
+			reasons = append(reasons, fmt.Sprintf("rig %s's import is in flight (%s): the binding may hold its rows without their edges, so a blocked step would read as ready. Stop the city and finish it with `%s`", rig.Name, loc.InFlightPath(), rigImportInstruction(rig.Name)))
+			continue
+		}
 		note, present, err := readInfraClearedNoteAt(loc.NotePath())
 		switch {
 		case err != nil:

@@ -289,13 +289,15 @@ func TestRigImportMCShapedFixture(t *testing.T) {
 		t.Fatalf("import after closing the trees = %d: %s %s", code, stdout, stderr)
 	}
 	t.Logf("imported in %s: %s", elapsed.Round(time.Millisecond), strings.TrimSpace(stdout))
-	for _, want := range []string{"imported 2356 bead(s) and 5640 edge(s)", "0 cross-store gate(s) minted", "49 scope annotation(s)", "2356 rig cop(ies) cleared", "rig min_hash_length 6"} {
+	for _, want := range []string{"imported 2356 bead(s) and 5640 edge(s)", "0 cross-store gate(s) minted", "49 scope annotation(s)", "2356 rig cop(ies) cleared", "rig min_hash_length 7"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("the report lacks %q: %s", want, stdout)
 		}
 	}
-	if got := f.hashConf["packs"].values[bdMinHashLengthKey]; got != "6" {
-		t.Errorf("min_hash_length = %q, want 6", got)
+	// The fixture's non-wisp suffixes are 3-5 characters and its wisp
+	// suffixes up to 6, so the floor is 7 (bd sizes wisp ids too).
+	if got := f.hashConf["packs"].values[bdMinHashLengthKey]; got != "7" {
+		t.Errorf("min_hash_length = %q, want 7", got)
 	}
 	rest := rigTestList(t, mc.store)
 	if len(rest) != 824 {

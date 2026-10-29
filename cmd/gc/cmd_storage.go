@@ -243,6 +243,7 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		fromBackup   bool
 		fromRigs     bool
 		rigNames     []string
+		abandonRig   bool
 		fleetStopped bool
 	)
 	cmd := &cobra.Command{
@@ -318,6 +319,13 @@ half is an explicit operator attestation.`,
 			}
 			request.FleetStopped = fleetStopped
 			request.FromBackup = fromBackup
+			if abandonRig {
+				if !fromRigs || len(rigNames) != 1 {
+					fmt.Fprintf(stderr, "gc %s %s: --%s needs --%s and exactly one --%s\n", surface.Namespace, surface.Verb, storageAbandonRigStoreFlag, storageFromRigsFlag, storageRigFlag) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				return exitForCode(doStorageAbandonRigStore(cmd.Context(), request, rigNames[0], stdout, stderr))
+			}
 			if fromRigs {
 				return exitForCode(doStorageMigrateFromRigs(cmd.Context(), request, rigNames, stdout, stderr))
 			}
@@ -332,6 +340,8 @@ half is an explicit operator attestation.`,
 		"import each rig's graph and infrastructure beads into the city binding")
 	cmd.Flags().StringSliceVar(&rigNames, storageRigFlag, nil,
 		"with --"+storageFromRigsFlag+", import only this rig (repeatable)")
+	cmd.Flags().BoolVar(&abandonRig, storageAbandonRigStoreFlag, false,
+		"with --"+storageFromRigsFlag+" --"+storageRigFlag+" X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	return cmd

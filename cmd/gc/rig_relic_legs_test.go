@@ -19,7 +19,7 @@ func relicLegRoutes(t *testing.T, split bool) (*storageRoutes, string, map[strin
 	rigDirs := map[string]string{"packs": t.TempDir(), "busy": t.TempDir()}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "packs", Path: rigDirs["packs"]}, {Name: "busy", Path: rigDirs["busy"]}}}
 	bindingRoot := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bindingRoot, rigGraphCleanMarkerName("packs")), []byte("clean\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bindingRoot, rigGraphCleanMarkerName("packs")), rigTestRecord(cityPath, rigDirs["packs"]), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	markers := &rigGraphMarkers{bindingRoot: bindingRoot, cityPath: cityPath, rigs: cfg.Rigs}

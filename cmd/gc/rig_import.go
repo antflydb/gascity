@@ -102,6 +102,52 @@ func (l rigImportLocation) BackupPath() string {
 
 func (l rigImportLocation) NotePath() string { return rigGraphClearedNotePath(l.CityPath, l.Rig) }
 
+// InFlightPath is the record an import writes before it touches the binding
+// and removes once its marker is written. While it exists the binding may
+// hold a half-finished copy (rows without their edges), so boot and every
+// CLI route refuse (rigBootRefusal).
+func (l rigImportLocation) InFlightPath() string {
+	return filepath.Join(l.BindingRoot, rigGraphInFlightName(l.Rig))
+}
+
+// rigRecordStorePrefix starts the line of a rig record that names the store
+// the record speaks for, so a new store under a reused rig name is not taken
+// for the one that was imported or censused clean.
+const rigRecordStorePrefix = "store "
+
+// writeRecord writes one of the rig's records, naming the rig store it
+// speaks for (storeRoot, the rig's canonical scope root).
+func (l rigImportLocation) writeRecord(path, line, storeRoot string) error {
+	return writeRigImportRecord(path, line+"\n"+rigRecordStorePrefix+storeRoot)
+}
+
+// rigRecordStore returns the store a rig record names, and whether it names
+// one.
+func rigRecordStore(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if root, ok := strings.CutPrefix(strings.TrimSpace(line), rigRecordStorePrefix); ok && root != "" {
+			return root, true
+		}
+	}
+	return "", false
+}
+
+// rigRecordSpeaksFor reports whether the record at path exists and names
+// storeRoot.
+func rigRecordSpeaksFor(path, storeRoot string) bool {
+	root, ok := rigRecordStore(path)
+	return ok && samePath(root, storeRoot)
+}
+
+// rigStoreRoot is the canonical scope root a rig's records name.
+func rigStoreRoot(cityPath string, rig config.Rig) string {
+	return resolveStoreScopeRoot(cityPath, rig.Path)
+}
+
 // readManifest reads the rig's manifest. It is trusted only behind the
 // marker: before it, an interrupted attempt is re-copied.
 func (l rigImportLocation) readManifest() (*infraCopyManifest, bool, error) {
@@ -113,7 +159,7 @@ func (l rigImportLocation) readManifest() (*infraCopyManifest, bool, error) {
 		return nil, true, err
 	}
 	if !recorded {
-		return nil, true, fmt.Errorf("rig %s carries an import marker %s with no manifest %s, so nothing says which rows the import carried. Restore the manifest, or remove the marker to import the rig again", l.Rig, l.MarkerPath(), l.ManifestPath())
+		return nil, true, fmt.Errorf("rig %s carries an import marker %s with no manifest %s, so nothing says which rows the import carried. Restore the manifest from a backup of the binding root. Do not remove the marker: the binding may hold the only copy of the rows the import moved", l.Rig, l.MarkerPath(), l.ManifestPath())
 	}
 	return &m, true, nil
 }
@@ -174,7 +220,10 @@ type rigHashLengthConfig interface {
 // rigImportHashConfigOpener returns the rig's bd config surface, or nil for a
 // rig whose store mints from a monotonic sequence (the file store), which a
 // clear cannot rewind and so needs no reservation.
-var rigImportHashConfigOpener = func(cityPath string, cfg *config.City, rig config.Rig) (rigHashLengthConfig, error) {
+var rigImportHashConfigOpener = defaultRigImportHashConfigOpener
+
+// defaultRigImportHashConfigOpener is the production rigImportHashConfigOpener.
+func defaultRigImportHashConfigOpener(cityPath string, cfg *config.City, rig config.Rig) (rigHashLengthConfig, error) {
 	root := resolveStoreScopeRoot(cityPath, rig.Path)
 	switch provider := authoritativeBeadsProviderForScope(root, cityPath); {
 	case provider == "file":
@@ -185,10 +234,13 @@ var rigImportHashConfigOpener = func(cityPath string, cfg *config.City, rig conf
 	return bdStoreForRig(root, cityPath, cfg), nil
 }
 
-const bdMinHashLengthKey = "min_hash_length"
-
-// bdMaxHashLength is bd's default ceiling for adaptive ids.
-const bdMaxHashLength = 8
+const (
+	bdMinHashLengthKey = "min_hash_length"
+	bdMaxHashLengthKey = "max_hash_length"
+	// bdDefaultMaxHashLength is bd's documented default ceiling for adaptive
+	// ids when max_hash_length is unset (docs/reference/configuration.md).
+	bdDefaultMaxHashLength = 8
+)
 
 // rigImportEnv is what one run of the importer needs.
 type rigImportEnv struct {
@@ -263,7 +315,15 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 		return result
 	}
 	loc := newRigImportLocation(env.Target, env.CityPath, rig.Name)
-	manifest, _, err := loc.readManifest()
+	storeRoot := rigStoreRoot(env.CityPath, rig)
+	refuse := func(err error) rigImportResult {
+		result.Outcome, result.Err = rigImportRefused, err
+		return result
+	}
+	if err := loc.storeIdentityRefusal(storeRoot); err != nil {
+		return refuse(err)
+	}
+	manifest, marked, err := loc.readManifest()
 	if err != nil {
 		return fail(err)
 	}
@@ -271,19 +331,27 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	if err != nil {
 		return fail(err)
 	}
+	if notePresent && !marked {
+		return refuse(fmt.Errorf("rig %s has a cleared note %s but no import marker %s: rows may already have been removed from the rig, so the binding may hold their only copy. Restore the marker and manifest from a backup of the binding root, then re-run; nothing was written", rig.Name, loc.NotePath(), loc.MarkerPath()))
+	}
 	resuming := notePresent && !note.Complete
+
+	if err := rigImportSharedStoreRefusal(env, rig); err != nil {
+		return refuse(err)
+	}
+	hashConf, err := rigImportHashConfigOpener(env.CityPath, env.Cfg, rig)
+	if err != nil {
+		return refuse(fmt.Errorf("rig %s: %w; nothing was written", rig.Name, err))
+	}
 
 	rigStore, err := rigImportStoreOpener(env.CityPath, rig)
 	if err != nil {
-		result.Outcome = rigImportRefused
-		result.Err = fmt.Errorf("opening rig %s's store: %w (an unreachable rig blocks only itself; it stays awaiting import and its relic legs keep it readable)", rig.Name, err)
-		return result
+		return refuse(fmt.Errorf("opening rig %s's store: %w (an unreachable rig blocks only itself; it stays awaiting import and its relic legs keep it readable)", rig.Name, err))
 	}
 	defer closeBeadStoreHandle(rigStore) //nolint:errcheck // best-effort close
 	snap, err := readRigSnapshot(rigStore)
 	if err != nil {
-		result.Outcome, result.Err = rigImportRefused, fmt.Errorf("rig %s: %w", rig.Name, err)
-		return result
+		return refuse(fmt.Errorf("rig %s: %w", rig.Name, err))
 	}
 	binding, err := rigImportBindingOpener(env.Target)
 	if err != nil {
@@ -298,15 +366,11 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	}
 	defer closeBinding()
 
-	gen := coordclass.CurrentGeneration
-	if manifest != nil {
-		gen = manifest.Generation
-	}
-	held, err := beads.GetMany(binding, bindingIDsToProbe(snap, gen))
+	ctx, err := rigImportPlanContext(env, rig, snap, manifest, binding, rigStore)
 	if err != nil {
-		return fail(fmt.Errorf("reading the city binding: %w", err))
+		return fail(err)
 	}
-	plan := planRigImport(rig.Name, env.CityName, snap, manifest, held)
+	plan := planRigImport(ctx)
 	result.OpenRouted = plan.OpenRouted
 	if len(plan.Refusals) > 0 {
 		result.Outcome, result.Refusals = rigImportRefused, plan.Refusals
@@ -315,6 +379,7 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	if len(plan.Move) == 0 && len(plan.Retained) == 0 && !resuming {
 		closeBinding()
 		if manifest != nil {
+			_ = os.Remove(loc.InFlightPath())
 			result.Outcome = rigImportNothing
 			if notePresent && note.Complete {
 				return result
@@ -326,7 +391,10 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 			return result
 		}
 		if plan.Infra == 0 {
-			if err := writeRigImportRecord(loc.CleanPath(), fmt.Sprintf("rig %s holds no infrastructure bead (census %s)", rig.Name, time.Now().UTC().Format(time.RFC3339))); err != nil {
+			if fileExists(loc.InFlightPath()) {
+				return refuse(fmt.Errorf("rig %s holds no infrastructure row but an interrupted import's record %s is present: the binding may hold the only copy of rows it moved. Restore the rig store, or its records, then re-run", rig.Name, loc.InFlightPath()))
+			}
+			if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s holds no infrastructure bead (census %s)", rig.Name, time.Now().UTC().Format(time.RFC3339)), storeRoot); err != nil {
 				return fail(fmt.Errorf("recording rig %s clean: %w", rig.Name, err))
 			}
 			result.Outcome = rigImportClean
@@ -339,7 +407,25 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	}
 
 	if len(plan.Move) > 0 {
-		if err := rigImportCopy(loc, binding, rigStore, manifest, plan, &result); err != nil {
+		// The in-flight record goes down before the binding is touched: from
+		// here until the marker the binding may hold rows without their
+		// edges, and boot and every CLI route refuse rather than serve them.
+		if !fileExists(loc.InFlightPath()) {
+			if err := loc.writeRecord(loc.InFlightPath(), fmt.Sprintf("rig %s import in flight since %s; finish it with `%s`", rig.Name, time.Now().UTC().Format(time.RFC3339), rigImportInstruction(rig.Name)), storeRoot); err != nil {
+				return fail(fmt.Errorf("recording rig %s's import in flight: %w", rig.Name, err))
+			}
+		}
+		if err := rigImportPrepare(loc, binding, snap, manifest, plan); err != nil {
+			var refusal *rigImportPrepareRefusal
+			if errors.As(err, &refusal) {
+				return refuse(err)
+			}
+			return fail(err)
+		}
+		if err := rigImportCrashPoint("prepared"); err != nil {
+			return fail(err)
+		}
+		if err := rigImportCopy(loc, binding, rigStore, plan, &result); err != nil {
 			return fail(err)
 		}
 		closeBinding()
@@ -356,7 +442,7 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 			return fail(err)
 		}
 		if !fileExists(loc.MarkerPath()) {
-			if err := writeRigImportRecord(loc.MarkerPath(), fmt.Sprintf("rig %s graph rows imported into binding %s (%s) %s", rig.Name, env.Target.Binding, env.Target.Database, time.Now().UTC().Format(time.RFC3339))); err != nil {
+			if err := loc.writeRecord(loc.MarkerPath(), fmt.Sprintf("rig %s graph rows imported into binding %s (%s) %s", rig.Name, env.Target.Binding, env.Target.Database, time.Now().UTC().Format(time.RFC3339)), storeRoot); err != nil {
 				return fail(fmt.Errorf("writing rig %s's import marker: %w", rig.Name, err))
 			}
 		}
@@ -371,6 +457,9 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	} else {
 		closeBinding()
 	}
+	if err := os.Remove(loc.InFlightPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fail(fmt.Errorf("removing rig %s's in-flight record: %w", rig.Name, err))
+	}
 
 	reread, _, err := loc.readManifest()
 	if err != nil {
@@ -379,7 +468,7 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	if reread == nil {
 		return fail(fmt.Errorf("rig %s: the import marker is missing after the copy", rig.Name))
 	}
-	floor, err := rigImportReserveIDs(env, rig, reread)
+	floor, err := rigImportReserveIDs(hashConf, reread)
 	if err != nil {
 		return fail(fmt.Errorf("raising rig %s's minimum id length before the clear: %w (nothing was removed from the rig; re-run to finish)", rig.Name, err))
 	}
@@ -390,6 +479,10 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	cleared, err := rigImportClear(env, loc, rigStore, snap, reread, note, resuming, plan)
 	result.Cleared = cleared
 	if err != nil {
+		var refusal *rigImportPrepareRefusal
+		if errors.As(err, &refusal) {
+			return refuse(err)
+		}
 		return fail(err)
 	}
 	if len(plan.Move) == 0 && len(plan.Retained) == 0 {
@@ -400,29 +493,239 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	return result
 }
 
-// rigImportCopy is phases 2 and 3: prepare, then copy rows, edges and gates.
-func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, manifest *infraCopyManifest, plan rigImportPlan, result *rigImportResult) error {
-	creator, ok := binding.(beads.ForeignIDCreator)
-	if !ok {
-		return fmt.Errorf("binding store %T cannot preserve bead ids", binding)
+// rigImportPrepareRefusal is a refusal the prepare or clear step reaches:
+// nothing it names was deleted.
+type rigImportPrepareRefusal struct{ msg string }
+
+func (e *rigImportPrepareRefusal) Error() string { return e.msg }
+
+// storeIdentityRefusal refuses a rig whose records name another store: the
+// rig name was reused for a new store, and the old store's import must not
+// speak for it.
+func (l rigImportLocation) storeIdentityRefusal(storeRoot string) error {
+	for _, path := range []string{l.MarkerPath(), l.CleanPath(), l.InFlightPath()} {
+		root, ok := rigRecordStore(path)
+		if !fileExists(path) || (ok && samePath(root, storeRoot)) {
+			continue
+		}
+		named := root
+		if !ok {
+			named = "no store"
+		}
+		return fmt.Errorf("rig %s's record %s names %s, but the rig now resolves to %s: the name was reused for another store. Move the old rig's records (infra.rig.%s.* beside the binding, and its cleared note) aside once its rows are accounted for, then re-run", l.Rig, path, named, storeRoot, l.Rig)
 	}
-	stamp := rigImportStamp(loc.Rig)
-	stale, err := binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: stamp}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	return nil
+}
+
+// rigImportPlanContext gathers what the plan reads: the binding's rows under
+// the ids it asks about, every copy of an open moved row's blocker held in
+// another store, whether the rig store can report edge payloads, and the
+// claimant rule for shared stores.
+func rigImportPlanContext(env rigImportEnv, rig config.Rig, snap rigSnapshot, manifest *infraCopyManifest, binding, rigStore beads.Store) (rigPlanContext, error) {
+	gen := coordclass.CurrentGeneration
+	if manifest != nil {
+		gen = manifest.Generation
+	}
+	ctx := rigPlanContext{Rig: rig.Name, CityName: env.CityName, Snap: snap, Manifest: manifest}
+	held, err := beads.GetMany(binding, bindingIDsToProbe(snap, gen))
+	if err != nil {
+		return ctx, fmt.Errorf("reading the city binding: %w", err)
+	}
+	ctx.Held = held
+	if ids := elsewhereCandidates(snap, gen, held); len(ids) > 0 {
+		ctx.Elsewhere, ctx.ElsewhereUnread = probeElsewhere(env, rig, ids)
+	}
+	_, ctx.PayloadsUnreadable = rigStore.(beads.DepMetadataReader)
+	ctx.PayloadsUnreadable = !ctx.PayloadsUnreadable
+	if env.Cfg != nil {
+		gate := newForeignClaimGate(env.Cfg, beads.SessionStore{Store: binding})
+		ctx.ForeignClaimant = func(assignee string) bool { return !gate.observable(assignee) }
+	}
+	return ctx, nil
+}
+
+// probeElsewhere reads ids from every store other than rig's and the
+// binding: the city work store and each other bound rig. A store that cannot
+// be opened or read is named in unread.
+func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string][]beads.Bead, []string) {
+	found := map[string][]beads.Bead{}
+	var unread []string
+	read := func(label string, open func() (beads.Store, error)) {
+		store, err := open()
+		if err != nil {
+			unread = append(unread, fmt.Sprintf("%s: %v", label, err))
+			return
+		}
+		defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+		got, err := beads.GetMany(store, ids)
+		if err != nil {
+			unread = append(unread, fmt.Sprintf("%s: %v", label, err))
+			return
+		}
+		for _, id := range ids {
+			if b, ok := got[id]; ok {
+				found[id] = append(found[id], b)
+			}
+		}
+	}
+	read("the city work store", func() (beads.Store, error) { return rigImportCityWorkOpener(env.CityPath) })
+	if env.Cfg != nil {
+		self := rigStoreRoot(env.CityPath, rig)
+		for _, other := range env.Cfg.Rigs {
+			if other.Name == rig.Name || strings.TrimSpace(other.Path) == "" || samePath(rigStoreRoot(env.CityPath, other), self) {
+				continue
+			}
+			r := other
+			read("rig "+r.Name, func() (beads.Store, error) { return rigImportStoreOpener(env.CityPath, r) })
+		}
+	}
+	return found, unread
+}
+
+// rigImportCityWorkOpener opens the city work store for the blocker probe.
+var rigImportCityWorkOpener = func(cityPath string) (beads.Store, error) { return openInfraMigrationSource(cityPath) }
+
+// rigImportOtherCities lists the other cities registered on this machine.
+var rigImportOtherCities = func(cityPath string) ([]string, error) {
+	entries, err := otherRegisteredCities(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+	return paths, nil
+}
+
+// rigImportScopeDoltTarget resolves the Dolt database a scope's store lives
+// in; ok=false for a scope with no authoritative Dolt target (a file store).
+var rigImportScopeDoltTarget = func(cityPath, scopeRoot string) (string, bool) {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok || strings.TrimSpace(target.Database) == "" {
+		return "", false
+	}
+	endpoint := target.Socket
+	if endpoint == "" {
+		endpoint = target.Host + ":" + target.Port
+	}
+	return endpoint + "/" + target.Database, true
+}
+
+// rigImportSharedStoreRefusal refuses a rig whose store another registered
+// city also uses: the same scope root, or the same Dolt database. A shared
+// or company store holds rows another city owns, and is refused until S5's
+// single-writer attestation exists. A registry that cannot be read refuses
+// too: absence of a sharer must be shown, not assumed.
+func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
+	others, err := rigImportOtherCities(env.CityPath)
+	if err != nil {
+		return fmt.Errorf("rig %s: reading the city registry to rule out a shared rig store: %w; nothing was written", rig.Name, err)
+	}
+	selfRoot := rigStoreRoot(env.CityPath, rig)
+	selfDB, selfHasDB := rigImportScopeDoltTarget(env.CityPath, selfRoot)
+	for _, otherPath := range others {
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(otherPath, io.Discard)
+		if err == nil && cfg == nil {
+			err = errors.New("it loaded no configuration")
+		}
+		if err != nil {
+			return fmt.Errorf("rig %s: city %s is registered but its config cannot be read (%w), so it cannot be ruled out as sharing the rig store; nothing was written", rig.Name, otherPath, err)
+		}
+		for _, other := range cfg.Rigs {
+			if strings.TrimSpace(other.Path) == "" {
+				continue
+			}
+			root := rigStoreRoot(otherPath, other)
+			if samePath(root, selfRoot) {
+				return fmt.Errorf("rig %s's store %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, selfRoot, otherPath, other.Name)
+			}
+			if selfHasDB {
+				if db, ok := rigImportScopeDoltTarget(otherPath, root); ok && db == selfDB {
+					return fmt.Errorf("rig %s's Dolt database %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, selfDB, otherPath, other.Name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// rigImportPrepare removes the binding rows an interrupted earlier attempt
+// of this rig's import wrote — but only rows it can prove are that attempt's
+// copies of rows the rig still holds, unchanged: same (id, created_at), and
+// the binding copy field-equal to what the import writes for the rig row. A
+// stamped row the rig no longer holds may be the binding's only copy, and a
+// copy that differs was written to since; both refuse, naming the ids, and
+// nothing is deleted.
+func rigImportPrepare(loc rigImportLocation, binding beads.Store, snap rigSnapshot, manifest *infraCopyManifest, plan rigImportPlan) error {
+	stale, err := binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(loc.Rig)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return fmt.Errorf("listing the binding's rows from rig %s: %w", loc.Rig, err)
 	}
-	var drop []string
+	moving := make(map[string]bool, len(plan.Move))
+	for _, b := range plan.Move {
+		moving[b.ID] = true
+	}
+	var drop, onlyCopy, changed []string
 	for _, b := range stale {
 		if manifest != nil && (manifest.IDs[b.ID] || manifest.Gates[b.ID]) {
 			continue
 		}
+		if hasLabel(b.Labels, dispatch.CrossStoreGateLabel) {
+			if moving[b.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey]] {
+				drop = append(drop, b.ID)
+				continue
+			}
+			onlyCopy = append(onlyCopy, b.ID)
+			continue
+		}
+		r, ok := snap.byID[b.ID]
+		if !ok || !moving[b.ID] || !rigSameCreated(r, b) {
+			onlyCopy = append(onlyCopy, b.ID)
+			continue
+		}
+		want := rigImportRow(r, loc.Rig, nil)
+		if recorded, ok := b.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]; ok {
+			want.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] = recorded
+		}
+		if diff := beadCopyDifference(want, b); diff != "" {
+			changed = append(changed, fmt.Sprintf("%s (%s)", b.ID, diff))
+			continue
+		}
 		drop = append(drop, b.ID)
+	}
+	var reasons []string
+	if len(onlyCopy) > 0 {
+		sort.Strings(onlyCopy)
+		reasons = append(reasons, fmt.Sprintf("the binding holds %d row(s) stamped as rig %s's import that no manifest records and the rig does not hold as the same bead, so the binding may hold their only copy: %s", len(onlyCopy), loc.Rig, infraStrandedIDList(onlyCopy)))
+	}
+	if len(changed) > 0 {
+		sort.Strings(changed)
+		reasons = append(reasons, fmt.Sprintf("%d binding cop(ies) from an interrupted import of rig %s differ from the rig rows they were copied from, so one side was written during the interruption: %s", len(changed), loc.Rig, infraStrandedIDList(changed)))
+	}
+	if len(reasons) > 0 {
+		return &rigImportPrepareRefusal{msg: strings.Join(reasons, "; ") + ". Nothing was deleted. Reconcile each row (keep the binding copy by recording it, or remove it once the rig row is confirmed to be the bead), then re-run"}
 	}
 	if err := deleteInBatches(binding, drop); err != nil {
 		return fmt.Errorf("clearing rig %s's interrupted attempt from the binding: %w", loc.Rig, err)
 	}
-	if err := rigImportCrashPoint("prepared"); err != nil {
-		return err
+	return nil
+}
+
+// rigSameCreated reports whether two rows carry the same created_at at the
+// stores' second granularity (both absent counts as the same).
+func rigSameCreated(a, b beads.Bead) bool {
+	if a.CreatedAt.IsZero() || b.CreatedAt.IsZero() {
+		return a.CreatedAt.IsZero() && b.CreatedAt.IsZero()
+	}
+	return sameCreatedSecond(a.CreatedAt, b.CreatedAt)
+}
+
+// rigImportCopy is phase 3: copy rows, edges and gates.
+func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, plan rigImportPlan, result *rigImportResult) error {
+	creator, ok := binding.(beads.ForeignIDCreator)
+	if !ok {
+		return fmt.Errorf("binding store %T cannot preserve bead ids", binding)
 	}
 	for i, b := range plan.Move {
 		if _, err := creator.CreateWithForeignID(rigImportRow(b, loc.Rig, plan.Records[b.ID])); err != nil {
@@ -624,21 +927,14 @@ func rigImportWriteManifest(loc rigImportLocation, target infraBindingTarget, ma
 }
 
 // rigImportReserveIDs is phase 6: raise the rig's bd min_hash_length past
-// every imported id, never lowering it. It returns the floor it requires (0
-// when no id needs one or the store mints from a monotonic sequence).
-func rigImportReserveIDs(env rigImportEnv, rig config.Rig, manifest *infraCopyManifest) (int, error) {
+// every imported id, never lowering it, and raise max_hash_length with it
+// when the floor is above it (bd sizes ids between the two). It returns the
+// floor in force (0 when no id needs one or the store mints from a monotonic
+// sequence). conf was opened, and its provider checked, before anything was
+// written.
+func rigImportReserveIDs(conf rigHashLengthConfig, manifest *infraCopyManifest) (int, error) {
 	floor := rigImportHashFloor(sortedMapKeys(manifest.IDs))
-	if floor == 0 {
-		return 0, nil
-	}
-	if floor > bdMaxHashLength {
-		floor = bdMaxHashLength
-	}
-	conf, err := rigImportHashConfigOpener(env.CityPath, env.Cfg, rig)
-	if err != nil {
-		return 0, err
-	}
-	if conf == nil {
+	if floor == 0 || conf == nil {
 		return 0, nil
 	}
 	current, err := conf.ConfigGet(bdMinHashLengthKey)
@@ -646,10 +942,22 @@ func rigImportReserveIDs(env rigImportEnv, rig config.Rig, manifest *infraCopyMa
 		return 0, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
 	}
 	if n, perr := strconv.Atoi(strings.TrimSpace(current)); perr == nil && n >= floor {
-		return n, nil
-	}
-	if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
+		floor = n
+	} else if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
 		return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, floor, err)
+	}
+	maxText, err := conf.ConfigGet(bdMaxHashLengthKey)
+	if err != nil {
+		return 0, fmt.Errorf("reading %s: %w", bdMaxHashLengthKey, err)
+	}
+	maxLen := bdDefaultMaxHashLength
+	if n, perr := strconv.Atoi(strings.TrimSpace(maxText)); perr == nil && n > 0 {
+		maxLen = n
+	}
+	if maxLen < floor {
+		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(floor)); err != nil {
+			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, floor, err)
+		}
 	}
 	return floor, nil
 }
@@ -683,6 +991,9 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 			return 0, writeInfraClearedNoteAt(loc.NotePath(), infraClearedNote{Binding: env.Target.Binding, Database: env.Target.Database, Backup: loc.BackupPath(), Complete: true})
 		}
 		return 0, nil
+	}
+	if err := rigImportReprove(env, loc, rigStore, toClear); err != nil {
+		return 0, err
 	}
 	previous, _, err := readInfraRetainedBackupAt(loc.BackupPath())
 	if err != nil {
@@ -738,16 +1049,42 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 	if err := rigImportCrashPoint("pending"); err != nil {
 		return 0, err
 	}
+	// The boundary edges go first. bd's delete rewrites every neighbor's
+	// text that names a deleted id to "[deleted:<id>]", and it finds the
+	// neighbors by their edges: a work row that tracks a moved row would
+	// have its own description rewritten. With the edges removed, no row
+	// that stays is a neighbor. The backup above records every one.
+	for _, b := range toClear {
+		for _, d := range snap.down[b.ID] {
+			if clearing[d.DependsOnID] {
+				continue
+			}
+			if err := rigStore.DepRemove(b.ID, d.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+				return 0, fmt.Errorf("removing boundary edge %s -> %s from rig %s before the clear: %w", b.ID, d.DependsOnID, loc.Rig, err)
+			}
+		}
+		for _, d := range up[b.ID] {
+			if clearing[d.IssueID] {
+				continue
+			}
+			if err := rigStore.DepRemove(d.IssueID, b.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+				return 0, fmt.Errorf("removing boundary edge %s -> %s from rig %s before the clear: %w", d.IssueID, b.ID, loc.Rig, err)
+			}
+		}
+	}
+	if err := rigImportCrashPoint("unlinked"); err != nil {
+		return 0, err
+	}
 	ids := make([]string, 0, len(toClear))
 	for _, b := range toClear {
 		ids = append(ids, b.ID)
 	}
 	if err := deleteInBatchesWithCrash(rigStore, ids); err != nil {
-		return 0, fmt.Errorf("removing rig %s's imported copies: %w (the cleared note is pending; boot refuses until `%s` finishes the toClear)", loc.Rig, err, rigImportInstruction(loc.Rig))
+		return 0, fmt.Errorf("removing rig %s's imported copies: %w (the cleared note is pending; boot refuses until `%s` finishes the clear)", loc.Rig, err, rigImportInstruction(loc.Rig))
 	}
 	after, err := rigStore.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
-		return 0, fmt.Errorf("re-reading rig %s after the toClear: %w", loc.Rig, err)
+		return 0, fmt.Errorf("re-reading rig %s after the clear: %w", loc.Rig, err)
 	}
 	var left []string
 	for _, b := range after {
@@ -757,12 +1094,66 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 	}
 	if len(left) > 0 {
 		sort.Strings(left)
-		return 0, fmt.Errorf("rig %s still holds %d imported cop(ies) after the toClear: %s", loc.Rig, len(left), infraStrandedIDList(left))
+		return 0, fmt.Errorf("rig %s still holds %d imported cop(ies) after the clear: %s", loc.Rig, len(left), infraStrandedIDList(left))
 	}
 	if err := writeInfraClearedNoteAt(loc.NotePath(), infraClearedNote{Binding: env.Target.Binding, Database: env.Target.Database, Backup: loc.BackupPath(), Complete: true}); err != nil {
 		return 0, err
 	}
 	return len(toClear), nil
+}
+
+// rigImportReprove proves, immediately before anything is removed, that
+// every rig row about to be cleared is still the row the census read (no
+// writer changed it since) and that the binding holds it: the same (id,
+// created_at), under this rig's import stamp. A row that fails either is
+// named and nothing is removed.
+func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.Store, toClear []beads.Bead) error {
+	fresh, err := rigStore.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return fmt.Errorf("re-reading rig %s before the clear: %w", loc.Rig, err)
+	}
+	now := make(map[string]beads.Bead, len(fresh))
+	for _, b := range fresh {
+		now[b.ID] = b
+	}
+	binding, err := openInfraBindingReadOnly(env.Target)
+	if err != nil {
+		return fmt.Errorf("opening the binding to prove rig %s's copies before the clear: %w", loc.Rig, err)
+	}
+	defer closeBeadStoreHandle(binding) //nolint:errcheck // best-effort close
+	ids := make([]string, 0, len(toClear))
+	for _, b := range toClear {
+		ids = append(ids, b.ID)
+	}
+	held, err := beads.GetMany(binding, ids)
+	if err != nil {
+		return fmt.Errorf("reading the binding to prove rig %s's copies before the clear: %w", loc.Rig, err)
+	}
+	var moved, unproven []string
+	for _, b := range toClear {
+		f, ok := now[b.ID]
+		if ok && (beadCopyDifference(b, f) != "" || (b.Revision != 0 && f.Revision != 0 && b.Revision != f.Revision)) {
+			moved = append(moved, b.ID)
+			continue
+		}
+		h, ok := held[b.ID]
+		if !ok || h.Metadata[infraMigrationStampKey] != rigImportStamp(loc.Rig) || !rigSameCreated(b, h) {
+			unproven = append(unproven, b.ID)
+		}
+	}
+	var reasons []string
+	if len(moved) > 0 {
+		sort.Strings(moved)
+		reasons = append(reasons, fmt.Sprintf("%d rig row(s) changed after the census read them, so a writer is still reaching rig %s: %s. Stop it, then re-run", len(moved), loc.Rig, infraStrandedIDList(moved)))
+	}
+	if len(unproven) > 0 {
+		sort.Strings(unproven)
+		reasons = append(reasons, fmt.Sprintf("the binding does not hold %d row(s) the clear would remove from rig %s as this import's copy of the same bead, so the rig row may be the only copy: %s. Nothing was removed; restore the binding rows (or re-import them) before clearing", len(unproven), loc.Rig, infraStrandedIDList(unproven)))
+	}
+	if len(reasons) > 0 {
+		return &rigImportPrepareRefusal{msg: strings.Join(reasons, "; ")}
+	}
+	return nil
 }
 
 // rigEdgeDispositions maps each planned edge to what the import did with it,
@@ -814,14 +1205,23 @@ func rigBackupEntry(rigStore beads.Store, b beads.Bead, down, up []beads.Dep, cl
 }
 
 func rigBackupEdge(rigStore beads.Store, d beads.Dep, disposition map[string]string) (infraBackupEdge, error) {
+	action := disposition[d.IssueID+"\x00"+d.DependsOnID]
+	if action == "" {
+		action = rigEdgeCopied
+	}
+	if _, readable := rigStore.(beads.DepMetadataReader); !readable {
+		// A store that cannot report payloads (the bd CLI store) has none the
+		// import could read; the plan refused any edge it would have copied,
+		// so every edge recorded here is a boundary edge the import drops.
+		// The backup records that its payload was unreadable rather than
+		// claiming it had none.
+		return infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type, Disposition: action + "; payload unreadable"}, nil
+	}
 	edge, err := infraBackupEdgeFor(rigStore, d)
 	if err != nil {
 		return edge, err
 	}
-	edge.Disposition = disposition[d.IssueID+"\x00"+d.DependsOnID]
-	if edge.Disposition == "" {
-		edge.Disposition = rigEdgeCopied
-	}
+	edge.Disposition = action
 	return edge, nil
 }
 
@@ -1111,11 +1511,84 @@ func rigsWithoutImportRecord(cityPath string, cfg *config.City, target infraBind
 			continue
 		}
 		loc := newRigImportLocation(target, cityPath, rig.Name)
-		if fileExists(loc.MarkerPath()) || fileExists(loc.CleanPath()) {
+		root := rigStoreRoot(cityPath, rig)
+		if rigRecordSpeaksFor(loc.MarkerPath(), root) || rigRecordSpeaksFor(loc.CleanPath(), root) {
 			continue
 		}
 		out = append(out, rig.Name)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// storageAbandonRigStoreFlag names the escape from a rig whose store is gone
+// for good after its import's marker: the binding is proven to hold every row
+// the manifest records, and the clear is recorded complete without the rig.
+const storageAbandonRigStoreFlag = "abandon-rig-store"
+
+// doStorageAbandonRigStore is `gc storage migrate --from-rigs --rig X
+// --abandon-rig-store --fleet-stopped`: for a rig whose store is permanently
+// gone after its import reached its marker (until S4c's reverse exists, the
+// only way out of the boot refusal a pending clear holds). It opens no rig
+// store. It proves the binding holds every row the rig's manifest records,
+// under this rig's import stamp and with the recorded created_at, and only
+// then records the clear complete. Rows the rig store still held are not
+// removed by this: the store is declared gone.
+func doStorageAbandonRigStore(ctx context.Context, request storageOperatorRequest, rigName string, stdout, stderr io.Writer) int {
+	logPrefix := "gc storage migrate --from-rigs --" + storageAbandonRigStoreFlag
+	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
+	if err != nil || !ok {
+		fmt.Fprintf(stderr, "%s: this city has no converged binding to abandon a rig store into (%v)\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
+		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !request.FleetStopped {
+		fmt.Fprintf(stderr, "%s: pass --%s\n", logPrefix, storageFleetStoppedFlag) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer guard.Release() //nolint:errcheck // best-effort release
+	loc := newRigImportLocation(target, request.CityPath, rigName)
+	manifest, marked, err := loc.readManifest()
+	if err != nil || !marked || manifest == nil {
+		fmt.Fprintf(stderr, "%s: rig %s has no import marker and manifest (%v): its import never proved the binding holds its rows, so the rig store cannot be abandoned. Restore the rig store and run `%s`\n", logPrefix, rigName, err, rigImportInstruction(rigName)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	binding, err := openInfraBindingReadOnly(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: opening the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	held, err := beads.GetMany(binding, sortedMapKeys(manifest.IDs))
+	_ = closeBeadStoreHandle(binding)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: reading the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	var missing []string
+	for id := range manifest.IDs {
+		h, ok := held[id]
+		if !ok || h.Metadata[infraMigrationStampKey] != rigImportStamp(rigName) || !manifest.Carried(h) {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		fmt.Fprintf(stderr, "%s: the binding does not hold %d row(s) rig %s's manifest records as the bead the import carried: %s. Abandoning the rig store would lose them; restore it instead\n", logPrefix, len(missing), rigName, infraStrandedIDList(missing)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := writeInfraClearedNoteAt(loc.NotePath(), infraClearedNote{Binding: target.Binding, Database: target.Database, Backup: loc.BackupPath(), Complete: true}); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	_ = os.Remove(loc.InFlightPath())
+	fmt.Fprintf(stdout, "rig %s: store abandoned; the binding holds all %d row(s) its import recorded, and the clear is recorded complete\n", rigName, manifest.Len()) //nolint:errcheck // best-effort stdout
+	return 0
 }

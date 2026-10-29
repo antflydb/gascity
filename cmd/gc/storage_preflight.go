@@ -350,7 +350,13 @@ func preflightRigScopes(request storageOperatorRequest, target infraBindingTarge
 		}
 	}
 	if len(refusals) > 0 {
-		return preflightBlock(stdout, "rig scopes", errors.New(strings.Join(refusals, "\n")))
+		lines := strings.Split(strings.Join(refusals, "\n"), "\n")
+		fmt.Fprintf(stdout, preflightRowFormat, preflightBlockTag, "rig scopes", lines[0]) //nolint:errcheck // best-effort stdout
+		for _, line := range lines[1:] {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
+		}
+		fmt.Fprintf(stdout, "\n%s: `%s` would refuse the rig(s) named above until each fix is made; each other rig imports on its own. Fix them and run this again.\n", storagePreflightLogPrefix, rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+		return 1
 	}
 	return 0
 }

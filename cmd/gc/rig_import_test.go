@@ -38,6 +38,9 @@ type rigImportFixture struct {
 	// Dolt or bd store) instead of its file store.
 	fixed    map[string]beads.Store
 	hashConf map[string]*fakeRigHashConfig
+	// otherCities are the other registered cities the shared-store check
+	// loads.
+	otherCities []string
 }
 
 // fakeRigHashConfig records the bd config writes the id reservation makes.
@@ -92,6 +95,9 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 		return prevOpen(storePath, cityPath)
 	}
 	t.Cleanup(func() { openStorageScopeStore = prevOpen })
+	prevOthers := rigImportOtherCities
+	rigImportOtherCities = func(string) ([]string, error) { return f.otherCities, nil }
+	t.Cleanup(func() { rigImportOtherCities = prevOthers })
 	prevHash := rigImportHashConfigOpener
 	rigImportHashConfigOpener = func(_ string, _ *config.City, rig config.Rig) (rigHashLengthConfig, error) {
 		conf := f.hashConf[rig.Name]
@@ -742,8 +748,11 @@ func TestRigImportRaisesTheRigsMinimumIdLength(t *testing.T) {
 	if code, stdout, stderr := f.importRigs(); code != 0 {
 		t.Fatalf("import = %d: %s %s", code, stdout, stderr)
 	}
-	if got := f.hashConf["packs"].values[bdMinHashLengthKey]; got != "6" {
-		t.Errorf("packs min_hash_length = %q, want 6 (longest non-wisp suffix k0nvi + 1)", got)
+	if got := f.hashConf["packs"].values[bdMinHashLengthKey]; got != "8" {
+		t.Errorf("packs min_hash_length = %q, want 8 (longest suffix, the wisp's zzzzzzz, + 1)", got)
+	}
+	if got := f.hashConf["packs"].values[bdMaxHashLengthKey]; got != "" {
+		t.Errorf("packs max_hash_length = %q, want it untouched (bd's default 8 covers the floor)", got)
 	}
 	if sets := f.hashConf["high"].sets; len(sets) != 0 {
 		t.Errorf("the import lowered or rewrote a higher min_hash_length: %v", sets)
