@@ -200,7 +200,9 @@ destructive:
   assignment and `gc.detached` on every tick until a probe attests alive or
   dead — there is no error-count strike release — and logs the hold
   rate-throttled per bead, while stranded diagnostics emit immediately and
-  preserve `gc.detached`.
+  preserve `gc.detached`. A pool slot's close does not stamp
+  `session.stranded` on such a probe: it refuses that attempt and lists no
+  work it could not observe.
 
 Orphan release clears `gc.detached` in the same store update that reopens the
 work. If the release update fails, the detached guard remains on the work bead
