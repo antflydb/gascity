@@ -518,6 +518,42 @@ On a city that already converged, the `migrate` step copies nothing: it
 clears the retained copies, and infrastructure beads that rig scopes still
 hold from before the split do not stop it.
 
+### Stranded mail nobody will read: purge it instead
+
+When the stranded beads are mail that must never be delivered, such as
+weeks of unread auto-handoff mail, purge them instead of recovering them.
+`--purge-type message` backs up, then deletes, every row the storage check
+calls stranded whose type is `message`. It selects rows by that check, never
+by manifest id, because bd reuses short wisp ids.
+
+```
+# rehearse (read-only, safe on a running city):
+gc storage recover-stranded --from-work --purge-type message --dry-run
+# with the city stopped:
+gc storage recover-stranded --from-work --fleet-stopped --purge-type message --confirm-purge
+gc storage status        # converged, and it names the purge and its backup
+```
+
+The dry run prints the count, the id range, the creation dates, the title
+histogram and one line per row. Without `--confirm-purge` the command prints
+the same list and deletes nothing.
+
+Every row is first written to `infra.purged-stranded-<time>.jsonl` at the
+binding root, with its metadata, labels and every edge touching it. The file
+is synced and read back before anything is deleted. The run is recorded in
+`infra.purged-stranded.jsonl`. If a run stops after the backup, `gc storage
+status` reports the purge as `INTERRUPTED`, and running the same command
+again resumes from the same backup.
+
+The purge never deletes:
+
+- a row the binding holds as the same bead;
+- a stranded row of another type, which you must still recover;
+- a `message` row that the classifier puts in another class.
+
+If any selected row is in another class, the run refuses and writes nothing.
+To restore the purged mail, import each record's `.entry.bead` from the backup.
+
 ### A reused id the binding still holds
 
 The work store can mint a short id again once its own bead under that id is
