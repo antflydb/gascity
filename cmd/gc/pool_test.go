@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -1107,7 +1108,7 @@ func TestRunPoolOnBoot(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr, events.Discard)
 
 	if len(ran) != 2 {
 		t.Fatalf("ran %d commands, want 2 (one per pool agent)", len(ran))
@@ -1132,7 +1133,7 @@ func TestRunPoolOnBootError(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr, events.Discard)
 
 	// Error should be logged, not fatal.
 	if !strings.Contains(stderr.String(), "on_boot dog") {
@@ -1153,7 +1154,7 @@ func TestRunPoolOnBootLogsRecoveryOutput(t *testing.T) {
 		},
 	}
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr, events.Discard)
 	if !strings.Contains(stderr.String(), "on_boot dog: gc-recovery: on_boot reopen failed for gc-1: boom") {
 		t.Errorf("stderr = %q, want the recovery diagnostic surfaced", stderr.String())
 	}
@@ -1169,7 +1170,7 @@ func TestRunPoolOnBootSilentOnEmptyOutput(t *testing.T) {
 		},
 	}
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr, events.Discard)
 	if strings.Contains(stderr.String(), "gc-recovery") {
 		t.Errorf("clean hook produced a recovery line: %q", stderr.String())
 	}
@@ -1188,7 +1189,7 @@ func TestRunPoolOnBootIgnoresCustomHookStdout(t *testing.T) {
 		},
 	}
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr, events.Discard)
 	if strings.Contains(stderr.String(), "booting up the custom hook") {
 		t.Errorf("custom on_boot stdout was surfaced into the recovery log: %q", stderr.String())
 	}
@@ -1211,7 +1212,7 @@ func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, cityPath, runner, &stderr)
+	runPoolOnBoot(cfg, cityPath, runner, &stderr, events.Discard)
 
 	if len(dirs) != 1 {
 		t.Fatalf("runner calls = %d, want 1", len(dirs))
@@ -1239,7 +1240,7 @@ func TestRunPoolOnBootUsesCanonicalRigEnv(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	runPoolOnBoot(cfg, cityPath, runner, &stderr)
+	runPoolOnBoot(cfg, cityPath, runner, &stderr, events.Discard)
 
 	if gotDir != rigDir {
 		t.Fatalf("on_boot dir = %q, want %q", gotDir, rigDir)
@@ -1278,7 +1279,7 @@ func TestRunPoolOnBootExpandsTemplateCommands(t *testing.T) {
 		},
 	}
 
-	runPoolOnBoot(cfg, cityPath, runner, io.Discard)
+	runPoolOnBoot(cfg, cityPath, runner, io.Discard, events.Discard)
 
 	if len(ran) != 1 {
 		t.Fatalf("ran %d commands, want 1", len(ran))
