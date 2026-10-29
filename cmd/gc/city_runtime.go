@@ -4476,7 +4476,7 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 	}
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
-	return cr.standaloneCityStore
+	return splitStrictWorkView(cr.standaloneCityStore)
 }
 
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
@@ -4487,7 +4487,7 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	}
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
-	return cr.standaloneRigStores
+	return splitStrictWorkViews(cr.standaloneRigStores)
 }
 
 // setStandaloneStores publishes the standalone store handles under the lock
