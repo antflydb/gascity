@@ -641,6 +641,11 @@ resource = "slow_process_gate"
 calls = 2
 
 [[count]]
+path = "cmd/gc/conversation_lane_submit_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/detached_probe_test.go"
 resource = "net_listen"
 calls = 1
@@ -1108,6 +1113,11 @@ calls = 2
 path = "cmd/gc/ready_work_api_test.go"
 resource = "http_test_server"
 calls = 2
+
+[[count]]
+path = "cmd/gc/reaper_op_rows_test.go"
+resource = "subprocess"
+calls = 1
 
 [[count]]
 path = "cmd/gc/reconcile_effect_recycle_tmux_integration_test.go"
@@ -3125,6 +3135,18 @@ tagged = true
 path = "test/conversationlane/harness_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "subprocess"
+calls = 1
 tagged = true
 
 [[count]]
