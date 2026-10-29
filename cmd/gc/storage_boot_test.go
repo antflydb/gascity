@@ -1019,12 +1019,11 @@ func TestStorageMigrateRefusesWhileAnotherMigratorHoldsTheCity(t *testing.T) {
 		"a migrator that refused must record no convergence")
 }
 
-// TestStorageMigrateRefusesRigResidueByName covers the rig-scope preflight.
-//
-// The remedy is asserted as carefully as the refusal: it must not name an
-// importer, because this binary carries none, and a remedy naming a command
-// that does not exist is an instruction that fails at the shell.
-func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
+// TestStorageMigrateNoLongerRefusesOverRigHistory: a rig's graph history no
+// longer blocks the city cutover (S4b). The relic legs keep it readable and
+// `gc storage migrate --from-rigs` moves it, so the city migrates, leaves the
+// rig row where it is, and names the rig and the command that imports it.
+func TestStorageMigrateNoLongerRefusesOverRigHistory(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
@@ -1034,32 +1033,24 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
-	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
-	prev := openStorageScopeStore
-	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
-		if storePath == rigPath {
-			return rig, nil
-		}
-		return prev(storePath, cityPath)
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { openStorageScopeStore = prev })
+	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
 
 	var stdout, stderr bytes.Buffer
-	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code == 0 {
-		t.Fatal("a city with infrastructure beads in a rig scope migrated anyway")
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the city migration refused over rig history: %d %s %s", code, stdout.String(), stderr.String())
 	}
-	got := stderr.String()
-	if !strings.Contains(got, stray.ID) || !strings.Contains(got, "rig alpha") {
-		t.Errorf("the refusal does not name the bead and its rig: %q", got)
+	if got := stdout.String(); !strings.Contains(got, "Rigs awaiting import") || !strings.Contains(got, "alpha") || !strings.Contains(got, "gc storage migrate --from-rigs --fleet-stopped") {
+		t.Errorf("the success message does not name the rig awaiting import and the command: %q", got)
 	}
-	for _, forbidden := range []string{"import", "migrate storage"} {
-		if strings.Contains(got, forbidden) {
-			t.Errorf("the remedy names %q, which this binary does not carry: %q", forbidden, got)
-		}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the city migration touched the rig row %s: %v", stray.ID, err)
 	}
-	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, cfg),
-		"a migrator that refused must record no convergence")
 }
 
 // TestStorageMigrateClearsAConvergedCityDespiteRigResidue covers the re-run
@@ -1104,8 +1095,10 @@ func TestStorageMigrateClearsAConvergedCityDespiteRigResidue(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := doStorageStatus(request, &stdout, &stderr); code != 0 {
-		t.Errorf("status after the clear = %d, want 0: %s %s", code, stdout.String(), stderr.String())
+	// The city's own verdict is clean; the rig still awaits its import, and
+	// a split city's deploy gate covers its rigs (D5).
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "rig packs: awaiting import") || strings.Contains(stdout.String(), "blocking invariant") {
+		t.Errorf("status after the clear = %d, want non-zero for the rig alone: %s %s", code, stdout.String(), stderr.String())
 	}
 	if _, err := rig.Get(stray.ID); err != nil {
 		t.Errorf("the re-run touched the rig row %s: %v", stray.ID, err)

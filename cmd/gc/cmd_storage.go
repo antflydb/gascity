@@ -241,6 +241,8 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 	var (
 		fromWork     bool
 		fromBackup   bool
+		fromRigs     bool
+		rigNames     []string
 		fleetStopped bool
 	)
 	cmd := &cobra.Command{
@@ -272,6 +274,13 @@ refuses such a city and names this command.
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
 
+--from-rigs moves each rig's graph and infrastructure beads (closed history,
+wisps and steps included) out of the rig's own store and into the city
+binding, keeping their ids and stamping each with gc.root_store_ref=rig:<name>;
+a rig store then holds only work. It runs per rig (--rig narrows it), is
+resumable at every step, and refuses, by bead and with the fix, the edge shapes
+it cannot carry without a cross-store edge. It needs a converged city binding.
+
 Last, on the converged binding, each open deliver-now unit the copy carried in
 is re-lowered under the binding's id prefix: its derived interrupt is re-created
 at the id a lowering there gives it, with its state, and the old row is closed
@@ -287,9 +296,19 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if fromWork == fromBackup {
-				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
-					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag)
+			sources := 0
+			for _, set := range []bool{fromWork, fromBackup, fromRigs} {
+				if set {
+					sources++
+				}
+			}
+			if sources != 1 {
+				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s, --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
+					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag, storageFromRigsFlag)
+				return errExit
+			}
+			if len(rigNames) > 0 && !fromRigs {
+				fmt.Fprintf(stderr, "gc %s %s: --%s narrows --%s and means nothing without it\n", surface.Namespace, surface.Verb, storageRigFlag, storageFromRigsFlag) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			request, err := resolveStorageOperatorRequest()
@@ -299,6 +318,9 @@ half is an explicit operator attestation.`,
 			}
 			request.FleetStopped = fleetStopped
 			request.FromBackup = fromBackup
+			if fromRigs {
+				return exitForCode(doStorageMigrateFromRigs(cmd.Context(), request, rigNames, stdout, stderr))
+			}
 			return exitForCode(doStorageMigrate(cmd.Context(), request, stdout, stderr))
 		},
 	}
@@ -306,6 +328,10 @@ half is an explicit operator attestation.`,
 		"migrate the infrastructure classes out of this city's work store")
 	cmd.Flags().BoolVar(&fromBackup, storageFromBackupFlag, false,
 		"re-copy a binding whose database is gone from the retained-source backup")
+	cmd.Flags().BoolVar(&fromRigs, storageFromRigsFlag, false,
+		"import each rig's graph and infrastructure beads into the city binding")
+	cmd.Flags().StringSliceVar(&rigNames, storageRigFlag, nil,
+		"with --"+storageFromRigsFlag+", import only this rig (repeatable)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	return cmd
@@ -424,13 +450,9 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 
-	guard, err := storebinding.AcquireMigrationGuard(ctx, cityMigrationGuardDirectory(request.CityPath), storageMigrationGeneration)
+	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
 	if err != nil {
-		if errors.Is(err, storebinding.ErrMigrationGuardBusy) {
-			fmt.Fprintf(stderr, "%s: another storage migration holds this city. Wait for it to finish, or resolve it, and run this again\n", logPrefix) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		fmt.Fprintf(stderr, "%s: taking the migration guard: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	defer func() {
@@ -439,20 +461,10 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		}
 	}()
 
-	// The rig census guards a COPY: a bead a rig scope holds is one the copy
-	// never sees. A city that already converged copies nothing on this run —
-	// it re-checks containment and clears the retained copies — so a rig row
-	// is exactly as unreachable after it as before, and refusing over one
-	// would put the clear, the only step that ends the retained copies boot
-	// refuses over, out of reach. `gc storage preflight` still names those
-	// rows. A state that cannot be read is censused, and the migration below
-	// reports the read.
-	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
-		if err := censusRigInfraResidue(request.CityPath, request.Cfg); err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
+	// No rig census here (S4b). A rig's graph rows no longer block the city
+	// cutover: the relic legs keep them readable, and `--from-rigs` moves
+	// them once the binding has converged. The success message names the
+	// rigs still awaiting that import.
 
 	from := infraMigrationFromWork
 	if request.FromBackup {
@@ -495,11 +507,44 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
 		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered))
+	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
+		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }
 
-// doStorageStatus reports the layout without changing it.
+// acquireStorageMigrationGuard takes the city's storage migration guard, with
+// the refusal an operator reads when another migration holds it.
+func acquireStorageMigrationGuard(ctx context.Context, cityPath string) (storebinding.MigrationGuard, error) {
+	guard, err := storebinding.AcquireMigrationGuard(ctx, cityMigrationGuardDirectory(cityPath), storageMigrationGeneration)
+	if err != nil {
+		if errors.Is(err, storebinding.ErrMigrationGuardBusy) {
+			return storebinding.MigrationGuard{}, errors.New("another storage migration holds this city. Wait for it to finish, or resolve it, and run this again")
+		}
+		return storebinding.MigrationGuard{}, fmt.Errorf("taking the migration guard: %w", err)
+	}
+	return guard, nil
+}
+
+// doStorageStatus reports the layout without changing it: the city's
+// binding, then, on a split city, each rig's import state. It exits non-zero
+// while any rig awaits import, holds a pending clear, holds stranded rows or
+// cannot be read: a split city's deploy gate covers its rigs.
 func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) int {
+	code := doStorageStatusCity(request, stdout, stderr)
+	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
+	if err != nil || !ok || request.Cfg == nil || len(request.Cfg.Rigs) == 0 {
+		return code
+	}
+	fmt.Fprintln(stdout, "rigs:") //nolint:errcheck // best-effort stdout
+	if reportRigCensus(stdout, censusRigs(request.CityPath, request.Cfg, target, false)) != 0 {
+		code = 1
+	}
+	return code
+}
+
+// doStorageStatusCity is the city half of doStorageStatus.
+func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Writer) int {
 	const logPrefix = "gc storage status"
 
 	storage := request.Cfg.EffectiveStorage()
