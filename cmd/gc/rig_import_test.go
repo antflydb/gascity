@@ -936,3 +936,19 @@ func TestRigAddRecordsANewRigCleanOnAConvergedSplitCity(t *testing.T) {
 		t.Error("a single-store city wrote a rig record")
 	}
 }
+
+// TestByIDRelicProofReadsTheRigManifestsToo: the id-level proof reads the
+// union of the city manifest and every rig manifest.
+func TestByIDRelicProofReadsTheRigManifestsToo(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	if manifest, read := migrationCopyManifest(f.request.CityPath, f.cfg); !read || manifest["gp-a"] {
+		t.Fatalf("precondition: manifest = %v read=%v", manifest, read)
+	}
+	if code, o, e := f.importRigs(); code != 0 {
+		t.Fatalf("import = %d: %s %s", code, o, e)
+	}
+	if manifest, read := migrationCopyManifest(f.request.CityPath, f.cfg); !read || !manifest["gp-a"] {
+		t.Errorf("the by-id proof does not read the rig manifest: %v read=%v", manifest, read)
+	}
+}
