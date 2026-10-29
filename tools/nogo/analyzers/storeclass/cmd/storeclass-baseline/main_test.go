@@ -116,11 +116,16 @@ func TestProtectedChanges(t *testing.T) {
 		"tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/main.go",
 		".github/workflows/storeclass-baseline.yml",
 		".github/CODEOWNERS",
+		"third_party/patches/rules_go_nogo_golangci_nolint.patch",
+		"third_party/patches/rules_go_nogo_main_repo_data.patch",
+		"third_party/patches/rules_go_other.patch",
 		"cmd/gc/main.go",
 	})
 	want := []string{
 		"protected path changed: .github/CODEOWNERS",
 		"protected path changed: .github/workflows/storeclass-baseline.yml",
+		"protected path changed: third_party/patches/rules_go_nogo_golangci_nolint.patch",
+		"protected path changed: third_party/patches/rules_go_nogo_main_repo_data.patch",
 		"protected path changed: tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/main.go",
 		"protected path changed: tools/nogo/analyzers/storeclass/config.go",
 		"protected path changed: tools/nogo/analyzers/storeclass/sealed_floor.txt",

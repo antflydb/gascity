@@ -156,6 +156,8 @@ func assertSwitch(w beads.WorkStore) { var s beads.Store = w; switch s.(type) { 
 
 func assertBoxed(g beads.GraphStore) { _, _ = any(g).(beads.Counter) } // cap-assert
 
+func assertBoxedConcrete(c *beads.CachingStore) { _, _ = any(c).(beads.Counter) } // raw-param cap-assert
+
 func assertWide(s rawIface) { _, _ = s.(beads.Counter) } // raw-param cap-assert
 
 func assertOther(x any) { _, _ = x.(beads.Counter) }
@@ -171,6 +173,14 @@ func constrained[S beads.Store](s S) {} // raw-type
 type boxed[S beads.Store] struct{ s S } // raw-type
 
 func unionC[S interface{ *beads.CachingStore | int }]() {} // raw-type
+
+func unionBare[S *beads.CachingStore | int](s S) {} // raw-type
+
+func tildeC[S ~*beads.CachingStore]() {} // raw-type
+
+type unionBox[S *beads.CachingStore | int,] struct{ s S } // raw-type
+
+type tildeBox[S ~*beads.CachingStore] struct{} // raw-type
 
 func concrete(c *beads.CachingStore) []beads.CachingStore { return nil } // raw-param raw-result
 

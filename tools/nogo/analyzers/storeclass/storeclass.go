@@ -15,9 +15,9 @@
 //   - unwrap: a handle's embedded store read back (.Store, through any
 //     embedding) or an unwrap method (Raw) named;
 //   - cap-assert: a type assertion or type switch on a store value (a
-//     beads.Store, an interface that is one, or a store or handle boxed by a
-//     conversion): use beads.As or an XFor helper, which see through the
-//     handle;
+//     beads.Store, an interface that is one, or a store, concrete store or
+//     handle boxed by a conversion): use beads.As or an XFor helper, which
+//     see through the handle;
 //   - test-mint-import: production code importing a test-only minting
 //     package;
 //   - read-marker: a federated or relic read marker named (D9 freezes them:
@@ -26,9 +26,9 @@
 // A raw store is beads.Store itself, an interface that is one, or a concrete
 // store type (an engine such as *beads.CachingStore, or a wrapper); a struct
 // that is a store only through an embedded typed handle is not. A type
-// parameter constrained by a raw store is a raw-type finding, and so is an
-// interface element that holds one. As[T] with a store for T is an unwrap,
-// and so is ConditionalWritesResolveTarget.
+// parameter constrained by a raw store, or by a union or ~ term over one, is
+// a raw-type finding, and so is an interface element that holds one. As[T]
+// with a store for T is an unwrap, and so is ConditionalWritesResolveTarget.
 //
 // Out of scope, by design: assertions laundered through a value that is no
 // longer typed as a store (var x any = s; x.(T)), through reflect, or through
@@ -63,8 +63,35 @@
 //     the merge-base. CODEOWNERS (gascity-admin) gates baseline.txt,
 //     ceiling.txt, config.go and sealed_floor.txt.
 //
-// Shrinking needs no approval: regenerate with -write, which lowers the
-// ceiling, in the commit that retires the sites.
+// Shrinking needs no label: regenerate with -write, which lowers the
+// ceiling, in the commit that retires the sites. A shrink still edits
+// baseline.txt and ceiling.txt, so once code-owner review is enforced on main
+// (an admin setting #8435 asks for), it needs a gascity-admin review too.
+//
+// # What row-level strictness costs
+//
+// The growth gate is strict per row on purpose: raw-store debt in a function
+// that had none is new debt, even when its package's total holds. Every
+// change to raw-store code pays for that, not only a raise:
+//
+//   - Concurrent shrinks collide. Two changes that retire sites of one
+//     package and rule each lower the same ceiling.txt line. Different
+//     amounts conflict; equal amounts merge cleanly to a ceiling above the
+//     tree, which TestBaselineOnlyShrinks and the generator's check refuse,
+//     so the merge queue ejects the later change: it rebases and reruns
+//     -write.
+//   - A rename, a move or a split of a function or file that holds debt is a
+//     new row, so the growth gate counts it as a raise that needs the label,
+//     though no package's total grows.
+//   - Every shrink edits baseline.txt and ceiling.txt, which CODEOWNERS
+//     assigns to gascity-admin (above).
+//   - baseline.txt is an input of every main-repository nogo action, so any
+//     edit to it re-runs every analyzer over every gascity package.
+//
+// Judging package/rule totals against the merge-base's baseline, with no
+// committed ceiling, would remove the first two costs, and a per-package
+// baseline the last; revisit both before the phases that retire debt (T2
+// onward) make shrinks common.
 package storeclass
 
 import (
@@ -474,8 +501,10 @@ func (c *checker) signature(base, fn string, ft *ast.FuncType) {
 	}
 }
 
-// typeParams collects type parameters constrained by a raw store. A
-// constraint written as an interface literal reports where the literal is.
+// typeParams collects type parameters constrained by a raw store: a store
+// type, or a union or ~ term over one ([S *beads.CachingStore | int],
+// [S ~*beads.CachingStore], whose type is a *types.Union). A constraint
+// written as an interface literal reports where the literal is.
 func (c *checker) typeParams(base, fn string, tps *ast.FieldList) {
 	if tps == nil {
 		return
@@ -485,7 +514,7 @@ func (c *checker) typeParams(base, fn string, tps *ast.FieldList) {
 			continue
 		}
 		t := c.pass.TypesInfo.TypeOf(f.Type)
-		if !c.holds(t) {
+		if !c.holdsElement(t) {
 			continue
 		}
 		for _, name := range f.Names {
@@ -494,8 +523,8 @@ func (c *checker) typeParams(base, fn string, tps *ast.FieldList) {
 	}
 }
 
-// holdsElement reports whether an interface's embedded element (a type, or a
-// union of terms) is or holds a raw store.
+// holdsElement reports whether a constraint, or an interface's embedded
+// element, is or holds a raw store: a type, or a union of plain and ~ terms.
 func (c *checker) holdsElement(t types.Type) bool {
 	if u, ok := t.(*types.Union); ok {
 		for i := range u.Len() {
@@ -709,8 +738,9 @@ func (c *checker) isConcreteStore(t *types.Named) bool {
 }
 
 // isStoreValue reports whether a type assertion's operand is a store: a raw
-// store, an interface type that is one, or a store or handle boxed into an
-// interface by a conversion (any(h)).
+// store, an interface type that is one, or a store, a concrete store (an
+// engine or a wrapper, through a pointer) or a handle boxed into an interface
+// by a conversion (any(h), any(cache)).
 func (c *checker) isStoreValue(x ast.Expr) bool {
 	info := c.pass.TypesInfo
 	t := info.TypeOf(x)
@@ -729,7 +759,10 @@ func (c *checker) isStoreValue(x ast.Expr) bool {
 	if tv, ok := info.Types[call.Fun]; !ok || !tv.IsType() {
 		return false
 	}
-	return c.isHandle(info.TypeOf(call.Args[0])) || c.isStoreValue(call.Args[0])
+	if n, ok := deref(info.TypeOf(call.Args[0])).(*types.Named); ok && (c.isHandle(n) || c.isConcreteStore(n)) {
+		return true
+	}
+	return c.isStoreValue(call.Args[0])
 }
 
 // findStoreInterface is the store interface as the pass's imports show it,

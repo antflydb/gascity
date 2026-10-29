@@ -5,9 +5,10 @@ import "reflect"
 // This file is the capability side of the typed class handles (typed-stores
 // design §3.3, phase T1): one way to reach an optional capability through a
 // handle, one way to ask whether two handles are one physical store, and the
-// seam a class guard (T8) uses to vet class-write capabilities. It changes no
-// existing lookup: the XFor helpers answer through a handle exactly as they
-// did (TestXForThroughAHandleToday pins that), and As is new.
+// seam a class guard (T8) uses to vet every capability that is not
+// class-neutral. It changes no existing lookup: the XFor helpers answer
+// through a handle exactly as they did (TestXForThroughAHandleToday pins
+// that), and As is new.
 //
 // Outside internal/beads the storeclass lint (tools/nogo/analyzers/storeclass)
 // reports a type assertion on a store and an unwrap of a handle; As and the
@@ -21,11 +22,14 @@ type classLayer interface {
 	unwrapClassLayer() Store
 }
 
-// classGateLayer is a class layer that vets class-write capabilities: the
-// class guard (T8). For a class-write capability T, As asks the gate instead
-// of looking below it: gateCapability stores the guarded adapter for *T in
-// target and reports true, or reports false and the capability is hidden.
-// An unguarded writer never leaks through a gate.
+// classGateLayer is a class layer that vets capabilities: the class guard
+// (T8). For every T but a class-neutral one (passesClassGate), As asks the
+// gate instead of looking at or below it: gateCapability stores the guarded
+// adapter for *T in target and reports true, or reports false and the
+// capability is hidden. A class-neutral capability passes the gate as the
+// store below it, so a caller that asserts that value onward to a writer
+// launders past the gate, like the assertions the storeclass lint leaves out
+// of scope: the guard (T8) must re-vet that path.
 type classGateLayer interface {
 	classLayer
 	gateCapability(target any) bool
@@ -75,13 +79,14 @@ const classLayerMaxDepth = 8
 // that obeys the conditional-writes mode still goes through
 // ResolveConditionalWriter.
 //
-// A class-write capability (isClassWriteCapability) met at a class guard is
-// the guard's adapter or nothing. As is nil-safe: nil, a zero handle (or a
-// handle over one), or a walk deeper than classLayerMaxDepth answers false,
-// before any layer is asked, so As[Store] never hands out an absent handle.
+// A capability outside the class-neutral allowlist (passesClassGate) met at
+// a class guard is the guard's adapter or nothing. As is nil-safe: nil, a
+// zero handle (or a handle over one), or a walk deeper than
+// classLayerMaxDepth answers false, before any layer is asked, so As[Store]
+// never hands out an absent handle.
 func As[T any](s Store) (T, bool) {
 	var zero T
-	writes := isClassWriteCapability[T]()
+	neutral := passesClassGate[T]()
 	for range classLayerMaxDepth {
 		if s == nil {
 			return zero, false
@@ -94,7 +99,7 @@ func As[T any](s Store) (T, bool) {
 		if physicalStore(inner) == nil {
 			return zero, false // a zero handle, or one over a zero handle, is no store
 		}
-		if gate, ok := layer.(classGateLayer); ok && writes {
+		if gate, ok := layer.(classGateLayer); ok && !neutral {
 			var v T
 			if gate.gateCapability(&v) {
 				return v, true
@@ -139,15 +144,20 @@ func resolveCapability[T any](s Store) (T, bool) {
 	return v, ok
 }
 
-// isClassWriteCapability reports whether T can create a bead or change a
-// bead's class: what a class guard must vet (design §3.3.4, §3.7). The
-// assignee-only and dependency writers and every reader cannot, and pass a
-// guard untouched.
-func isClassWriteCapability[T any]() bool {
+// passesClassGate reports whether T is class-neutral: it can neither create
+// a bead nor change a bead's class (design §3.3.4, §3.7), so As looks past a
+// class guard for it. The list is exact types, the readers and the
+// assignee-only writers, and it fails closed: a guard vets everything else,
+// Store, every concrete store, UpdateReporter, the provider interfaces, and
+// any interface not named here, even one with a listed type's or a writer's
+// method set. A capability added later is vetted until it is listed.
+func passesClassGate[T any]() bool {
 	switch any((*T)(nil)).(type) {
-	case *StorageCreateStore, *ForeignIDCreator, *StorageGraphApplyStore, *EphemeralGraphApplyStore,
-		*AssignmentGuardedUpdater, *ConditionalWriter, *GuardedBatcher, *GraphApplyStore,
-		*MetadataCASWriter, *AtomicConditionalCloser:
+	case *Counter, *NamespaceCensus, *DependencyBatchLister, *DepMetadataReader,
+		*GraphOnlyReadyStore, *ContextReadyReader, *OrderedReadyReader, *CachePreferredReadyReader,
+		*ChildrenBatchLister, *ExactBatchGetter, *CachedReadExact, *ReadOnlyReporter,
+		*RowWitness, *ParentProjectionWaiter,
+		*ConditionalAssignmentReleaser, *ConditionalAssigneeTransferer:
 		return true
 	}
 	return false

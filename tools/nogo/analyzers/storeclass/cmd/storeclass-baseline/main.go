@@ -409,7 +409,9 @@ func gate(repo, ref string, allowRaise bool, out io.Writer) error {
 		return err
 	}
 	rs := raises(oldRows, newRows, oldCeil, newCeil)
-	changed, err := exec.Command("git", "-C", repo, "diff", "--name-only", ref, "HEAD").Output()
+	// --no-renames lists a renamed file under its old name too, so moving a
+	// file out of a protected path changes that path.
+	changed, err := exec.Command("git", "-C", repo, "diff", "--name-only", "--no-renames", ref, "HEAD").Output()
 	if err != nil {
 		return fmt.Errorf("listing the files changed since %s: %w", ref, err)
 	}
@@ -427,11 +429,14 @@ func gate(repo, ref string, allowRaise bool, out io.Writer) error {
 }
 
 // protectedPaths govern the lint and its gate: a change to any of them (the
-// analyzer, its allowlist and sealed lists, the generator, this workflow, the
-// code owners) needs the same approval as a baseline raise. baseline.txt and
-// ceiling.txt are judged by raises instead.
+// analyzer, its allowlist and sealed lists, the generator, the rules_go
+// patches that keep nolint from suppressing it and hand it the baseline, this
+// workflow, the code owners) needs the same approval as a baseline raise.
+// baseline.txt and ceiling.txt are judged by raises instead.
 var protectedPaths = []string{
 	"tools/nogo/analyzers/storeclass/",
+	"third_party/patches/rules_go_nogo_golangci_nolint.patch",
+	"third_party/patches/rules_go_nogo_main_repo_data.patch",
 	".github/workflows/storeclass-baseline.yml",
 	".github/CODEOWNERS",
 }

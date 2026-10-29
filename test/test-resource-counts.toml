@@ -3417,3 +3417,9 @@ calls = 1
 path = "test/workflows/needs_lifecycle_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "tools/nogo/nolinttest/storeclass_nolint_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1

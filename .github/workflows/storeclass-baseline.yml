@@ -8,8 +8,9 @@ name: storeclass baseline
 #      variant (a row for a tag-only or deleted file is caught here).
 #   2. The growth gate: against the merge-base, any new or raised baseline row
 #      or ceiling row fails, and so does any change to the lint itself (the
-#      analyzer, its allowlist and sealed lists, the generator, this workflow,
-#      CODEOWNERS), unless the pull request carries the
+#      analyzer, its allowlist and sealed lists, the generator, the two
+#      rules_go nogo patches, this workflow, CODEOWNERS), a rename out of
+#      them included, unless the pull request carries the
 #      storeclass/baseline-raise label. Only the typed-store programme's
 #      coordinator applies it; the raise procedure is in the storeclass
 #      package doc.

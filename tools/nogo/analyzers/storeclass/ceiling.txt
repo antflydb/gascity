@@ -3,27 +3,27 @@
 # exactly these totals, so a shrink lowers a row here in the same commit and a
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
-cmd/gc	cap-assert	99
+cmd/gc	cap-assert	102
 cmd/gc	mint	102
-cmd/gc	raw-field	158
-cmd/gc	raw-param	1011
-cmd/gc	raw-result	235
+cmd/gc	raw-field	163
+cmd/gc	raw-param	1029
+cmd/gc	raw-result	236
 cmd/gc	raw-type	4
-cmd/gc	raw-var	32
-cmd/gc	unwrap	150
+cmd/gc	raw-var	34
+cmd/gc	unwrap	151
 internal/agentutil	raw-param	2
 internal/api	cap-assert	10
-internal/api	mint	19
+internal/api	mint	22
 internal/api	raw-field	13
-internal/api	raw-param	120
-internal/api	raw-result	16
-internal/api	unwrap	201
+internal/api	raw-param	141
+internal/api	raw-result	17
+internal/api	unwrap	205
 internal/convoy	cap-assert	1
 internal/convoy	raw-field	4
 internal/convoy	raw-param	14
-internal/dispatch	cap-assert	1
+internal/dispatch	cap-assert	2
 internal/dispatch	raw-field	5
-internal/dispatch	raw-param	187
+internal/dispatch	raw-param	199
 internal/dispatch	raw-result	5
 internal/dispatch	raw-type	1
 internal/doctor	raw-field	1
@@ -54,6 +54,7 @@ internal/orders	raw-param	2
 internal/orders	raw-result	1
 internal/orders	unwrap	21
 internal/readywork	raw-field	1
+internal/readywork	raw-param	1
 internal/runtime/t3bridge	raw-param	1
 internal/runtime/t3bridge	raw-result	1
 internal/session	cap-assert	1

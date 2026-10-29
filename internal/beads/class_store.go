@@ -24,8 +24,8 @@ package beads
 // WorkStore is a strongly-typed view over a single Store holding work beads
 // (the city's general task ledger). It is backed by the same underlying store
 // it wraps; the wrapper exists so the compiler enforces that a work-class
-// consumer cannot be handed another class's store. Access optional capabilities
-// by asserting on the embedded .Store field.
+// consumer cannot be handed another class's store. Reach optional capabilities
+// with beads.As.
 type WorkStore struct {
 	Store
 }
@@ -33,8 +33,8 @@ type WorkStore struct {
 // GraphStore is a strongly-typed view over a single Store holding graph beads
 // (controller graph / molecule state). It is backed by the same underlying
 // store it wraps; the wrapper exists so the compiler enforces that a graph-class
-// consumer cannot be handed another class's store. Access optional capabilities
-// by asserting on the embedded .Store field.
+// consumer cannot be handed another class's store. Reach optional capabilities
+// with beads.As.
 type GraphStore struct {
 	Store
 }
@@ -42,8 +42,8 @@ type GraphStore struct {
 // SessionStore is a strongly-typed view over a single Store holding session
 // beads (session lifecycle projection). It is backed by the same underlying
 // store it wraps; the wrapper exists so the compiler enforces that a
-// session-class consumer cannot be handed another class's store. Access optional
-// capabilities by asserting on the embedded .Store field.
+// session-class consumer cannot be handed another class's store. Reach optional
+// capabilities with beads.As.
 type SessionStore struct {
 	Store
 }
@@ -51,8 +51,7 @@ type SessionStore struct {
 // MailStore is a strongly-typed view over a single Store holding mail beads
 // (inter-agent messages). It is backed by the same underlying store it wraps;
 // the wrapper exists so the compiler enforces that a mail-class consumer cannot
-// be handed another class's store. Access optional capabilities by asserting on
-// the embedded .Store field.
+// be handed another class's store. Reach optional capabilities with beads.As.
 type MailStore struct {
 	Store
 }
@@ -60,8 +59,8 @@ type MailStore struct {
 // OrdersStore is a strongly-typed view over a single Store holding order beads
 // (scheduled/event-gated formula triggers). It is backed by the same underlying
 // store it wraps; the wrapper exists so the compiler enforces that an
-// orders-class consumer cannot be handed another class's store. Access optional
-// capabilities by asserting on the embedded .Store field.
+// orders-class consumer cannot be handed another class's store. Reach optional
+// capabilities with beads.As.
 type OrdersStore struct {
 	Store
 }
@@ -69,8 +68,7 @@ type OrdersStore struct {
 // NudgesStore is a strongly-typed view over a single Store holding nudge beads
 // (session nudges). It is backed by the same underlying store it wraps; the
 // wrapper exists so the compiler enforces that a nudges-class consumer cannot be
-// handed another class's store. Access optional capabilities by asserting on the
-// embedded .Store field.
+// handed another class's store. Reach optional capabilities with beads.As.
 type NudgesStore struct {
 	Store
 }
@@ -79,8 +77,9 @@ type NudgesStore struct {
 // conditional-writes resolution target, so ResolveConditionalWriter works on
 // a typed handle without the caller remembering to unwrap — the one optional
 // capability where forgetting the unwrap would not fail loudly but silently
-// resolve unset→legacy (fatal under require). All other optional capabilities
-// keep the assert-on-.Store convention above.
+// resolve unset→legacy (fatal under require). Every other optional capability
+// goes through beads.As; an assertion on .Store is the older unwrap the
+// storeclass lint baselines.
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
 // conditional-writes resolution target.

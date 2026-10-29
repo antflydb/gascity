@@ -200,13 +200,23 @@ type fakeForeignIDCreator struct{ name string }
 
 func (fakeForeignIDCreator) CreateWithForeignID(Bead) (Bead, error) { return Bead{}, nil }
 
-// rawForeignStore has every class-write capability the gate must vet, so a
+// rawForeignStore has class-write capabilities the gate must vet, so a
 // capability that reaches the caller unvetted is visible.
 type rawForeignStore struct {
 	*MemStore
 }
 
 func (rawForeignStore) CreateWithForeignID(Bead) (Bead, error) { return Bead{}, nil }
+
+func (rawForeignStore) UpdateReporting(string, UpdateOpts) (UpdatedRow, error) {
+	return UpdatedRow{}, nil
+}
+
+// foreignIDShape has ForeignIDCreator's method set under another type
+// identity.
+type foreignIDShape interface {
+	CreateWithForeignID(Bead) (Bead, error)
+}
 
 func TestAsThroughAClassGate(t *testing.T) {
 	inner := rawForeignStore{NewMemStore()}
@@ -229,6 +239,27 @@ func TestAsThroughAClassGate(t *testing.T) {
 	if _, ok := As[ForeignIDCreator](declining); ok {
 		t.Fatal("As[ForeignIDCreator] leaked the unguarded creator through a declining gate")
 	}
+	// The gate fails closed: a capability it was never told about is its to
+	// answer too, so the store below it never answers one.
+	if _, ok := Store(inner).(foreignIDShape); !ok {
+		t.Fatal("fixture: the inner store does not have ForeignIDCreator's method set")
+	}
+	if _, ok := As[foreignIDShape](h); ok {
+		t.Fatal("As leaked the unguarded creator through a gate under another interface's identity")
+	}
+	if _, ok := Store(inner).(UpdateReporter); !ok {
+		t.Fatal("fixture: the inner store is no UpdateReporter")
+	}
+	if _, ok := As[UpdateReporter](h); ok {
+		t.Fatal("As[UpdateReporter] leaked the unguarded updater through a gate")
+	}
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	if _, ok := As[*CachingStore](GraphStore{cache}); !ok {
+		t.Fatal("fixture: As[*CachingStore] does not find the cache without a gate")
+	}
+	if _, ok := As[*CachingStore](GraphStore{testGate{Store: cache}}); ok {
+		t.Fatal("As[*CachingStore] leaked the raw cache through a gate")
+	}
 	// A capability that cannot change a class passes through.
 	counted := GraphStore{testGate{Store: countingStore{NewMemStore()}}}
 	if _, ok := As[Counter](counted); !ok {
@@ -240,32 +271,51 @@ func TestAsThroughAClassGate(t *testing.T) {
 	}
 }
 
-func TestClassWriteCapabilities(t *testing.T) {
+// TestClassGateAllowlist: the class-neutral capabilities are an allowlist,
+// and a gate vets every other T: the class writers, the whole store, a
+// concrete store, a full updater, a provider, and an unnamed interface.
+func TestClassGateAllowlist(t *testing.T) {
 	for name, got := range map[string]bool{
-		"StorageCreateStore":       isClassWriteCapability[StorageCreateStore](),
-		"ForeignIDCreator":         isClassWriteCapability[ForeignIDCreator](),
-		"StorageGraphApplyStore":   isClassWriteCapability[StorageGraphApplyStore](),
-		"EphemeralGraphApplyStore": isClassWriteCapability[EphemeralGraphApplyStore](),
-		"AssignmentGuardedUpdater": isClassWriteCapability[AssignmentGuardedUpdater](),
-		"ConditionalWriter":        isClassWriteCapability[ConditionalWriter](),
-		"GuardedBatcher":           isClassWriteCapability[GuardedBatcher](),
-		"GraphApplyStore":          isClassWriteCapability[GraphApplyStore](),
-		"MetadataCASWriter":        isClassWriteCapability[MetadataCASWriter](),
-		"AtomicConditionalCloser":  isClassWriteCapability[AtomicConditionalCloser](),
+		"Counter":                       passesClassGate[Counter](),
+		"NamespaceCensus":               passesClassGate[NamespaceCensus](),
+		"DependencyBatchLister":         passesClassGate[DependencyBatchLister](),
+		"DepMetadataReader":             passesClassGate[DepMetadataReader](),
+		"GraphOnlyReadyStore":           passesClassGate[GraphOnlyReadyStore](),
+		"ContextReadyReader":            passesClassGate[ContextReadyReader](),
+		"OrderedReadyReader":            passesClassGate[OrderedReadyReader](),
+		"CachePreferredReadyReader":     passesClassGate[CachePreferredReadyReader](),
+		"ChildrenBatchLister":           passesClassGate[ChildrenBatchLister](),
+		"ExactBatchGetter":              passesClassGate[ExactBatchGetter](),
+		"CachedReadExact":               passesClassGate[CachedReadExact](),
+		"ReadOnlyReporter":              passesClassGate[ReadOnlyReporter](),
+		"RowWitness":                    passesClassGate[RowWitness](),
+		"ParentProjectionWaiter":        passesClassGate[ParentProjectionWaiter](),
+		"ConditionalAssignmentReleaser": passesClassGate[ConditionalAssignmentReleaser](),
+		"ConditionalAssigneeTransferer": passesClassGate[ConditionalAssigneeTransferer](),
 	} {
 		if !got {
-			t.Errorf("%s is not a class-write capability", name)
+			t.Errorf("%s is not class-neutral: a gate hides it", name)
 		}
 	}
 	for name, got := range map[string]bool{
-		"Counter":                       isClassWriteCapability[Counter](),
-		"ConditionalAssignmentReleaser": isClassWriteCapability[ConditionalAssignmentReleaser](),
-		"ConditionalAssigneeTransferer": isClassWriteCapability[ConditionalAssigneeTransferer](),
-		"DependencyBatchLister":         isClassWriteCapability[DependencyBatchLister](),
-		"Store":                         isClassWriteCapability[Store](),
+		"StorageCreateStore":              passesClassGate[StorageCreateStore](),
+		"ForeignIDCreator":                passesClassGate[ForeignIDCreator](),
+		"StorageGraphApplyStore":          passesClassGate[StorageGraphApplyStore](),
+		"EphemeralGraphApplyStore":        passesClassGate[EphemeralGraphApplyStore](),
+		"AssignmentGuardedUpdater":        passesClassGate[AssignmentGuardedUpdater](),
+		"ConditionalWriter":               passesClassGate[ConditionalWriter](),
+		"GuardedBatcher":                  passesClassGate[GuardedBatcher](),
+		"GraphApplyStore":                 passesClassGate[GraphApplyStore](),
+		"MetadataCASWriter":               passesClassGate[MetadataCASWriter](),
+		"AtomicConditionalCloser":         passesClassGate[AtomicConditionalCloser](),
+		"Store":                           passesClassGate[Store](),
+		"*CachingStore":                   passesClassGate[*CachingStore](),
+		"UpdateReporter":                  passesClassGate[UpdateReporter](),
+		"ConditionalWriterHandleProvider": passesClassGate[ConditionalWriterHandleProvider](),
+		"foreignIDShape":                  passesClassGate[foreignIDShape](),
 	} {
 		if got {
-			t.Errorf("%s is a class-write capability; it cannot change a class", name)
+			t.Errorf("%s passes a class gate unvetted", name)
 		}
 	}
 }

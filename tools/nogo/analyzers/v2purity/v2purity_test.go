@@ -419,6 +419,17 @@ func TestDefaultForbidsTheStdoutPrinters(t *testing.T) {
 	}
 }
 
+// TestDefaultForbidsTheCapabilityHelpers: a capability reached through a
+// typed handle is a store read that no forbidden interface method names, so
+// a pure root may not call the helpers that reach one.
+func TestDefaultForbidsTheCapabilityHelpers(t *testing.T) {
+	for _, f := range []string{"github.com/gastownhall/gascity/internal/beads.As", "github.com/gastownhall/gascity/internal/beads.HandlesFor"} {
+		if !slices.Contains(v2purity.Default.ForbiddenFuncs, f) {
+			t.Errorf("%s is not forbidden", f)
+		}
+	}
+}
+
 // Kills a forbidden interface found only where the driver shows it: under
 // an export-data driver, a package that reaches the interface only through
 // another package's embedding does not see it among its imports, so the
