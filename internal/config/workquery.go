@@ -200,8 +200,10 @@ func excludeHoldLabelsJQClause() string {
 const mailMessageBeadType = "message"
 
 // excludeMailMessagesJQClause returns a jq select(...) clause dropping mail
-// beads, for the jq-filtered ephemeral tiers that bd's own ready-path message
-// exclusion never reaches. The type is trimmed and case-folded the way the
+// beads, for the jq filters over reads that can return them: the ephemeral
+// `bd query` snapshots, which bd's own ready-path message exclusion never
+// reaches, and the federated in_progress window (servableInProgressRowsScript).
+// The type is trimmed and case-folded the way the
 // hook's hookClaimCandidateIsMessage compares it, so no tier serves a row the
 // hook is certain to refuse; tostring keeps a non-string type from erroring
 // the filter, which its discarded stderr would read as an empty tier.
@@ -728,12 +730,17 @@ const inProgressCandidatesLimit = 20
 // through inProgressBlockedByEnrichmentScript, which falls back to `bd show`
 // for a row that carries no blocked_by.
 //
+// It also drops mail the way the hook refuses it. The read already drops type
+// message (assignedInProgressRead), but its match is exact, so a padded or
+// differently cased spelling reaches this script, which must not serve a row
+// the hook refuses (#5815).
+//
 // It fails open like the gate. Output jq cannot parse leaves $r as the reader
 // printed it, and the gate then serves it unchanged; a window with no servable
 // row becomes "[]", so the tier falls through to the ready tiers, as it did when
 // its one row was blocked.
 func servableInProgressRowsScript(limit int) string {
-	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + `]`
+	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -744,10 +751,19 @@ func servableInProgressRowsScript(limit int) string {
 // assignedInProgressRead is the crash-recovery tier's in_progress read for one
 // identity, with args after the assignee, bounded to limit rows. The failure
 // clause names the reader alone, whatever args the read carries.
+//
+// The federated read drops mail itself (--exclude-type=message). It lists both
+// storage tiers, so it holds the session's mail wisps, and a --status read
+// applies no infra-type exclusion, unlike bd's ready path and `bd list`. The
+// reader drops the type before its bound and its --until-unblocked cut, which a
+// filter on its answer cannot do: a claimed mail wisp has no blocker and sorts
+// ahead of a newer claim, so the cut would end the answer at the mail and the
+// claim behind it would never be read (#5815).
 func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int) string {
 	reader := bdListInProgressCommand
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
+		args = ` --exclude-type=` + mailMessageBeadType + args
 	}
 	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; `
@@ -1238,9 +1254,10 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // above.
 //
 // Mail (issue_type=message) is withheld from every tier: it is read, never
-// claimed (#4419). bd's ready path omits it natively, and the jq-filtered
-// ephemeral tiers drop it before they truncate, so a recipient's open mail
-// wisp cannot stand in for that tier's only row and end the query before the
+// claimed (#4419). bd's ready path and `bd list` omit it natively, the
+// federated in_progress read passes --exclude-type=message, and the
+// jq-filtered tiers drop it before they truncate, so a recipient's mail wisp
+// cannot stand in for that tier's only row and end the query before the
 // routed tier runs (#5815).
 //
 // When the reconciler runs the query for demand detection (no session

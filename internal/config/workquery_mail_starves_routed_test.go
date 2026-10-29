@@ -1,6 +1,8 @@
 package config
 
 import (
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -123,12 +125,18 @@ func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing
 }
 
 // AC-3: an in_progress mail wisp must not occupy the in_progress
-// crash-recovery slot, on either single-store compatibility mode.
+// crash-recovery slot, on either single-store compatibility mode, in the
+// combined work query or the standalone assigned_in_progress_query. The split
+// city's federated tier is TestFederatedInProgressTierSkipsAssignedMailWisp.
 func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 	requireJQ(t)
 	a := singleSessionConfigAgent()
 	mail := `{"id":"gcg-mail-claimed","status":"in_progress","issue_type":"message","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
 	task := `{"id":"gcg-progress-task","status":"in_progress","issue_type":"task","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{}}`
+	// The combined work query defers an assigned graph workflow root and reads
+	// the snapshot again, 20 rows deep, for an ordinary claim to serve first;
+	// the mail behind the root must not be that claim.
+	anchor := `{"id":"gcg-graph-root","status":"in_progress","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T09:55:00Z","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2"}}`
 	for _, tc := range []struct {
 		name string
 		topo QueryTopology
@@ -136,12 +144,84 @@ func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 		{"bd-1.0.4", QueryTopology{}},
 		{"bd-1.0.5", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(tc.topo), mailTestEnv(), fakeBdEphemeralStore(mail+","+task))
+		for _, q := range []struct {
+			name    string
+			command string
+		}{
+			{"work_query", a.EffectiveWorkQueryFor(tc.topo)},
+			{"assigned_in_progress_query", a.EffectiveAssignedInProgressQueryFor(tc.topo)},
+		} {
+			t.Run(tc.name+"/"+q.name, func(t *testing.T) {
+				out := runShellWithFakeBd(t, q.command, mailTestEnv(), fakeBdEphemeralStore(mail+","+task))
+				if strings.Contains(out, "gcg-mail-claimed") || !strings.Contains(out, "gcg-progress-task") {
+					t.Fatalf("in_progress tier served %q, want the in_progress task gcg-progress-task and no message bead", out)
+				}
+			})
+		}
+		t.Run(tc.name+"/work_query with mail behind a graph anchor", func(t *testing.T) {
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(tc.topo), mailTestEnv(), fakeBdEphemeralStore(anchor+","+mail+","+task))
 			if strings.Contains(out, "gcg-mail-claimed") || !strings.Contains(out, "gcg-progress-task") {
-				t.Fatalf("in_progress tier served %q, want the in_progress task gcg-progress-task and no message bead", out)
+				t.Fatalf("work query served %q behind the graph anchor, want the in_progress task gcg-progress-task and no message bead", out)
 			}
 		})
+	}
+}
+
+// AC-3 on a split city, where `gc hook` runs the federated work query as its
+// only claim read. Its crash-recovery tier reads `gc ready --status
+// in_progress`, a list across both storage tiers that holds the session's mail
+// wisps, ended at its first unblocked row. A claimed mail wisp has no blocker
+// and sorts ahead of a newer claim at the same priority, so the read itself
+// must drop it: a filter on the read's answer comes after the cut, when the
+// answer already ends at the mail and the claim behind it was never read.
+// fakeGCInProgressWindow answers the way the real reader does, cut included.
+func TestFederatedInProgressTierSkipsAssignedMailWisp(t *testing.T) {
+	requireJQ(t)
+	const mailID = "gcg-mail-claimed"
+	mail := `{"id":"` + mailID + `","status":"in_progress","issue_type":"message","assignee":"sess-1"}`
+	for _, topo := range []struct {
+		name string
+		topo QueryTopology
+	}{
+		{"bd-1.0.4", QueryTopology{FederatedReady: true}},
+		{"bd-1.0.5", federatedTopology()},
+	} {
+		for _, q := range federatedInProgressQueriesFor(topo.topo) {
+			for _, tc := range []struct {
+				name string
+				rows string
+				want []string
+				// anchored marks a window led by an assigned graph root, which
+				// the standalone assigned_in_progress_query serves itself.
+				anchored bool
+			}{
+				{name: "mail ahead of a claim", rows: federatedInProgressRows(mail, federatedServableRow), want: []string{"gcs-servable"}},
+				// The combined work query defers the root and reads the window
+				// again, uncut, serving its first non-anchor row.
+				{name: "mail ahead of a step behind a graph anchor", rows: federatedInProgressRows(federatedAnchorRow, mail, federatedServableRow), want: []string{"gcs-servable"}, anchored: true},
+				{name: "mail only", rows: federatedInProgressRows(mail), want: []string{}},
+			} {
+				t.Run(topo.name+"/"+q.name+"/"+tc.name, func(t *testing.T) {
+					want := tc.want
+					if tc.anchored && q.servesAnchor {
+						want = []string{"gc-root"}
+					}
+					if got := runFederatedInProgressWindow(t, q.command, tc.rows); !slices.Equal(got, want) {
+						t.Fatalf("served %v, want %v and no message bead", got, want)
+					}
+				})
+			}
+			// The read matches the type exactly, so a padded or differently
+			// cased spelling still reaches the tier, and still ends the window
+			// there. The tier must fall through rather than serve a row the
+			// hook refuses.
+			t.Run(topo.name+"/"+q.name+"/differently spelled mail", func(t *testing.T) {
+				variant := strings.Replace(mail, `"issue_type":"message"`, `"issue_type":" Message "`, 1)
+				if got := runFederatedInProgressWindow(t, q.command, federatedInProgressRows(variant, federatedServableRow)); slices.Contains(got, mailID) {
+					t.Fatalf("served %v, which includes the message bead %s the hook refuses", got, mailID)
+				}
+			})
+		}
 	}
 }
 
@@ -189,10 +269,12 @@ func TestEffectiveWorkQueryLegacyControlSkipsMailAddressedToCandidateIdentity(t 
 	}
 }
 
-// Mail is withheld at the jq ephemeral probes, so no generated `bd ready` /
-// `gc ready` read may grow an --exclude-type=message flag: the ready path
-// already excludes infra types natively (readyExcludeTypes; bd's own ready
-// policy), and the flag would churn every deployed command for nothing.
+// The ready path already excludes infra types natively (readyExcludeTypes; bd's
+// own ready policy), so no generated `bd ready` / `gc ready` ready read may grow
+// an --exclude-type=message flag: it would churn every deployed command for
+// nothing. A `gc ready --status` read is a list, with no such exclusion, so it
+// is not checked here: the federated in_progress read carries the flag
+// (assignedInProgressRead).
 func TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType(t *testing.T) {
 	a := singleSessionConfigAgent()
 	for name, topo := range map[string]QueryTopology{
@@ -200,8 +282,22 @@ func TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType(t *testing.T) {
 		"bd105":     {Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}},
 		"federated": {FederatedReady: true},
 	} {
-		if got := a.EffectiveWorkQueryFor(topo); strings.Contains(got, "--exclude-type=message") {
-			t.Errorf("%s: generated work query renders --exclude-type=message on a ready read: %q", name, got)
+		readyReads := 0
+		for _, read := range generatedReadyReaderReads.FindAllString(a.EffectiveWorkQueryFor(topo), -1) {
+			if strings.Contains(read, " --status ") {
+				continue
+			}
+			readyReads++
+			if strings.Contains(read, "--exclude-type=message") {
+				t.Errorf("%s: generated work query renders --exclude-type=message on a ready read: %q", name, read)
+			}
+		}
+		if readyReads == 0 {
+			t.Errorf("%s: found no ready read in the generated work query, so the check would pass vacuously", name)
 		}
 	}
 }
+
+// generatedReadyReaderReads matches each `bd ready` / `gc ready` read of a
+// generated query: the command substitution holding it, up to its close.
+var generatedReadyReaderReads = regexp.MustCompile(`\$\((?:bd|gc) ready [^)]*`)
