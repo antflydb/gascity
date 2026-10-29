@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -117,5 +119,34 @@ func TestSlingSingleStoreCityNeverProbesABinding(t *testing.T) {
 	probe, err := probeExistingSlingSourceBead(f.cfg, f.cityPath, "ra-absent")
 	if err != nil || probe.exists {
 		t.Errorf("single-store probe of an absent id = %+v %v", probe, err)
+	}
+}
+
+// slingBindingReadFails is a binding whose by-id read fails (a locked or
+// unreachable database), not a clean miss.
+type slingBindingReadFails struct{ beads.Store }
+
+func (slingBindingReadFails) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("binding read failed: database is locked")
+}
+
+// TestSlingRigWorkSurvivesABindingReadFailure: the binding probe is only the
+// residence check; a binding that cannot be read must not fail a sling of
+// rig work the rig store holds. Only when the rig store misses too does the
+// probe report the binding read failure, by name.
+func TestSlingRigWorkSurvivesABindingReadFailure(t *testing.T) {
+	f := newS4RigFixture(t, true)
+	writeS4FileCityTOML(t, f)
+	routes := splitEnvRoutes(slingBindingReadFails{f.binding})
+	routes.rigMarkers = f.routes.rigMarkers
+	seedCLIStorageRoutes(t, f.cityPath, routes)
+	seedS4RigRow(t, f.rigs["ra"], "ra-work1", "rig work")
+	dir, got := slingStoreFor(t, f, "ra-work1")
+	if got.Title != "rig work" || dir != resolveStoreScopeRoot(f.cityPath, f.rigPath("ra")) {
+		t.Errorf("rig work = %q in %s, want it from rig ra", got.Title, dir)
+	}
+	_, err := probeExistingSlingSourceBead(f.cfg, f.cityPath, "ra-absent")
+	if err == nil || !strings.Contains(err.Error(), "database is locked") || !strings.Contains(err.Error(), "binding") {
+		t.Errorf("a miss in both stores with an unreadable binding = %v, want the binding read failure named", err)
 	}
 }
