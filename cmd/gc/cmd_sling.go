@@ -285,6 +285,17 @@ func readSlingStdinBead() (title, description, errCode, errMsg string) {
 // target agent/bead. Store-touching pre-core orchestration extracted from
 // cmdSlingWithJSON. On failure it returns a non-empty (errCode, errMsg) pair.
 func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead existingSlingSourceBead, a config.Agent) (storeDir string, store beads.Store, errCode, errMsg string) {
+	if sourceBead.exists && sourceBead.inBinding {
+		// The probe found the bead in the city binding (a relic the storage
+		// migration or the rig importer moved there under its own id): act on
+		// that same store, so the probe and the write agree. The scope, and
+		// with it storeDir, still comes from the id's prefix.
+		binding := slingResidenceBinding(cityPath)
+		if binding == nil {
+			return "", nil, "store_open_failed", fmt.Sprintf("gc sling: %s was found in the city binding, which is no longer available", beadOrFormula)
+		}
+		return sourceBead.storeDir, binding, "", ""
+	}
 	if sourceBead.exists {
 		s, err := openAuthoritativeStoreAtForCity(sourceBead.storeDir, cityPath)
 		if err != nil {
@@ -641,12 +652,42 @@ type existingSlingSourceBead struct {
 	checked  bool
 	storeDir string
 	prefix   string
+	// inBinding reports that the bead lives in the city binding rather than
+	// in the store its prefix names: residence, not scope (design S4 §2.3).
+	// storeDir is still the prefix's scope directory.
+	inBinding bool
+}
+
+// slingResidenceBinding is the city binding a split city serves the graph
+// class from, or nil on a city that relocates nothing (or refuses its
+// binding). The handle is the process's shared routes store: it is never
+// closed here.
+func slingResidenceBinding(cityPath string) beads.Store {
+	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)) // residency:allow — S4 sling residence: the by-id probe asks the binding first, as planByID does
+	if !relocated || binding == nil {
+		return nil
+	}
+	if _, refused := binding.(refusedClassStore); refused {
+		return nil
+	}
+	return binding
 }
 
 func probeExistingSlingSourceBead(cfg *config.City, cityPath, beadID string) (existingSlingSourceBead, error) {
 	storeDir, prefix, ok := slingSourceStoreRootForCandidate(cfg, cityPath, beadID)
 	if !ok {
 		return existingSlingSourceBead{}, nil
+	}
+	// Residence first on a split city: the binding answers before the scope
+	// store, so a twin resolves to the binding row (planByID ModeFirstOwner).
+	if binding := slingResidenceBinding(cityPath); binding != nil {
+		inBinding, err := sling.ProbeBeadInStore(binding, beadID)
+		if err != nil {
+			return existingSlingSourceBead{}, fmt.Errorf("checking bead candidate %q in the city binding: %w", beadID, err)
+		}
+		if inBinding {
+			return existingSlingSourceBead{exists: true, checked: true, storeDir: storeDir, prefix: prefix, inBinding: true}, nil
+		}
 	}
 	store, err := openAuthoritativeStoreAtForCity(storeDir, cityPath)
 	if err != nil {
