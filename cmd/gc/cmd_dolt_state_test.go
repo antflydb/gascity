@@ -1232,12 +1232,17 @@ func TestDoltStateAllocatePortCmdSkipsOccupiedSeedPort(t *testing.T) {
 
 func TestDoltStateAllocatePortCmdIgnoresInvalidProviderState(t *testing.T) {
 	cityPath := t.TempDir()
+	// portHeld puts a foreign listener on the recorded port: a recorded port
+	// of this city's own data dir is reused when free (the server died), so
+	// these cases are invalid only while something else holds it.
 	cases := []struct {
-		name  string
-		state doltRuntimeState
+		name     string
+		portHeld bool
+		state    doltRuntimeState
 	}{
 		{
-			name: "running false",
+			name:     "running false",
+			portHeld: true,
 			state: doltRuntimeState{
 				Running:   false,
 				PID:       os.Getpid(),
@@ -1256,19 +1261,14 @@ func TestDoltStateAllocatePortCmdIgnoresInvalidProviderState(t *testing.T) {
 				StartedAt: time.Now().UTC().Format(time.RFC3339),
 			},
 		},
-		{
-			name: "unreachable port",
-			state: doltRuntimeState{
-				Running:   true,
-				PID:       os.Getpid(),
-				Port:      43126,
-				DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
-				StartedAt: time.Now().UTC().Format(time.RFC3339),
-			},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.portHeld {
+				ln := listenOnRandomPort(t)
+				defer ln.Close() //nolint:errcheck // best-effort cleanup
+				tc.state.Port = ln.Addr().(*net.TCPAddr).Port
+			}
 			stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
 			if err := writeDoltRuntimeStateFile(stateFile, tc.state); err != nil {
 				t.Fatalf("writeDoltRuntimeStateFile: %v", err)
@@ -1282,6 +1282,34 @@ func TestDoltStateAllocatePortCmdIgnoresInvalidProviderState(t *testing.T) {
 				t.Fatalf("allocate-port reused invalid provider-state port %d", tc.state.Port)
 			}
 		})
+	}
+}
+
+// A provider state that claims a running server nothing answers on is not
+// trusted as live, but its port is still this city's recorded one: allocate-port
+// hands it back while it is free.
+func TestDoltStateAllocatePortCmdReusesFreePortOfUnreachableProviderState(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	t.Setenv("GC_DOLT_PORT", "")
+	port := recordedPortAwayFromSeed(t, cityPath)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "allocate-port", "--city", cityPath, "--state-file", stateFile}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != strconv.Itoa(port) {
+		t.Fatalf("allocate-port = %q, want the unreachable provider state's free port %d", got, port)
 	}
 }
 

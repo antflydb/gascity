@@ -2727,7 +2727,8 @@ find_dolt_pid() {
 # Resolution order:
 #   1. State file has a reachable port + PID is alive → reuse it
 #   2. GC_DOLT_PORT env var (initial/operator override) → use it
-#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+#   3. State file has a port nothing listens on (its server died) → reuse it
+#   4. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     local gc_bin helper_port
     gc_bin=$(resolve_gc_helper_bin)
@@ -2758,7 +2759,19 @@ allocate_port() {
         return
     fi
 
-    # 3. Deterministic hash of city path, probe until free.
+    # 3. The port a dead server recorded, when it is free. Running sessions pin
+    # the port they were spawned with, so a restart must come back on it.
+    if [ -f "$STATE_FILE" ]; then
+        local recorded_port
+        recorded_port=$(load_state_field port)
+        if [ "${recorded_port:-0}" -gt 0 ] 2>/dev/null &&
+            ! run_lsof -nP -iTCP:"$recorded_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$recorded_port"
+            return
+        fi
+    fi
+
+    # 4. Deterministic hash of city path, probe until free.
     local hash_val
     hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
     local port="$hash_val"
