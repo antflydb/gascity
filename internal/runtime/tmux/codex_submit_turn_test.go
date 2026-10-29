@@ -711,7 +711,9 @@ func TestCodexSubmitDefersWhileATurnOutlastsTheReadyWait(t *testing.T) {
 
 // TestCodexSubmitResendsWhileTheDraftWaits keeps the #4706 recovery: when the
 // first Enter is taken as a newline, the message still sits in the idle
-// composer, and only then is the Escape+Enter submit sent again.
+// composer, and only then is the submit sent again, as the commit key alone: a
+// retried Escape+Enter pair can fuse into Alt+Enter again (ga-oqhooe), and a
+// lone Enter submits the draft the swallowed attempt left behind.
 func TestCodexSubmitResendsWhileTheDraftWaits(t *testing.T) {
 	pane, err := runCodexTurnNudge(t, "codex-submit-swallowed-enter", func(p *codexTurnPane) {
 		p.swallowEnters = 1
@@ -719,7 +721,7 @@ func TestCodexSubmitResendsWhileTheDraftWaits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NudgeSession = %v, want nil", err)
 	}
-	if got, want := pane.keysPressed(), []string{"C-u", "Escape", "Enter", "Escape", "Enter"}; !slices.Equal(got, want) {
+	if got, want := pane.keysPressed(), []string{"C-u", "Escape", "Enter", "Enter"}; !slices.Equal(got, want) {
 		t.Fatalf("keys = %q, want %q", got, want)
 	}
 	if recorded, aborted, _ := pane.snapshot(); aborted != 0 || !slices.Equal(recorded, []string{codexTurnMarker}) {
@@ -777,7 +779,7 @@ func TestSubmitAndConfirmWithholdsAnInterruptingResend(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			sends := 0
-			confirmed, _, sent, err := submitAndConfirm(func() error { sends++; return nil }, func() {},
+			confirmed, _, sent, err := submitAndConfirm(func(int) error { sends++; return nil }, func() {},
 				func() (bool, error) { return false, nil }, tt.mayResend, noSleep)
 			if err != nil || confirmed {
 				t.Fatalf("submitAndConfirm = %t, %v; want unconfirmed, nil", confirmed, err)
@@ -790,9 +792,12 @@ func TestSubmitAndConfirmWithholdsAnInterruptingResend(t *testing.T) {
 }
 
 // The first submit of an Escape-led sequence waits for an idle reading: a
-// pane busy at the baseline gets its submit only after it reads idle.
+// pane busy at the baseline gets its submit only after it reads idle. That
+// held submit is still the first one, so it carries attempt 0 and the full key
+// sequence, not the commit key a retry sends.
 func TestSubmitAndConfirmHoldsTheFirstInterruptingSubmitWhileBusy(t *testing.T) {
 	reads, sends := 0, 0
+	var attempts []int
 	busy := func() (bool, error) {
 		reads++
 		if sends > 0 {
@@ -800,13 +805,16 @@ func TestSubmitAndConfirmHoldsTheFirstInterruptingSubmitWhileBusy(t *testing.T) 
 		}
 		return reads <= 3, nil // an earlier turn ends after three reads
 	}
-	confirmed, _, sent, err := submitAndConfirm(func() error { sends++; return nil }, func() {}, busy,
+	confirmed, _, sent, err := submitAndConfirm(func(attempt int) error { sends++; attempts = append(attempts, attempt); return nil }, func() {}, busy,
 		func() (bool, error) { return true, nil }, noSleep)
 	if err != nil || !confirmed {
 		t.Fatalf("submitAndConfirm = %t, %v; want confirmed", confirmed, err)
 	}
 	if sent != 1 {
 		t.Fatalf("sends = %d, want 1, after the earlier turn ended", sent)
+	}
+	if !slices.Equal(attempts, []int{0}) {
+		t.Fatalf("attempts = %v, want [0]: a submit held back by a busy baseline is still the first", attempts)
 	}
 }
 

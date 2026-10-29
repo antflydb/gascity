@@ -98,6 +98,10 @@ var nudgeSubmitKeySequences = map[string][]string{
 	"codex": {"Escape", "Enter"},
 }
 
+// nudgeSubmitRetryKeySequence is the keys a retried submit sends. Scaffold for
+// the RED commit; the real derivation lands with the fix.
+func nudgeSubmitRetryKeySequence(_ []string) []string { return nil }
+
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
 // for a provider family, or defaultNudgeSubmitKeySequence when the family
 // has no explicit entry.
@@ -2821,7 +2825,7 @@ const (
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
+func submitEnterAndConfirm(sendSubmit func(attempt int) error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
 	confirmed, sawIdle, _, err := submitAndConfirm(sendSubmit, wake, busy, nil, sleep)
 	return confirmed, sawIdle, err
 }
@@ -2842,7 +2846,7 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 //     hook, a contended host), and an Escape sent into it aborts the turn
 //     before the provider records the message (healthy-direct, 2026-10-15). A
 //     look that fails is not evidence, so it sends nothing either.
-func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
+func submitAndConfirm(sendSubmit func(attempt int) error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
 	// Baseline reading before the first send: an idle baseline lets send 0's
 	// own polls confirm, while a busy or failed one leaves the pane needing
 	// an idle reading first.
@@ -2870,7 +2874,7 @@ func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, e
 			}
 		}
 		if resend {
-			if err := sendSubmit(); err != nil {
+			if err := sendSubmit(0); err != nil {
 				if isLookRefusal(err) {
 					// Never re-send into a permission prompt, or into a pane a
 					// look could not read.
@@ -3063,7 +3067,7 @@ func (o stagedDraftOutcome) String() string {
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func recoverStagedDraft(sawIdle bool, sendSubmit func() error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
+func recoverStagedDraft(sawIdle bool, sendSubmit func(attempt int) error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
 	sawDraft := false
 	for sends := 0; ; sends++ {
 		obs, err := observe()
@@ -3085,7 +3089,7 @@ func recoverStagedDraft(sawIdle bool, sendSubmit func() error, wake func(), obse
 		if sends >= submitDraftRecoverySends {
 			return stagedDraftUnresolved
 		}
-		if err := sendSubmit(); err != nil {
+		if err := sendSubmit(0); err != nil {
 			return stagedDraftUnresolved
 		}
 		wake()
@@ -3523,7 +3527,7 @@ func (t *Tmux) nudgeSession(
 	//
 	// Every submit is preceded by a look for a permission prompt: Enter on
 	// one picks its highlighted option (see nudgePromptGuard.refused).
-	sendSubmit := func() error {
+	sendSubmit := func(int) error {
 		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(ctx, target, submitKeys) })
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
@@ -3626,7 +3630,7 @@ func (t *Tmux) nudgeSession(
 		if attempt > 0 {
 			time.Sleep(submitReEnterBackoff)
 		}
-		if err := sendSubmit(); err != nil {
+		if err := sendSubmit(0); err != nil {
 			if isLookRefusal(err) {
 				return prompt.refused(err)
 			}
