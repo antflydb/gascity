@@ -549,6 +549,117 @@ func TestChooseManagedDoltPortSkipsStatePortHeldByAnotherProcess(t *testing.T) {
 	}
 }
 
+// recordedPortAwayFromSeed returns a free port that the seed walk for cityPath
+// cannot land on, so a pick of it can only come from the recorded state.
+func recordedPortAwayFromSeed(t *testing.T, cityPath string) int {
+	t.Helper()
+	seed := deterministicManagedDoltPortSeed(cityPath)
+	for i := 0; i < 20; i++ {
+		if port := reserveRandomTCPPort(t); port < seed || port > seed+100 {
+			return port
+		}
+	}
+	t.Skip("could not reserve a port outside the seed walk")
+	return 0
+}
+
+// TestChooseManagedDoltPortReusesDeadServersFreeStatePort pins that a restart
+// after the managed server died comes back on the port the city recorded, not
+// on the seed walk, so sessions that pinned that port keep reaching bd.
+func TestChooseManagedDoltPortReusesDeadServersFreeStatePort(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	t.Setenv("GC_DOLT_PORT", "")
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := recordedPortAwayFromSeed(t, cityPath)
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       deadPID(t),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want the dead server's recorded port %d", got, port)
+	}
+}
+
+// TestChooseManagedDoltPortReusesDeadServersFreeHintPort covers the branch
+// with no provider state file, where the published state names a dead server.
+func TestChooseManagedDoltPortReusesDeadServersFreeHintPort(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	t.Setenv("GC_DOLT_PORT", "")
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := recordedPortAwayFromSeed(t, cityPath)
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       deadPID(t),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want the published hint's recorded port %d", got, port)
+	}
+}
+
+// TestChooseManagedDoltPortSkipsDeadServersPortHeldByAnotherProcess pins the
+// other side: when something else holds the dead server's recorded port, the
+// pick falls through to the seed walk exactly as before.
+func TestChooseManagedDoltPortSkipsDeadServersPortHeldByAnotherProcess(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	t.Setenv("GC_DOLT_PORT", "")
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	holder := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = holder.Close() })
+	port := holder.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       deadPID(t),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if want := strconv.Itoa(nextAvailableManagedDoltPort(deterministicManagedDoltPortSeed(cityPath))); got != want {
+		t.Fatalf("chooseManagedDoltPort = %q, want the seed walk's %q for a recorded port another process holds", got, want)
+	}
+}
+
 func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
