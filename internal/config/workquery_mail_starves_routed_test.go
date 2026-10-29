@@ -69,3 +69,55 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 		})
 	}
 }
+
+// AC-2: an older open mail wisp must not hide a newer assigned wisp task from
+// the assigned-ready tier. The type is matched the way the hook matches it:
+// trimmed, case-folded, and read from the legacy "type" key when
+// "issue_type" is absent.
+func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	task := `{"id":"gcg-assigned-task","status":"open","issue_type":"task","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{}}`
+	for _, tc := range []struct {
+		name    string
+		typeKey string
+	}{
+		{"issue_type=message", `"issue_type":"message"`},
+		{"issue_type=Message", `"issue_type":"Message"`},
+		{"issue_type padded", `"issue_type":" message "`},
+		{"legacy type key", `"type":"message"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mail := `{"id":"gcg-mail-old","status":"open",` + tc.typeKey + `,"assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), mailTestEnv(), fakeBdEphemeralStore(mail+","+task))
+			if strings.Contains(out, "gcg-mail-old") || !strings.Contains(out, "gcg-assigned-task") {
+				t.Fatalf("assigned-ready tier served %q, want the assigned task gcg-assigned-task and no message bead", out)
+			}
+		})
+	}
+
+	mail := `{"id":"gcg-mail-old","status":"open","issue_type":"message","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+
+	// A non-string type must not make the jq clause error out: these filters
+	// discard jq's stderr and an error reads as an empty tier, so a servable
+	// row would be dropped along with the mail.
+	t.Run("non-string issue_type keeps the tier intact", func(t *testing.T) {
+		numeric := strings.Replace(task, `"issue_type":"task"`, `"issue_type":5`, 1)
+		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), mailTestEnv(), fakeBdEphemeralStore(mail+","+numeric))
+		if strings.Contains(out, "gcg-mail-old") || !strings.Contains(out, "gcg-assigned-task") {
+			t.Fatalf("non-string issue_type broke the tier (or served mail): served %q, want gcg-assigned-task and no message bead", out)
+		}
+	})
+
+	// A dependency_count > 0 message cannot hide behind the fast path's
+	// dependency gate: the slow filter surfaces it for bd show enrichment,
+	// which would serve it and exit before the routed tier runs.
+	t.Run("slow-path mail reply is withheld", func(t *testing.T) {
+		reply := `{"id":"gcg-mail-reply","status":"open","issue_type":"message","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":2,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+		routed := `{"id":"gcg-routed-wisp","status":"open","issue_type":"task","assignee":"","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{"gc.routed_to":"` + a.QualifiedName() + `"}}`
+		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), mailTestEnv(), fakeBdEphemeralStore(reply+","+routed))
+		if strings.Contains(out, "gcg-mail-reply") || !strings.Contains(out, "gcg-routed-wisp") {
+			t.Fatalf("slow-path mail reply starved routed work: served %q, want gcg-routed-wisp and no message bead", out)
+		}
+	})
+}
