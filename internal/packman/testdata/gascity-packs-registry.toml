@@ -43,6 +43,13 @@ schema = 1
     hash = "sha256:149772065f9f2862965146e74d853d17e432628f57d25a4386bbef0fb6744e33"
     description = "Release graph.v2 review/build prompt fixes validated by gascity RC gates."
 
+  [[pack.release]]
+    version = "0.1.7"
+    ref = "main"
+    commit = "5bf643ca55bd20f080994cc31414ee4596015a0c"
+    hash = "sha256:7393797bcb064030eef5f0c024d120a4edae29c06d8104465426855f5837771e"
+    description = "Route every shipped bead command through gc, so role workers, workflow pages and check scripts reach graph steps on split-store cities (no raw bd), and carry the graph.v2 prompt, check-script and workflow fixes on main since 0.1.6."
+
 [[pack]]
   name = "gastown"
   description = "Default Gas Town coding workflow pack."
