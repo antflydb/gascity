@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -341,6 +342,9 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if name == "" {
 		name = filepath.Base(rigPath)
 	}
+	// Captured before Provision writes anything: a rig already in the
+	// config is a re-add, and a re-add never gets a clean record.
+	existingRigs := configuredRigIdentities(cityPath, cfg)
 
 	deps := rig.Deps{
 		FS:           fs,
@@ -435,21 +439,53 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if !provisioned.Deferred {
 		// An adopted store may predate migration 0059's fix (beads#7037).
 		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
-		recordNewRigClean(cityPath, reloaded, r, adopt, stderr)
+		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
 	} else {
-		recordNewRigClean(cityPath, reloaded, r, adopt, stderr)
+		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
 	}
 	return r, 0
 }
 
+// configuredRigs is the rigs a city config declared before an add: names
+// and resolved scope roots.
+type configuredRigs struct {
+	names map[string]bool
+	roots map[string]bool
+}
+
+func configuredRigIdentities(cityPath string, cfg *config.City) configuredRigs {
+	out := configuredRigs{names: map[string]bool{}, roots: map[string]bool{}}
+	if cfg == nil {
+		return out
+	}
+	for _, r := range cfg.Rigs {
+		out.names[r.Name] = true
+		if strings.TrimSpace(r.Path) != "" {
+			out.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))] = true
+		}
+	}
+	return out
+}
+
+// holds reports whether r was already a rig of the city before the add.
+func (c configuredRigs) holds(cityPath string, r config.Rig) bool {
+	if c.names[r.Name] {
+		return true
+	}
+	return strings.TrimSpace(r.Path) != "" && c.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))]
+}
+
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
 // created on a split city: its store is new and holds no graph row, so its
-// readers need no relic leg (rigGraphRelicFree). An adopted store may hold
-// pre-split history; it stays awaiting import until `gc storage migrate
-// --from-rigs` censuses it. A single-store city, or one whose binding has
+// readers need no relic leg (rigGraphRelicFree). notNew is true for an
+// adopted store or a re-add of a rig the config already declared: either may
+// hold pre-split history, so it stays awaiting import until `gc storage
+// migrate --from-rigs` censuses it. Even for a new rig the store must list
+// empty (a pre-existing .gc store at the path may hold rows), and any error
+// reading it writes nothing. A single-store city, or one whose binding has
 // not converged, writes nothing.
-func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, adopt bool, stderr io.Writer) {
-	if adopt || cfg == nil || !rigNameIsFileSafe(r.Name) {
+func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, notNew bool, stderr io.Writer) {
+	if notNew || cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
 		return
 	}
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
@@ -465,7 +501,10 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, adopt bo
 	if fileExists(loc.MarkerPath()) || fileExists(loc.CleanPath()) {
 		return
 	}
-	if err := writeRigImportRecord(loc.CleanPath(), fmt.Sprintf("rig %s created empty by gc rig add %s", r.Name, time.Now().UTC().Format(time.RFC3339))); err != nil {
+	if !rigStoreListsEmpty(cityPath, r) {
+		return
+	}
+	if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s created empty by gc rig add %s", r.Name, time.Now().UTC().Format(time.RFC3339)), rigStoreRoot(cityPath, r)); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
 	}
 }
@@ -1355,4 +1394,23 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)
+}
+
+// rigStoreListsEmpty reports whether the rig's store holds no row at all,
+// closed and both tiers included. A store that cannot be opened, listed or
+// closed is not proven empty.
+func rigStoreListsEmpty(cityPath string, r config.Rig) bool {
+	// A scope with no store on disk at all holds no row, and opening it
+	// would only create (or start a server for) the store being asked about.
+	root := resolveStoreScopeRoot(cityPath, r.Path)
+	if !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json")) {
+		return true
+	}
+	store, err := openStorageScopeStore(r.Path, cityPath)
+	if err != nil {
+		return false
+	}
+	rows, listErr := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	closeErr := closeBeadStoreHandle(store)
+	return listErr == nil && closeErr == nil && len(rows) == 0
 }

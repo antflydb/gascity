@@ -3,6 +3,7 @@ package api
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -65,5 +66,21 @@ func TestOrderStoresDropARelicFreeRigLeg(t *testing.T) {
 	}
 	if workflowStoreRefs(infos)["rig:myrig"] {
 		t.Errorf("a relic-free rig is still read for order history: %v", workflowStoreRefs(infos))
+	}
+}
+
+// TestWorkflowEventSubjectStillFindsAWorkBeadInARetiredRig: a relic-free rig
+// holds no graph row, but an event's subject may be one of its WORK beads,
+// which the subject lookup must still find.
+func TestWorkflowEventSubjectStillFindsAWorkBeadInARetiredRig(t *testing.T) {
+	state, _, rig := newS4APIState(t, true)
+	work, err := rig.Create(beads.Bead{Title: "rig work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.relicFree["myrig"] = true
+	got, ok := workflowEventBeadFromSubject(state, work.ID)
+	if !ok || got.ID != work.ID {
+		t.Errorf("the subject lookup lost the rig work bead %s once the rig retired: %+v %v", work.ID, got, ok)
 	}
 }

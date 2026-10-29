@@ -1904,6 +1904,7 @@ go_test(
         "rig_fresh_inherited_scope_test.go",
         "rig_graph_readers_s4_test.go",
         "rig_import_fixtures_test.go",
+        "rig_import_review_side_test.go",
         "rig_import_review_test.go",
         "rig_import_test.go",
         "rig_include_imports_test.go",
