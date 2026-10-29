@@ -23,6 +23,7 @@ var doctorCityStoreDependentNames = []string{
 	"run-target-routed-to-backfill",
 	"route-recovery-quarantine",
 	"cross-store-gates",
+	"storage-rigs",
 	"dangling-blocking-edges",
 	"hold-label-routed-to",
 	"pool-idle-routed-work",

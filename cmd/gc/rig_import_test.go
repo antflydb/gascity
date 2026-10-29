@@ -33,7 +33,10 @@ type rigImportFixture struct {
 	rigPaths map[string]string
 	// open overrides the store a rig opens as (an unreachable rig, a store of
 	// another kind); nil means the rig's file store.
-	open     map[string]func() (beads.Store, error)
+	open map[string]func() (beads.Store, error)
+	// fixed serves a rig from a store the test holds (an in-memory, native
+	// Dolt or bd store) instead of its file store.
+	fixed    map[string]beads.Store
 	hashConf map[string]*fakeRigHashConfig
 }
 
@@ -67,6 +70,7 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 		target:   mustResolveInfraTarget(t, request.CityPath, cfg),
 		rigPaths: map[string]string{},
 		open:     map[string]func() (beads.Store, error){},
+		fixed:    map[string]beads.Store{},
 		hashConf: map[string]*fakeRigHashConfig{},
 	}
 	for _, rig := range rigs {
@@ -78,6 +82,9 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 			if samePath(storePath, path) {
 				if override := f.open[name]; override != nil {
 					return override()
+				}
+				if store := f.fixed[name]; store != nil {
+					return store, nil
 				}
 				return f.openFileRig(name)
 			}

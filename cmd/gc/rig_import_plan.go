@@ -31,6 +31,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -95,7 +96,7 @@ func readRigSnapshot(store beads.Store) (rigSnapshot, error) {
 }
 
 func isDepListBatchUnsupported(err error) bool {
-	return err != nil && strings.Contains(err.Error(), beads.ErrDepListBatchUnsupported.Error())
+	return errors.Is(err, beads.ErrDepListBatchUnsupported)
 }
 
 // rigImportGate is one S3b gate the import mints: Owner (a moved row) waits
