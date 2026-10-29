@@ -67,12 +67,17 @@ func setUpServeSkipCity(t *testing.T) (string, *beads.MemStore) {
 
 // createNonOpenScopeCheck seeds a scope-check control (no city-config
 // resolution needed) and moves it to status, the stale-row shape the ready
-// queue keeps offering.
+// queue keeps offering. It declares the graph.v2 contract, as production
+// control beads do, so it classifies as graph class: the split-strict gate
+// reads a control bead through the graph view.
 func createNonOpenScopeCheck(t *testing.T, store beads.Store, status string) beads.Bead {
 	t.Helper()
 	b, err := store.Create(beads.Bead{
-		Type:     "task",
-		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck},
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindScopeCheck,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		},
 	})
 	if err != nil {
 		t.Fatalf("create scope-check control: %v", err)
@@ -379,8 +384,11 @@ func TestDrainWorkflowServeWorkCountsQuarantineAsProgress(t *testing.T) {
 	cityDir, store := setUpServeSkipCity(t)
 	workflowServeIdlePollAttempts = 0
 	bad, err := store.Create(beads.Bead{
-		Type:     "task",
-		Metadata: map[string]string{beadmeta.KindMetadataKey: "not-a-control-kind"},
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "not-a-control-kind",
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		},
 	})
 	if err != nil {
 		t.Fatalf("create unsupported control: %v", err)
