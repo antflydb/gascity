@@ -1125,6 +1125,11 @@ resource = "cwd"
 calls = 2
 
 [[count]]
+path = "cmd/gc/rig_import_fixtures_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "cmd/gc/rig_remote_test.go"
 resource = "http_test_server"
 calls = 7

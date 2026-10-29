@@ -870,9 +870,18 @@ func TestStorageRigsDoctorCheckNamesRigStateAndReusedIds(t *testing.T) {
 	if res := check.Run(nil); res.Status != doctor.StatusOK {
 		t.Fatalf("doctor after the import = %+v", res)
 	}
-	// The store stamps created_at itself; a row minted a second later under
-	// the same id is a different bead.
-	time.Sleep(1100 * time.Millisecond)
+	// The store stamps created_at itself, so the bead the import carried is
+	// moved two days into the past in the manifest: a row the rig mints now
+	// under the same id is then a different bead.
+	loc := f.loc("packs")
+	manifest, _, err := loc.readManifest()
+	if err != nil || manifest == nil {
+		t.Fatal(err)
+	}
+	manifest.Created["gp-abc"] = manifest.Created["gp-abc"].Add(-48 * time.Hour)
+	if err := writeInfraCopyManifestFileAt(loc.BindingRoot, loc.ManifestPath(), rigTestKeys(manifest.IDs), manifest.Created, manifest.WrittenAt, manifest.LegacyBound, manifest.Generation, nil); err != nil {
+		t.Fatal(err)
+	}
 	f.seed("packs", []beads.Bead{workRow("gp-abc", "open")}, nil)
 	res := check.Run(nil)
 	if res.Status == doctor.StatusOK || !strings.Contains(strings.Join(res.Details, " "), "reuse an id") {
@@ -951,4 +960,13 @@ func TestByIDRelicProofReadsTheRigManifestsToo(t *testing.T) {
 	if manifest, read := migrationCopyManifest(f.request.CityPath, f.cfg); !read || !manifest["gp-a"] {
 		t.Errorf("the by-id proof does not read the rig manifest: %v read=%v", manifest, read)
 	}
+}
+
+func rigTestKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
