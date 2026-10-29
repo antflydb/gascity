@@ -1853,7 +1853,10 @@ With --attach on a v2 formula — one declaring
 [requires] formula_compiler = "&gt;=2.0.0" — the invocation runs under a
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
-conflicting live workflow from the same source is an error.
+conflicting live workflow from the same source is an error. A repeat
+cook still writes its --meta pairs to the workflow root it reuses, under
+the same lock, so the pairs of the last cook to take the lock are the
+ones that stay.
 
 On a city that serves the graph class from its own [storage] binding, most
 of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
@@ -4792,7 +4795,7 @@ gc session submit mayor "stop and do this instead" --intent interrupt_now
 |------|------|---------|-------------|
 | `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 | `--json` | bool |  | JSON output |
-| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of sending again; ignored otherwise (default: a new key each run) |
 
 ## gc session suspend
 
