@@ -651,6 +651,14 @@ func workflowStores(state State) []workflowStoreInfo {
 		if store == nil {
 			continue
 		}
+		// On a split city a rig's graph rows live in the binding leading
+		// this list; the rig's own store is read only while it may still
+		// hold pre-S4 rows. Once the rig is imported or proven clean (the
+		// S4 relic-free predicate) its store holds only work, and no
+		// workflow reader here reads work.
+		if rigGraphLegRetired(state, rigName) {
+			continue
+		}
 		stores = append(stores, workflowStoreInfo{
 			ref:       "rig:" + rigName,
 			scopeKind: beadmeta.ScopeKindRig,

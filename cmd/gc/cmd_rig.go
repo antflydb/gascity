@@ -435,8 +435,39 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if !provisioned.Deferred {
 		// An adopted store may predate migration 0059's fix (beads#7037).
 		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
+		recordNewRigClean(cityPath, reloaded, r, adopt, stderr)
+	} else {
+		recordNewRigClean(cityPath, reloaded, r, adopt, stderr)
 	}
 	return r, 0
+}
+
+// recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
+// created on a split city: its store is new and holds no graph row, so its
+// readers need no relic leg (rigGraphRelicFree). An adopted store may hold
+// pre-split history; it stays awaiting import until `gc storage migrate
+// --from-rigs` censuses it. A single-store city, or one whose binding has
+// not converged, writes nothing.
+func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, adopt bool, stderr io.Writer) {
+	if adopt || cfg == nil || !rigNameIsFileSafe(r.Name) {
+		return
+	}
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		return
+	}
+	// Only beside a converged binding: the records live at its root, and a
+	// city that has not cut over yet must not acquire files there.
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
+		return
+	}
+	loc := newRigImportLocation(target, cityPath, r.Name)
+	if fileExists(loc.MarkerPath()) || fileExists(loc.CleanPath()) {
+		return
+	}
+	if err := writeRigImportRecord(loc.CleanPath(), fmt.Sprintf("rig %s created empty by gc rig add %s", r.Name, time.Now().UTC().Format(time.RFC3339))); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // The following one-line aliases keep cmd/gc test files compiling against the

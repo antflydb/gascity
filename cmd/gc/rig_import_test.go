@@ -17,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -804,5 +806,126 @@ func TestRigImportRigFlagNarrowsTheRun(t *testing.T) {
 	}
 	if code, _, stderr := f.importRigs("nosuch"); code == 0 || !strings.Contains(stderr, "no rig \"nosuch\"") {
 		t.Errorf("an unknown --rig was not refused: %s", stderr)
+	}
+}
+
+// TestStorageStatusReportsEachRigsState: status names every rig's state and
+// exits non-zero while any rig awaits import; zero once each is imported or
+// clean.
+func TestStorageStatusReportsEachRigsState(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"}, config.Rig{Name: "quiet", Prefix: "gq"})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil), graphRow("gp-b", "gp-a", "open", nil)}, nil)
+	f.seed("quiet", []beads.Bead{workRow("gq-1", "open")}, nil)
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(f.request, &stdout, &stderr)
+	out := stdout.String()
+	if code == 0 || !strings.Contains(out, "rig packs: awaiting import (2 infrastructure bead(s), 1 open)") || !strings.Contains(out, "rig quiet: awaiting import (0 infrastructure bead(s)") {
+		t.Fatalf("status = %d, want non-zero naming both rigs awaiting import: %s", code, out)
+	}
+	if code, o, e := f.importRigs(); code != 0 {
+		t.Fatalf("import = %d: %s %s", code, o, e)
+	}
+	stdout.Reset()
+	if code := doStorageStatus(f.request, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "rig packs: imported") || !strings.Contains(stdout.String(), "rig quiet: clean") {
+		t.Fatalf("status after the import = %d: %s", code, stdout.String())
+	}
+}
+
+// TestStorageStatusIsUnchangedOnASingleStoreCity: no binding, no rig lines,
+// no rig store opened.
+func TestStorageStatusIsUnchangedOnASingleStoreCity(t *testing.T) {
+	request := storageTestRequest(t, &config.City{Rigs: []config.Rig{{Name: "packs", Prefix: "gp", Path: t.TempDir()}}})
+	prev := openStorageScopeStore
+	openStorageScopeStore = func(string, string) (beads.Store, error) {
+		t.Error("status opened a rig store on a single-store city")
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() { openStorageScopeStore = prev })
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code != 0 || strings.Contains(stdout.String(), "rigs:") {
+		t.Errorf("single-store status = %d %q", code, stdout.String())
+	}
+}
+
+// TestStorageRigsDoctorCheckNamesRigStateAndReusedIds: the doctor check warns
+// while a rig awaits import, clears once it is imported, and names a rig row
+// that reuses an id the import moved.
+func TestStorageRigsDoctorCheckNamesRigStateAndReusedIds(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{graphRow("gp-abc", "gp-abc", "closed", nil)}, nil)
+	check := newStorageRigsCheck(f.cfg, f.request.CityPath)
+	if res := check.Run(nil); res.Status == doctor.StatusOK || !strings.Contains(strings.Join(res.Details, " "), "awaiting import") {
+		t.Fatalf("doctor before the import = %+v", res)
+	}
+	if code, o, e := f.importRigs(); code != 0 {
+		t.Fatalf("import = %d: %s %s", code, o, e)
+	}
+	if res := check.Run(nil); res.Status != doctor.StatusOK {
+		t.Fatalf("doctor after the import = %+v", res)
+	}
+	// The store stamps created_at itself; a row minted a second later under
+	// the same id is a different bead.
+	time.Sleep(1100 * time.Millisecond)
+	f.seed("packs", []beads.Bead{workRow("gp-abc", "open")}, nil)
+	res := check.Run(nil)
+	if res.Status == doctor.StatusOK || !strings.Contains(strings.Join(res.Details, " "), "reuse an id") {
+		t.Errorf("doctor does not name the reused id: %+v", res)
+	}
+}
+
+// TestControllerBootCensusEmitsRigResidue: the controller's one asynchronous
+// census publishes storage.rig_residue for a rig awaiting import and skips a
+// suspended rig without opening it.
+func TestControllerBootCensusEmitsRigResidue(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"}, config.Rig{Name: "sleepy", Prefix: "gs", Suspended: true})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	f.open["sleepy"] = func() (beads.Store, error) {
+		t.Error("the boot census opened a suspended rig")
+		return beads.NewMemStore(), errors.New("suspended")
+	}
+	done := make(chan struct{})
+	prev := rigResidueCensusDone
+	rigResidueCensusDone = func() { close(done) }
+	t.Cleanup(func() { rigResidueCensusDone = prev })
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	cr := &CityRuntime{cfg: f.cfg, cityPath: f.request.CityPath, rec: rec, stderr: &stderr, logPrefix: "gc start"}
+	cr.startRigResidueCensus(context.Background())
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the boot census did not finish")
+	}
+	var residue []string
+	for _, e := range rec.Events {
+		if e.Type == events.StorageRigResidue {
+			residue = append(residue, e.Subject)
+		}
+	}
+	if len(residue) != 1 || residue[0] != "packs" {
+		t.Errorf("storage.rig_residue subjects = %v, want [packs]", residue)
+	}
+	if !strings.Contains(stderr.String(), "rig packs: awaiting import") || !strings.Contains(stderr.String(), "sleepy") {
+		t.Errorf("the boot warning = %q", stderr.String())
+	}
+}
+
+// TestRigAddRecordsANewRigCleanOnAConvergedSplitCity: a new, empty rig store
+// needs no relic leg; an adopted one stays awaiting import.
+func TestRigAddRecordsANewRigCleanOnAConvergedSplitCity(t *testing.T) {
+	f := newRigImportFixture(t)
+	var stderr bytes.Buffer
+	recordNewRigClean(f.request.CityPath, f.cfg, config.Rig{Name: "fresh", Path: t.TempDir()}, false, &stderr)
+	if !fileExists(f.loc("fresh").CleanPath()) {
+		t.Errorf("a new rig was not recorded clean: %s", stderr.String())
+	}
+	recordNewRigClean(f.request.CityPath, f.cfg, config.Rig{Name: "adopted", Path: t.TempDir()}, true, &stderr)
+	if fileExists(f.loc("adopted").CleanPath()) {
+		t.Error("an adopted rig was recorded clean without a census")
+	}
+	single := &config.City{}
+	recordNewRigClean(f.request.CityPath, single, config.Rig{Name: "plain", Path: t.TempDir()}, false, &stderr)
+	if fileExists(f.loc("plain").CleanPath()) {
+		t.Error("a single-store city wrote a rig record")
 	}
 }

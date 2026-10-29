@@ -1286,7 +1286,13 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 		return nil, "", fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	routes := cliStorageRoutes(cityPath)
 	for _, rig := range cfg.Rigs {
+		// A rig proven relic-free holds no control bead (S4b); the binding
+		// leg below answers for its scope.
+		if splitRigGraphRelicFree(routes, rig.Name) {
+			continue
+		}
 		store, err := openControlStoreAtForCity(rig.Path, cityPath, cfg)
 		if err != nil {
 			return nil, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
@@ -1893,7 +1899,12 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	routes := cliStorageRoutes(cityPath)
 	for _, info := range stores {
+		// A rig proven relic-free holds no workflow bead (S4b).
+		if rigViewRelicFree(routes, cityPath, info) {
+			continue
+		}
 		label := workflowDeleteStoreLabelForView(cfg, cityPath, info)
 		found, err := findWorkflowBeads(info.store, workflowID)
 		if err != nil {
@@ -3084,12 +3095,16 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
-	if err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
-	}
-	if err := c.mergeRootMatches(info, roots); err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+	// A rig proven relic-free holds no workflow root (S4b): its roots live in
+	// the binding view. Its work children are still walked below.
+	if !rigViewRelicFree(cliStorageRoutes(c.cityPath), c.cityPath, info) {
+		roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+		if err != nil {
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
+		}
+		if err := c.mergeRootMatches(info, roots); err != nil {
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+		}
 	}
 	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {

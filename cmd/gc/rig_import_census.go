@@ -12,6 +12,8 @@ package main
 // and serves, its relic legs keeping it correct.
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +23,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // rigCensusState is one rig's verdict.
@@ -55,6 +59,11 @@ type rigCensusRow struct {
 	Open     int
 	Stranded []string
 	Retained []string
+	// Reused names rig rows, of any class, under an id the rig's import
+	// moved for a different bead (same id, another created_at): by-id reads
+	// answer them with the binding's relic. The import raises the rig's
+	// min_hash_length so this does not recur.
+	Reused []string
 	// Plan is the import's plan, on a full census (preflight).
 	Plan *rigImportPlan
 	Err  error
@@ -134,6 +143,9 @@ func censusRig(cityPath, cityName string, target infraBindingTarget, rig config.
 		gen = manifest.Generation
 	}
 	for _, b := range snap.rows {
+		if manifest != nil && manifest.Match(b) == infraManifestReusedID {
+			row.Reused = append(row.Reused, b.ID)
+		}
 		if coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
 			continue
 		}
@@ -149,6 +161,7 @@ func censusRig(cityPath, cityName string, target infraBindingTarget, rig config.
 	}
 	sort.Strings(row.Retained)
 	sort.Strings(row.Stranded)
+	sort.Strings(row.Reused)
 	clean := fileExists(loc.CleanPath())
 	switch {
 	case notePresent && !note.Complete:
@@ -244,4 +257,69 @@ func rigBootRefusal(cityPath string, cfg *config.City, target infraBindingTarget
 		return nil
 	}
 	return errors.New(strings.Join(reasons, "; "))
+}
+
+// rigResidueCensusDone is a test seam: closed when a boot census finishes.
+var rigResidueCensusDone = func() {}
+
+// startRigResidueCensus runs the controller's one rig containment census, in
+// the background so boot never waits on a rig store. A suspended rig is not
+// opened (reading it would restart its retired proxy and Dolt); it is named
+// unchecked.
+func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
+	cfg, cityPath := cr.cfg, cr.cityPath
+	if cfg == nil || len(cfg.Rigs) == 0 || cityPath == "" {
+		return
+	}
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		return
+	}
+	suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
+	rigs := make([]config.Rig, 0, len(cfg.Rigs))
+	var unchecked []string
+	for _, rig := range cfg.Rigs {
+		if suspended[rig.Name] {
+			unchecked = append(unchecked, rig.Name)
+			continue
+		}
+		rigs = append(rigs, rig)
+	}
+	census := *cfg
+	census.Rigs = rigs
+	rec, stderr, logPrefix := cr.rec, cr.stderr, cr.logPrefix
+	go func() {
+		defer rigResidueCensusDone()
+		if ctx.Err() != nil {
+			return
+		}
+		emitRigResidue(rec, stderr, logPrefix, target, censusRigs(cityPath, &census, target, false), unchecked)
+	}()
+}
+
+// emitRigResidue publishes storage.rig_residue for every rig whose census
+// holds the deploy gate, and warns once on stderr.
+func emitRigResidue(rec events.Recorder, stderr io.Writer, logPrefix string, target infraBindingTarget, rows []rigCensusRow, unchecked []string) {
+	for _, r := range rows {
+		if !r.blocking() {
+			continue
+		}
+		line := rigCensusLine(r)
+		if stderr != nil {
+			fmt.Fprintf(stderr, "%s: storage: %s\n", logPrefix, line) //nolint:errcheck // best-effort stderr
+		}
+		if rec == nil {
+			continue
+		}
+		count := r.Infra
+		raw, err := json.Marshal(storebinding.StorageRigPayload{Rig: r.Rig, Binding: target.Binding, Outcome: string(r.State), Beads: count, Detail: line})
+		if err != nil {
+			continue
+		}
+		rec.Record(events.Event{Type: events.StorageRigResidue, Actor: "gc", Subject: r.Rig, Payload: raw})
+	}
+	if len(unchecked) > 0 && stderr != nil {
+		sort.Strings(unchecked)
+		fmt.Fprintf(stderr, "%s: storage: suspended rig(s) %s were not censused at boot; `gc storage status` reports them\n", logPrefix, strings.Join(unchecked, ", ")) //nolint:errcheck // best-effort stderr
+	}
 }
