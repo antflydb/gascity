@@ -60,8 +60,9 @@ import (
 // Close refusal causes; a fresh read's are readRuntime's.
 const (
 	causeLivePane      = "live-pane"          // the fresh read shows a live pane: not stopped
-	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose detached probes all report alive
+	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose detached probes all report alive, or one did not answer
 	causeReleaseFailed = "release-failed"     // the stranded repair's release failed on a claim or a leg
+	causeDetachedHeld  = "detached-held"      // the stranded repair kept a claim whose detached probe did not attest its runtime dead
 )
 
 // closeSections are C8.8 with its corpse kill, the work branches with their
@@ -317,6 +318,10 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 		step.Refuse = cause
 	case c.Repair && rel.why == releaseStrandedRepair && (relErr != nil || len(rel.out.Failed) > 0):
 		step.Refuse, step.Err = causeReleaseFailed, relErr
+	case c.Repair && rel.why == releaseStrandedRepair && rel.out.HeldDetached() > 0:
+		// Work that may still run stays assigned, so the slot stays open
+		// with it; the repair retries each pass.
+		step.Refuse = causeDetachedHeld
 	case c.Repair && rel.why == releaseStrandedRepair:
 		step.Terminal = session.ClosePatch(v.World.Now, strandedRepairCloseReason)
 	default:

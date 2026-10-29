@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 )
@@ -107,6 +108,23 @@ func TestProbeSessionUnobservableIsNeverDead(t *testing.T) {
 	}
 }
 
+// A TMUX_TMPDIR naming a file is where tmux fails, not /tmp: the probe looks
+// below the file, observes nothing, and never attests dead.
+func TestProbeSessionTMUXTMPDIRNamingAFileIsUnobservable(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", file)
+	got, err := ProbeSession(context.Background(), "gc-file-tmpdir", "s1")
+	if got != PresenceUnobservable {
+		t.Fatalf("presence = %v, want PresenceUnobservable (err=%v)", got, err)
+	}
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("err = %v, want it to wrap ENOTDIR from the path below the file", err)
+	}
+}
+
 // A socket that refuses connections on a stable inode has no server: the
 // session is dead without running tmux.
 func TestProbeSessionRefusedStableSocketIsDead(t *testing.T) {
@@ -118,6 +136,26 @@ func TestProbeSessionRefusedStableSocketIsDead(t *testing.T) {
 		func(context.Context, string) (net.Conn, error) { return nil, syscall.ECONNREFUSED }, runNotCalled(t))
 	if got != PresenceDead || err != nil {
 		t.Fatalf("presence = %v, err = %v; want PresenceDead, nil", got, err)
+	}
+}
+
+// LiveSockets names each socket a tmux server may still answer on, and
+// neither a socket that refuses connections nor another file beside it; a
+// directory that does not exist holds none.
+func TestLiveSocketsNamesAnsweringSockets(t *testing.T) {
+	live := liveUnixSocket(t)
+	dir := filepath.Dir(live)
+	if err := syscall.Mknod(filepath.Join(dir, "stale"), syscall.S_IFSOCK|0o600, 0); err != nil {
+		t.Skipf("mknod socket inode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file"), nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got, err := LiveSockets(context.Background(), dir); err != nil || !slices.Equal(got, []string{filepath.Base(live)}) {
+		t.Fatalf("LiveSockets = %v, %v; want [%s]", got, err, filepath.Base(live))
+	}
+	if got, err := LiveSockets(context.Background(), filepath.Join(dir, "missing")); err != nil || len(got) != 0 {
+		t.Fatalf("LiveSockets(missing dir) = %v, %v; want none", got, err)
 	}
 }
 

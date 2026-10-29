@@ -142,29 +142,63 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	return append(args, "attach-session", "-t", target)
 }
 
+// TmpdirEnv is the environment variable tmux places its -L sockets under
+// (SocketDir).
+const TmpdirEnv = "TMUX_TMPDIR"
+
 // SocketPath returns the socket path a tmux client in this process's
 // environment talks to for ref. An absolute ref is a -S socket path and is
-// returned cleaned. Any other ref is a -L socket name under
-// <base>/tmux-<uid>/, where <base> is TMUX_TMPDIR resolved through symlinks
-// when it names a directory, else /tmp resolved through symlinks: tmux
-// falls back to /tmp for an unset, empty or unresolvable TMUX_TMPDIR, and
-// never reads TMPDIR.
+// returned cleaned. Any other ref is a -L socket name in SocketDir of this
+// process's TMUX_TMPDIR.
 func SocketPath(ref string) string {
 	if filepath.IsAbs(ref) {
 		return filepath.Clean(ref)
 	}
-	return filepath.Join(socketBaseDir(), fmt.Sprintf("tmux-%d", os.Getuid()), ref)
+	return filepath.Join(SocketDir(os.Getenv(TmpdirEnv)), ref)
 }
 
-// socketBaseDir is the directory tmux puts its tmux-<uid> directory in:
-// TMUX_TMPDIR when it resolves to a directory, else /tmp, each resolved
-// through symlinks as tmux does.
-func socketBaseDir() string {
-	if dir := os.Getenv("TMUX_TMPDIR"); dir != "" {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
-				return resolved
-			}
+// LiveSockets returns the names of the sockets in dir, a SocketDir, that a
+// tmux server may still answer on: each unix socket there unless it refuses
+// connections on a stable inode or is gone by the time it is dialed, so one
+// whose observation ctx cuts short counts. A dir that does not exist holds
+// none.
+func LiveSockets(ctx context.Context, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSocket == 0 {
+			continue
+		}
+		if observeNamedSocket(ctx, filepath.Join(dir, entry.Name())) != nil {
+			live = append(live, entry.Name())
+		}
+	}
+	return live, nil
+}
+
+// SocketDir returns the tmux-<uid> directory a tmux client whose
+// TMUX_TMPDIR is tmuxTmpdir keeps its -L sockets in. Its parent is
+// tmuxTmpdir resolved through symlinks, or /tmp resolved through symlinks
+// when tmuxTmpdir is empty or does not resolve; tmux never reads TMPDIR. A
+// tmuxTmpdir that resolves to something other than a directory is kept, as
+// tmux keeps it: tmux then fails to create the directory instead of falling
+// back to /tmp, so a socket path below it observes nothing.
+func SocketDir(tmuxTmpdir string) string {
+	return filepath.Join(socketBaseDir(tmuxTmpdir), fmt.Sprintf("tmux-%d", os.Getuid()))
+}
+
+// socketBaseDir is the directory tmux puts its tmux-<uid> directory in for
+// a TMUX_TMPDIR value (see SocketDir).
+func socketBaseDir(tmuxTmpdir string) string {
+	if tmuxTmpdir != "" {
+		if resolved, err := filepath.EvalSymlinks(tmuxTmpdir); err == nil {
+			return resolved
 		}
 	}
 	if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil {
@@ -178,14 +212,18 @@ func namedSocketPath(socketName string) string {
 	return SocketPath(socketName)
 }
 
-// serverSocketPath returns the socket path of the server t talks to: its
-// named -L socket, or tmux's "default" socket when SocketName is empty.
+// serverSocketPath returns the socket path of the server t talks to.
 func (t *Tmux) serverSocketPath() string {
-	name := t.cfg.SocketName
-	if name == "" {
-		name = "default"
+	return namedSocketPath(t.socketLabel())
+}
+
+// socketLabel returns the -L socket name of the server t talks to: its
+// SocketName, or tmux's "default" when SocketName is empty.
+func (t *Tmux) socketLabel() string {
+	if t.cfg.SocketName == "" {
+		return "default"
 	}
-	return namedSocketPath(name)
+	return t.cfg.SocketName
 }
 
 // observeServerSocket observes path with the injected observer, or with

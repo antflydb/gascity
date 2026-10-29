@@ -117,7 +117,10 @@ func assertTmuxCallsUseSocketPath(t *testing.T, calls [][]string, want string) {
 // under observes nothing at its own canonical socket path, so the session S
 // that server holds is error, never dead; the path it probes is
 // tmux.SocketPath computed in the probe's environment, which a server started
-// there answers at.
+// there answers at. Such a server answers for the probe: without S it attests
+// S dead although S still runs under the other TMUX_TMPDIR, which is why a
+// producer must start detached work in the controller's TMUX_TMPDIR, and
+// with S it attests S alive.
 func TestProbeDetachedWork_RealTmuxOtherTMUXTMPDIRIsError(t *testing.T) {
 	tmuxtest.RequireTmux(t)
 	serverDir, probeDir := shortTmuxTmpDir(t), shortTmuxTmpDir(t)
@@ -137,6 +140,10 @@ func TestProbeDetachedWork_RealTmuxOtherTMUXTMPDIRIsError(t *testing.T) {
 	}
 	assertTmuxCallsUseSocketPath(t, recordedTmuxArgs(t, logPath), want)
 
+	startDetachedProbeTmuxServer(t, socket, "other")
+	if got := probeDetachedWork(context.Background(), "tmux:"+socket+":S"); got.Status != detachedProbeDead {
+		t.Fatalf("server without S under the probe's TMUX_TMPDIR: Status = %q, want %q (err=%v)", got.Status, detachedProbeDead, got.Err)
+	}
 	startDetachedProbeTmuxServer(t, socket, "S")
 	if err := os.Remove(logPath); err != nil {
 		t.Fatalf("reset tmux args: %v", err)

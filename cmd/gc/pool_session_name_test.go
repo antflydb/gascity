@@ -616,6 +616,35 @@ func TestReleaseOrphanedPoolAssignments_UnobservedDetachedProbeNeverReleases(t *
 	}
 }
 
+// Clearing gc.detached, the operator's way out of a hold, ends the hold's
+// log throttle too: when the bead is held again on a new spec that observes
+// nothing, that hold is logged at once rather than inside the cleared hold's
+// throttle window.
+func TestDetachedProbeAllowsOrphanRelease_ClearedSpecEndsTheHoldLogThrottle(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+	installFakeTmux(t, "exit 1")
+	resetDetachedProbeHoldLogForTest()
+	t.Cleanup(resetDetachedProbeHoldLogForTest)
+	var logs bytes.Buffer
+	restore := captureLogOutput(&logs)
+	defer restore()
+
+	held := beads.Bead{ID: "work-1", Metadata: map[string]string{detachedProbeMetadataKey: testDetachedPoolProbeSpec}}
+	cleared := beads.Bead{ID: "work-1", Metadata: map[string]string{detachedProbeMetadataKey: ""}}
+	if release, _ := detachedProbeAllowsOrphanRelease(held); release {
+		t.Fatal("unobservable probe released the work, want a hold")
+	}
+	if release, clearProbe := detachedProbeAllowsOrphanRelease(cleared); !release || clearProbe {
+		t.Fatalf("cleared spec = release %v, clear %v; want release with nothing to clear", release, clearProbe)
+	}
+	if release, _ := detachedProbeAllowsOrphanRelease(held); release {
+		t.Fatal("unobservable probe on the new spec released the work, want a hold")
+	}
+	if got := strings.Count(logs.String(), "detached probe error"); got != 2 {
+		t.Fatalf("logs = %q, want one hold diagnostic per hold (2), got %d", logs.String(), got)
+	}
+}
+
 func createDetachedOrphanedPoolWork(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()
 	work, err := store.Create(beads.Bead{
@@ -2593,8 +2622,8 @@ func TestReleaseOrphanedPoolAssignments_UnsupportedStoreReleasesNormalOrphan(t *
 	if len(store.assignmentUpdates) != 1 {
 		t.Fatalf("assignment-shaped writes = %+v, want exactly the release write", store.assignmentUpdates)
 	}
-	if strings.Contains(buf.String(), "skipping release") {
-		t.Fatalf("log output = %q, want no skip for an uncontended release", buf.String())
+	if strings.Contains(buf.String(), "holding its claim") {
+		t.Fatalf("log output = %q, want no hold for an uncontended release", buf.String())
 	}
 
 	got, err := store.Get(work.ID)

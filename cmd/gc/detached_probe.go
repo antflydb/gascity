@@ -69,7 +69,8 @@ func logDetachedProbeHold(id, format string, args ...any) {
 }
 
 // forgetDetachedProbeHold drops a bead's hold-log throttle once its probe
-// decides alive or dead, so the throttle map holds only beads still held.
+// decides alive or dead, or its gc.detached is cleared, so the throttle map
+// holds only beads still held.
 func forgetDetachedProbeHold(id string) {
 	detachedHoldLog.Lock()
 	defer detachedHoldLog.Unlock()

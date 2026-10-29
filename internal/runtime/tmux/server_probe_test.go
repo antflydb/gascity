@@ -374,8 +374,38 @@ func TestSocketPathAbsoluteRef(t *testing.T) {
 func TestNamedSocketPathFallsBackToTmpWhenTMUXTMPDIREmpty(t *testing.T) {
 	t.Setenv("TMUX_TMPDIR", "")
 	t.Setenv("TMPDIR", "/must-not-be-used")
-	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmp", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
+	// tmux resolves /tmp as it resolves TMUX_TMPDIR: /private/tmp on macOS.
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatalf("EvalSymlinks(/tmp): %v", err)
+	}
+	if got, want := namedSocketPath("gc-test"), filepath.Join(tmp, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
+	}
+}
+
+// tmux keeps a TMUX_TMPDIR that resolves to a file and fails there, so the
+// socket path stays below the resolved file and never moves to /tmp, where
+// a stale socket could read as a dead server.
+func TestSocketPathKeepsTMUXTMPDIRNamingAFile(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	want := filepath.Join(file, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test")
+	for _, value := range []string{file, link} {
+		t.Setenv("TMUX_TMPDIR", value)
+		if got := SocketPath("gc-test"); got != want {
+			t.Fatalf("TMUX_TMPDIR=%s: SocketPath() = %q, want %q", value, got, want)
+		}
 	}
 }
 
