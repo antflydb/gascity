@@ -907,12 +907,28 @@ at runtime.
 | Key | Purpose |
 |---|---|
 | `formula` | Required. Item formula run per unit convoy; `{{templated}}` names are rejected in v0 |
-| `context` | `separate` (default — all item roots created in parallel) or `shared` (one single-lane item root at a time). A rig-scoped `shared` drain with `member_access = "exclusive"` gets one controller-provisioned git worktree per drain control, under `GC_WORKTREES_DIR` (default `<city>/.gc/worktrees`, outside the rig checkout), recorded as each reserved member's `work_dir` unless the member already has one. If the worktree cannot be provisioned, the drain closes failed with `gc.failure_reason = shared_workspace_unavailable` |
+| `context` | `separate` (default — all item roots created in parallel) or `shared` (one single-lane item root at a time; a rig-scoped `shared` drain with `member_access = "exclusive"` works in one git worktree, described below the table) |
 | `member_access` | `read` (default) or `exclusive` (records a per-member `gc.exclusive_drain_reservation`; fails if another drain owns it) |
 | `max_units` | Cap on expansion: 1–100 in v0; default and hard cap 100. Exceeding the cap closes the drain failed with `gc.failure_reason = limit_exceeded` |
 | `on_item_failure` | `skip_remaining` or `continue`; defaults to `continue` for separate drains, `skip_remaining` for shared. A shared skip marks remaining items skipped with reason `previous_item_failed` |
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
+
+A rig-scoped `shared` drain with `member_access = "exclusive"` works every
+item in one orchestrator-provisioned git worktree per drain control, on the
+branch `gc/drain/<drain id>` cut from the rig's HEAD. The worktree lives under
+the worktrees root — `GC_WORKTREES_DIR`, else `T3CODE_WORKTREES_DIR`, else
+`$T3CODE_HOME/worktrees`, else `<city>/.gc/worktrees` — which must lie outside
+the rig checkout. The drain lends the worktree to each member it reserves as
+the member's `work_dir`, unless the member already has a `work_dir` no drain
+lent it. When the drain closes it takes the worktree back from every member
+still open; a member its item closed keeps it as its `work_dir`. Item steps
+must leave the worktree checked out on its branch, or the next item fails the
+drain. Exec checks of the item steps run in the worktree, but a relative check
+`path` resolves from the rig root, never from the worktree. If the worktree
+cannot be provisioned, the drain closes failed with
+`gc.failure_reason = shared_workspace_unavailable`. Closing the drain removes
+neither the worktree nor its branch.
 
 A `blocks` edge is satisfied by its predecessor's close whatever
 `gc.outcome` that close carries, but a drain does not expand when a direct

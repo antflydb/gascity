@@ -299,6 +299,11 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	}
 
 	workDir := resolveInheritedMetadata(store, bead, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey)
+	// A work_dir a shared drain lent its item (gc.drain_workspace_control) is
+	// the checkout the worker this check judges writes, so it is only the
+	// process cwd: a relative check script resolves from the store, as with
+	// no work_dir, and a copy that worker plants in the checkout never runs.
+	drainWorkspace := resolveInheritedMetadata(store, bead, beadmeta.DrainWorkspaceControlMetadataKey) != ""
 	resolvedWorkDir := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {
@@ -309,13 +314,14 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// work_dir is inherited from bead metadata. For relative check paths
 		// it becomes the script resolution base, so it must remain under an
 		// operator-controlled tree. Absolute check paths are validated against
-		// trusted roots below; for those, work_dir is only the process cwd.
-		if !filepath.IsAbs(checkPath) && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
+		// trusted roots below; for those, as for a drain workspace, work_dir
+		// is only the process cwd.
+		if !filepath.IsAbs(checkPath) && !drainWorkspace && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
 			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
 		}
 	}
 	scriptBase := storePath
-	if resolvedWorkDir != "" {
+	if resolvedWorkDir != "" && !drainWorkspace {
 		scriptBase = resolvedWorkDir
 	}
 	// Pass cityPath and scriptBase as distinct envelope/base roles: in

@@ -104,13 +104,41 @@ Separate drains (`context = "separate"`) are the common case.
 
 A rig-scoped shared drain with `member_access = "exclusive"` also gets one
 git worktree for the whole drain. The controller creates it at
-`<GC_WORKTREES_DIR>/<rig>/<workflow root>-<drain id>` on the branch
-`gc/drain/<drain id>`, cut from the rig's HEAD, and records it as each
-reserved member's `work_dir`; a member that already has a `work_dir` keeps it.
-`GC_WORKTREES_DIR` defaults to `<city>/.gc/worktrees` and must lie outside
-the rig checkout. When the worktree cannot be provisioned, the drain closes
-failed with `gc.failure_reason = shared_workspace_unavailable` and the error
-in `gc.controller_error`.
+`<worktrees root>/<rig>/<workflow root>-<drain id>` on the branch
+`gc/drain/<drain id>`, cut from the rig's HEAD. The worktrees root is
+`GC_WORKTREES_DIR`, else `T3CODE_WORKTREES_DIR`, else `$T3CODE_HOME/worktrees`,
+else `<city>/.gc/worktrees`, and must lie outside the rig checkout.
+
+Exec checks of the item steps run in the worktree wherever that root is, but a
+relative check script resolves from the rig root only, exactly as for a step
+with no `work_dir`. The worktree is never searched, not even first: the item's
+worker writes the worktree, so a copy it leaves at the check's path must not
+become the script that judges it. (A `work_dir` no drain lent keeps the usual
+order: its own copy first, then the rig root.)
+
+The drain lends the worktree to each member it reserves: it records the
+worktree as the member's `work_dir`, names itself in
+`gc.drain_workspace_control` on the member and on every bead of the member's
+item, and records the worktree as the row's `workspace` in the drain manifest.
+A member keeps a `work_dir` no drain lent it (an operator's or a pack step's)
+and one this drain lent before a crash; a `work_dir` another drain lent and
+never took back is replaced. Every terminal close takes the loan back from
+each member still open before it releases the reservation: it clears
+`gc.drain_workspace_control`, and the `work_dir` too while it is still the lent
+worktree. A member its item closed keeps both, since its `work_dir` records
+where its work was done; if it is reopened, the next drain lends it a worktree
+of its own.
+
+Each member the drain lends the worktree to re-verifies it first, so item
+steps must leave it checked out on `gc/drain/<drain id>`: a switched branch or
+a detached HEAD fails the drain at the next item. That failure, and any other
+provisioning error, closes the drain failed with
+`gc.failure_reason = shared_workspace_unavailable` and the error in
+`gc.controller_error`. A provisioning error is git's, not a store outage, so it
+is not retried. Closing the drain removes neither the worktree nor its branch:
+they stay until removed by hand or by the closed-bead worktree reaper
+(`[daemon] auto_reap_closed_bead_worktrees`, off by default), which never
+deletes branches.
 
 **Q: Can drain item formulas use drain themselves?**
 

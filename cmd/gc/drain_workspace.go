@@ -63,7 +63,7 @@ func sharedDrainWorkspaceProvisioner(cityPath, storePath string, cfg *config.Cit
 		}
 		rep, err := worktree.Ensure(spec)
 		if err != nil {
-			return "", fmt.Errorf("ensuring shared workspace for drain %s in rig %q under %s (the worktrees root is GC_WORKTREES_DIR, default <city>/.gc/worktrees, and must lie outside the rig checkout): %w",
+			return "", fmt.Errorf("ensuring shared workspace for drain %s in rig %q under %s (the worktrees root is GC_WORKTREES_DIR, else T3CODE_WORKTREES_DIR, else $T3CODE_HOME/worktrees, else <city>/.gc/worktrees, and must lie outside the rig checkout): %w",
 				control.ID, rig.Name, worktreesRoot, err)
 		}
 		if rep.Provenance == nil {

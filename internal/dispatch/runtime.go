@@ -48,9 +48,11 @@ type ProcessOptions struct {
 	RecycleSession     func(beads.Bead) error
 	// SharedDrainWorkspace returns the absolute directory every item of a
 	// shared drain control works in. advanceSharedDrain calls it when it
-	// reserves an exclusive-access member that has no work_dir. ("", nil)
-	// means the control's scope has no workspace to provision. Nil disables
-	// provisioning.
+	// reserves an exclusive-access member that has no work_dir, or one
+	// another drain lent. ("", nil) means the control's scope has no
+	// workspace to provision. Any error fails the drain hard: it carries
+	// git's output, not a store outage the dispatcher could wait out. Nil
+	// disables provisioning.
 	SharedDrainWorkspace func(control beads.Bead) (string, error)
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
