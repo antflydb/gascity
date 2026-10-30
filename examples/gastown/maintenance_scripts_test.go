@@ -11809,6 +11809,56 @@ func TestPruneBranchesPreservesBranchWithUnmergedWork(t *testing.T) {
 	}
 }
 
+func TestPruneBranchesSupportsWorktreeAndConfiguredDefault(t *testing.T) {
+	rig, bin := pruneBranchesRig(t, func(rig, _ string) {
+		runGit(t, rig, "checkout", "-q", "-b", "integration")
+		if err := os.WriteFile(filepath.Join(rig, "merged"), []byte("accepted"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, rig, "add", "merged")
+		runGit(t, rig, "commit", "-q", "-m", "accepted change")
+		runGit(t, rig, "push", "-q", "origin", "integration")
+		runGit(t, rig, "branch", "gc/merged")
+		runGit(t, rig, "push", "-q", "-u", "origin", "gc/merged")
+		runGit(t, rig, "checkout", "-q", "main")
+	})
+	worktree := filepath.Join(t.TempDir(), "rig")
+	runGit(t, rig, "worktree", "add", "-q", "-b", "rig", worktree)
+	writeExecutable(t, filepath.Join(bin, "gc"), fmt.Sprintf(`#!/bin/sh
+printf '{"rigs":[{"name":"r","path":"%s","default_branch":"integration","suspended":false}]}\n'
+`, worktree))
+	cmd := exec.Command(coreScriptPath("prune-branches.sh"))
+	cmd.Env = mergeTestEnv(map[string]string{"GC_CITY": t.TempDir(), "PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")})
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prune worktree: %v\n%s", err, out)
+	}
+	if branches := runGitOut(t, rig, "branch", "--list", "gc/merged"); branches != "" {
+		t.Fatalf("configured-default merged branch retained in worktree: %s", branches)
+	}
+	if current := runGitOut(t, worktree, "branch", "--show-current"); current != "rig" {
+		t.Fatalf("active branch changed: %s", current)
+	}
+}
+
+func TestPruneBranchesLeavesSuspendedRigUntouched(t *testing.T) {
+	rig, bin := pruneBranchesRig(t, func(rig, _ string) { runGit(t, rig, "branch", "gc/retained") })
+	stub := filepath.Join(bin, "gc")
+	data, err := os.ReadFile(stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, stub, strings.ReplaceAll(string(data), `"suspended":false`, `"suspended":true`))
+	cmd := exec.Command(coreScriptPath("prune-branches.sh"))
+	cmd.Env = mergeTestEnv(map[string]string{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")})
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("suspended prune: %v\n%s", err, out)
+	}
+	if branches := runGitOut(t, rig, "branch", "--list", "gc/retained"); branches == "" {
+		t.Fatal("suspended rig branch pruned")
+	}
+}
+
 func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
 	_, binDir := pruneBranchesRig(t, func(_, _ string) {
 		// No gc/* branches created; only main exists.

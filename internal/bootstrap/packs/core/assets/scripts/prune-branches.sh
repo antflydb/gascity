@@ -11,14 +11,16 @@ set -euo pipefail
 CITY="${GC_CITY:-.}"
 PRUNED=0
 
-# Get all rig paths.
-RIGS=$(gc rig list --json 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null) || exit 0
+# Get active rig paths with their configured integration branches.
+RIGS=$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select((.suspended // false) == false) | [.path, (.default_branch // "main")] | @tsv' 2>/dev/null) || exit 0
 if [ -z "$RIGS" ]; then
     exit 0
 fi
 
-while IFS= read -r rig_path; do
-    [ -d "$rig_path/.git" ] || continue
+while IFS=$'\t' read -r rig_path default_branch; do
+    # Linked worktrees have a .git file rather than a directory.
+    git -C "$rig_path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    default_branch="${default_branch:-main}"
 
     # Fetch and prune remote refs.
     git -C "$rig_path" fetch --prune origin 2>/dev/null || continue
@@ -36,7 +38,7 @@ while IFS= read -r rig_path; do
         [ "$branch" = "$CURRENT" ] && continue
 
         # Delete if merged to default branch (safe -d, not -D).
-        if git -C "$rig_path" merge-base --is-ancestor "$branch" origin/main 2>/dev/null; then
+        if git -C "$rig_path" merge-base --is-ancestor "$branch" "origin/$default_branch" 2>/dev/null; then
             git -C "$rig_path" branch -d "$branch" 2>/dev/null && PRUNED=$((PRUNED + 1))
             continue
         fi

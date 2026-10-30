@@ -242,3 +242,18 @@ ownership-loss and foreign-schema tests pass. Generic infrastructure collection
 continues to refuse core workspaces. This requires the pinned maintenance-aware
 clients and may make old in-flight readers retry. Live audit/outbox evidence
 is retained independently of physical unreachable-history collection.
+
+
+## Stock command inventory and worktree housekeeping
+
+The reviewed native inventory contains all 331 registered Beads commands and
+admits `antfly gc`; provider forwarding still applies the existing command
+policy and class routing. Tests reject partial or malformed inventories.
+Branch pruning accepts linked Git worktrees and each rig's configured default
+branch, skips suspended rigs and the current branch, and retains Git's safe
+merged-branch deletion check. Real worktree/custom-default tests pass.
+
+Live stock factories still exhibit storage deadlines under concurrent
+housekeeping and session activity. Command admission and focused maintenance
+tests are not a full factory qualification; multi-rig code merges, crash and
+redelivery acceptance and sustained soak results remain outstanding.
