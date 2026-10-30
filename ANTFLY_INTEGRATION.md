@@ -192,3 +192,11 @@ Thirty repeated embedded/remote cycles passed (a bounded stress run, not a long
 factory soak). A full stock factory acceptance run with multiple rigs,
 crash/restart/redelivery and real code merges remains outstanding, as do broad
 workflow qualification and catalog-fenced core immutable-history collection.
+
+Fresh stock-template startup selected the current reconciler and started a
+managed session on native storage. That run exposed a missing closed-since
+filter in the work query backend, now covered through the shared Querier, and
+a SQLite-only builtin operation-journal default. Antfly now explicitly opts
+into default journal recording while journal opening still probes conditional
+write capabilities. Native persistence/replay and existing default sweeper/doctor
+regressions pass. Full two-rig factory acceptance is still being exercised.

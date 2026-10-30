@@ -8,10 +8,11 @@ import (
 
 // NotRecordedByDefaultError reports an op store left unopened because the
 // rollout gate asking for it is auto only by its builtin default and the
-// sessions store's conditional writes do not land in a SQLite store. The
-// builtin default records only on SQLite: on a Dolt-served store each op's
+// sessions store is neither SQLite nor explicitly opted in by its backend.
+// Without that backend capability, on a Dolt-served store each op's
 // writes cost the request path far more, so recording there is opt-in
-// through an explicit [ops] gate or GC_OPS_* override. Backend describes the
+// through an explicit [ops] gate or GC_OPS_* override. Antfly opts in through
+// its declared backend capability. Backend describes the
 // store the writes would have landed in.
 type NotRecordedByDefaultError struct {
 	Backend beads.ConditionalWritesBackend
@@ -24,7 +25,7 @@ func (e *NotRecordedByDefaultError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("opening op store: the builtin auto default records ops only on a SQLite sessions store, not on %s; "+
+	return fmt.Sprintf("opening op store: the builtin auto default requires a SQLite sessions store or an explicit backend journal opt-in, not on %s; "+
 		"an [ops] gate (or GC_OPS_*) set to auto or require records here if the store can record ops", backendPhrase(e.Backend))
 }
 
@@ -37,14 +38,14 @@ func backendPhrase(b beads.ConditionalWritesBackend) string {
 }
 
 // CheckRecordsByDefault reports whether the builtin auto default records ops
-// over store: nil when its conditional writes land in a SQLite store, else a
+// over store: nil for SQLite or an explicit backend journal default capability, else a
 // *NotRecordedByDefaultError. It is an allowlist, so a store that gains
 // conditional writes (a bd with --if-revision) does not start recording by
 // default. It does no I/O; a caller under an explicit gate skips it and
 // opens the store with NewStore.
 func CheckRecordsByDefault(store beads.SessionStore) error {
 	backend := beads.ResolveConditionalWritesBackend(store)
-	if backend.SQLite {
+	if backend.SQLite || backend.DefaultOpRecording {
 		return nil
 	}
 	return &NotRecordedByDefaultError{Backend: backend}

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/maintenance"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
@@ -264,5 +265,32 @@ func TestAntflyTypedSessionRetentionPreservesChildrenAndOtherClasses(t *testing.
 		if _, err = store.Get(id); err != nil {
 			t.Fatalf("lost protected %s: %v", id, err)
 		}
+	}
+}
+
+func TestAntflyBuiltinJournalDefaultPersistsAndReplays(t *testing.T) {
+	store := nativeQueueStore(t)
+	if err := beads.StampOpenedStore(store, "AntflyStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := cliOpenOpStoreUnder(true, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := opjournal.Request{Conversation: "gcg-session", Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane, ClientKey: "native-default", Producer: opjournal.Producer{Principal: "operator:test", Actor: opjournal.ActorOperator}, Payload: "native journal evidence"}
+	first, created, err := journal.Propose(request)
+	if err != nil || !created {
+		t.Fatalf("proposal=%+v created=%v err=%v", first, created, err)
+	}
+	other, err := cliOpenOpStoreUnder(true, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, created, err := other.Propose(request)
+	if err != nil || created || replay.ID != first.ID {
+		t.Fatalf("replay=%+v created=%v err=%v", replay, created, err)
+	}
+	if row, err := store.Get(first.ID); err != nil || row.Type != "op" {
+		t.Fatalf("journal not persisted on native plane: %+v %v", row, err)
 	}
 }

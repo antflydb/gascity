@@ -9,10 +9,10 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
 
-// The builtin default records only over a SQLite sessions store, found
-// through the wrappers production puts around it; a capable store of any
-// other engine, Dolt-served or not, answers NotRecordedByDefaultError.
-func TestCheckRecordsByDefaultAllowsOnlySQLite(t *testing.T) {
+// Existing backends remain opt-in unless SQLite; explicit native backend
+// eligibility is covered separately. Conditional-write support alone does not
+// enable default recording through a production wrapper chain.
+func TestCheckRecordsByDefaultKeepsOtherBackendsOptIn(t *testing.T) {
 	sq, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcs"))
 	if err != nil {
 		t.Fatal(err)
@@ -50,5 +50,18 @@ func TestCheckRecordsByDefaultAllowsOnlySQLite(t *testing.T) {
 				t.Fatalf("message %q, want it to name %q and the [ops] opt-in, conditional on the store recording ops", msg, tc.phrase)
 			}
 		})
+	}
+}
+
+func TestCheckRecordsByDefaultAllowsExplicitAntflyCapability(t *testing.T) {
+	// This decision performs no I/O; actual journal opening still verifies
+	// conditional writes. Wrappers must resolve to the declaring backend.
+	native := &beads.AntflyStore{}
+	cached := beads.NewCachingStoreForTest(native, nil)
+	t.Cleanup(cached.StopReconciler)
+	for _, store := range []beads.Store{native, cached} {
+		if err := opjournal.CheckRecordsByDefault(beads.SessionStore{Store: store}); err != nil {
+			t.Fatalf("native journal default: %v", err)
+		}
 	}
 }

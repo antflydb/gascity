@@ -320,7 +320,7 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 			if s.logDue(opSweepLogKey{stage: legacyop.StageOpen, reason: "default:" + reason}) {
 				what := "the sessions store cannot record ops"
 				if reason == legacyop.DegradeNotRecordedByDefault {
-					what = "that default records ops only on a SQLite sessions store"
+					what = "the sessions backend has not opted into the builtin journal default"
 				}
 				s.logf("op-sweep: the ops gates are auto by default, but %s (%s: %v); "+
 					"sweeping as if every gate were off until a reload replaces it", what, reason, err)

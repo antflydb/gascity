@@ -917,3 +917,7 @@ func (s *AntflyStore) CollectGarbage(ctx context.Context) (antfly.SnapshotGCResu
 	}
 	return collector.CollectGarbageChecked(ctx, s.validateIndexedFields)
 }
+
+// OpJournalRecordsByDefault opts this native fenced store into the builtin
+// operation journal policy. Opening the journal still probes live capabilities.
+func (s *AntflyStore) OpJournalRecordsByDefault() bool { return true }

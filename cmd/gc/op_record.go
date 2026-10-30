@@ -141,7 +141,7 @@ var cliOpenOpStore = func(sessStore beads.Store) (*opjournal.Store, error) {
 
 // cliOpenOpStoreUnder is cliOpenOpStore for a gate that is auto only by its
 // builtin default when builtinAuto is set: such a gate records only over a
-// SQLite sessions store, so over any other it answers
+// SQLite or an explicitly eligible native sessions store; over any other it answers
 // *opjournal.NotRecordedByDefaultError without opening or probing anything.
 func cliOpenOpStoreUnder(builtinAuto bool, sessStore beads.Store) (*opjournal.Store, error) {
 	if builtinAuto {

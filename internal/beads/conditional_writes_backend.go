@@ -14,6 +14,8 @@ type ConditionalWritesBackend struct {
 	// DoltServed reports a backend whose writes a Dolt server takes: a
 	// native Dolt store, or a store served through bd.
 	DoltServed bool
+	// DefaultOpRecording is an explicit backend opt-in to the builtin operation journal default.
+	DefaultOpRecording bool
 }
 
 // ResolveConditionalWritesBackend unwraps store to the store its conditional
@@ -30,6 +32,9 @@ func ResolveConditionalWritesBackend(store Store) ConditionalWritesBackend {
 		backend.SQLite = true
 	case *NativeDoltStore, *BdStore, *BeadsLibStore:
 		backend.DoltServed = true
+	}
+	if recorder, ok := leaf.(interface{ OpJournalRecordsByDefault() bool }); ok {
+		backend.DefaultOpRecording = recorder.OpJournalRecordsByDefault()
 	}
 	return backend
 }
