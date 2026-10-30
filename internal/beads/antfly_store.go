@@ -47,6 +47,7 @@ type antflyState struct {
 	Fences       map[string]int64        `json:"fences"`
 	IndexVersion int                     `json:"index_version,omitempty"`
 	Indexes      map[string][]string     `json:"indexes,omitempty"`
+	IndexShards  map[string][]string     `json:"index_shards,omitempty"`
 }
 
 const antflySchema = "gascity-antfly-v1"
@@ -231,7 +232,6 @@ func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore,
 				delete(st.EdgeMetadata, k)
 			}
 		}
-		st.buildIndexes()
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
@@ -241,6 +241,13 @@ func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore,
 		// reader and forces unrelated writers to lose their revision fence.
 		if bytes.Equal(original, raw) {
 			return m, nil
+		}
+		// Upgrade derived index layout only as part of a real state change. A
+		// rejected predicate must not publish a head merely to migrate indexes.
+		st.buildIndexes()
+		raw, err = json.Marshal(st)
+		if err != nil {
+			return nil, err
 		}
 		err = s.transport.CompareAndSwap(ctx, v, raw)
 		if err != nil {
@@ -400,6 +407,12 @@ func (s *AntflyStore) ListByMetadata(filters map[string]string, limit int, opts 
 
 // DepList reads a current committed Antfly snapshot.
 func (s *AntflyStore) DepList(id, direction string) ([]Dep, error) {
+	if tr, ok := s.transport.(antfly.IndexedSnapshotTransport); ok {
+		rows, used, err := s.indexedDependencies(tr, id, direction)
+		if used {
+			return rows, err
+		}
+	}
 	m, err := s.read(context.Background())
 	if err != nil {
 		return nil, err
@@ -732,7 +745,8 @@ func antflyIndexKey(field, value, shard string) string {
 }
 
 func (st *antflyState) buildIndexes() {
-	st.IndexVersion = 1
+	st.IndexVersion = 2
+	st.IndexShards = map[string][]string{}
 	st.Indexes = map[string][]string{}
 	for id, r := range st.Records {
 		sum := sha256.Sum256([]byte(id))
@@ -753,8 +767,23 @@ func (st *antflyState) buildIndexes() {
 			add("metadata:"+key, value)
 		}
 	}
-	for _, ids := range st.Indexes {
+	for key, dep := range st.Dependencies {
+		sum := sha256.Sum256([]byte(key))
+		shard := fmt.Sprintf("%02x", sum[0])
+		for field, value := range map[string]string{"dependency-down": dep.IssueID, "dependency-up": dep.DependsOnID} {
+			indexKey := antflyIndexKey(field, value, shard)
+			st.Indexes[indexKey] = append(st.Indexes[indexKey], key)
+		}
+	}
+	for key, ids := range st.Indexes {
 		sort.Strings(ids)
+		var parts []string
+		_ = json.Unmarshal([]byte(key), &parts) // Keys were constructed immediately above.
+		catalogKey := antflyIndexKey(parts[0], parts[1], "")
+		st.IndexShards[catalogKey] = append(st.IndexShards[catalogKey], key)
+	}
+	for _, keys := range st.IndexShards {
+		sort.Strings(keys)
 	}
 }
 
@@ -830,29 +859,74 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 	if s.closed {
 		return nil, true, fmt.Errorf("antfly: store closed")
 	}
+	records, used, err := s.indexedPostingRecords(tr, "records", field, value, q.IDs)
+	if err != nil || !used {
+		return nil, used, err
+	}
+	rows := make([]Bead, 0, len(records))
+	for id, raw := range records {
+		b, e := decodeIndexedAntflyRecord(id, raw)
+		if e != nil {
+			return nil, true, e
+		}
+		rows = append(rows, b)
+	}
+	SortBeads(rows, SortCreatedAsc)
+	return ApplyListQuery(rows, q), true, nil
+}
+
+// The caller holds the store lifecycle read lock. Each step is fenced to the
+// captured head, so publication between directory, postings and rows retries.
+func (s *AntflyStore) indexedPostingRecords(tr antfly.IndexedSnapshotTransport, section, field, value string, directIDs []string) (map[string]json.RawMessage, bool, error) {
 	for attempt := 0; attempt < 8; attempt++ {
-		ids := append([]string(nil), q.IDs...)
+		ids := append([]string(nil), directIDs...)
 		var expected *uint64
 		if len(ids) == 0 {
-			keys := make([]string, 256)
-			for n := range keys {
-				keys[n] = antflyIndexKey(field, value, fmt.Sprintf("%02x", n))
+			// A sparse directory avoids probing all 256 possible posting shards
+			// for a value that usually occurs on just one or two records. Capture
+			// the head here and pin every subsequent read to that same revision.
+			catalogKey := antflyIndexKey(field, value, "")
+			catalog, e := tr.ReadSnapshotRecords(context.Background(), "index_shards", []string{catalogKey}, nil)
+			if e != nil {
+				return nil, true, e
 			}
-			index, e := tr.ReadSnapshotRecords(context.Background(), "indexes", keys, nil)
+			if e = s.validateIndexedFields(catalog.Fields); e != nil {
+				return nil, true, e
+			}
+			var format int
+			if raw := catalog.Fields["index_version"]; len(raw) > 0 {
+				if e = json.Unmarshal(raw, &format); e != nil {
+					return nil, true, e
+				}
+			}
+			var keys []string
+			if section == "dependencies" && format < 2 {
+				return nil, false, nil
+			}
+			switch format {
+			case 2:
+				if raw, exists := catalog.Records[catalogKey]; exists {
+					if e = json.Unmarshal(raw, &keys); e != nil {
+						return nil, true, e
+					}
+				}
+			case 1:
+				keys = make([]string, 256)
+				for n := range keys {
+					keys[n] = antflyIndexKey(field, value, fmt.Sprintf("%02x", n))
+				}
+			default:
+				return nil, false, nil
+			}
+			index, e := tr.ReadSnapshotRecords(context.Background(), "indexes", keys, &catalog.Version)
+			if errors.Is(e, antfly.ErrSnapshotConflict) {
+				continue
+			}
 			if e != nil {
 				return nil, true, e
 			}
 			if e = s.validateIndexedFields(index.Fields); e != nil {
 				return nil, true, e
-			}
-			var format int
-			if raw := index.Fields["index_version"]; len(raw) > 0 {
-				if e = json.Unmarshal(raw, &format); e != nil {
-					return nil, true, e
-				}
-			}
-			if format != 1 {
-				return nil, false, nil
 			}
 			for _, raw := range index.Records {
 				var members []string
@@ -863,7 +937,7 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 			}
 			expected = &index.Version
 		}
-		rows, e := tr.ReadSnapshotRecords(context.Background(), "records", ids, expected)
+		rows, e := tr.ReadSnapshotRecords(context.Background(), section, ids, expected)
 		if errors.Is(e, antfly.ErrSnapshotConflict) {
 			continue
 		}
@@ -873,16 +947,7 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 		if e = s.validateIndexedFields(rows.Fields); e != nil {
 			return nil, true, e
 		}
-		beads := make([]Bead, 0, len(rows.Records))
-		for id, raw := range rows.Records {
-			b, e := decodeIndexedAntflyRecord(id, raw)
-			if e != nil {
-				return nil, true, e
-			}
-			beads = append(beads, b)
-		}
-		SortBeads(beads, SortCreatedAsc)
-		return ApplyListQuery(beads, q), true, nil
+		return rows.Records, true, nil
 	}
 	return nil, true, fmt.Errorf("antfly: indexed read contention: %w", antfly.ErrSnapshotConflict)
 }
@@ -966,3 +1031,36 @@ func (s *AntflyStore) CollectGarbage(ctx context.Context) (antfly.SnapshotGCResu
 // OpJournalRecordsByDefault opts this native fenced store into the builtin
 // operation journal policy. Opening the journal still probes live capabilities.
 func (s *AntflyStore) OpJournalRecordsByDefault() bool { return true }
+
+func (s *AntflyStore) indexedDependencies(tr antfly.IndexedSnapshotTransport, id, direction string) ([]Dep, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, true, fmt.Errorf("antfly: store closed")
+	}
+	field := "dependency-down"
+	if direction == "up" {
+		field = "dependency-up"
+	}
+	records, used, err := s.indexedPostingRecords(tr, "dependencies", field, id, nil)
+	if err != nil || !used {
+		return nil, used, err
+	}
+	keys := make([]string, 0, len(records))
+	for key := range records {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var out []Dep
+	for _, key := range keys {
+		var dep Dep
+		if err = json.Unmarshal(records[key], &dep); err != nil {
+			return nil, true, err
+		}
+		if antflyEdgeKey(dep) != key || (direction == "up" && dep.DependsOnID != id) || (direction != "up" && dep.IssueID != id) {
+			return nil, true, fmt.Errorf("antfly: corrupt dependency index")
+		}
+		out = append(out, dep)
+	}
+	return out, true, nil
+}

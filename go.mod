@@ -262,4 +262,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030060931-d94b089e3968
+replace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030063052-f94495b03700

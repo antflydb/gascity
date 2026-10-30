@@ -135,15 +135,29 @@ func maybeRouteBdRoleSelector(cityPath string, cfg *config.City, target execStor
 	if err != nil {
 		return fail(err)
 	}
-	// Read before filtering so a migrated record cannot resurrect a frozen copy.
-	scan := beads.ListQuery{IncludeClosed: true, AllowScan: true, TierMode: beads.FederatedReadTier, Live: true}
-	work, err := store.List(scan)
+	// Push the selector into both legs, but apply the global limit only after
+	// union. Probe work candidates in the binding without predicates as well:
+	// a migrated copy whose metadata changed must still shadow its old work row.
+	query := q
+	query.Limit = 0
+	work, err := store.List(query)
 	if err != nil {
 		return fail(err)
 	}
-	graph, err := door.Store.List(scan)
+	graph, err := door.Store.List(query)
 	if err != nil {
 		return fail(err)
+	}
+	if len(work) > 0 {
+		ids := make([]string, 0, len(work))
+		for _, b := range work {
+			ids = append(ids, b.ID)
+		}
+		shadows, err := door.Store.List(beads.ListQuery{IDs: ids, IncludeClosed: true, TierMode: beads.FederatedReadTier, Live: true})
+		if err != nil {
+			return fail(err)
+		}
+		graph = append(graph, shadows...)
 	}
 	if err := writeJSON(stdout, mergeBdRoleSelector(work, graph, q, unassigned, target.RigName)); err != nil {
 		return fail(err)

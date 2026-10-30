@@ -320,10 +320,22 @@ read the selected work scope and relocated coordination binding. The binding's
 current row supersedes retained migration copies before predicates and limits
 are applied. Explicit rig scope restricts graph rows by `gc.root_store_ref`.
 Unsupported flags fail explicitly; general SQL and query federation remain
-outside this adapter. This correctness path still scans snapshots and is not
-an indexed production read implementation.
+outside this adapter. Matching predicates use each provider's indexed reads; general scan shapes and mutation staging still load snapshots.
 
 Gate child processes retain the explicit native Beads executable and Antfly
 library pins through the existing narrow environment projection. Merge-slot
 rows are excluded from the Gas City ready frontier. The pinned Beads SDK also
 implements atomic metadata CAS and main-workspace merge-slot coordination.
+
+Infrastructure index format 2 adds a sparse posting-shard directory and
+incoming/outgoing dependency postings. Metadata list and dependency reads
+resolve only occupied shards and requested rows, pinned to one committed head;
+a concurrent publication retries the entire lookup. Format 1 remains readable
+and ordinary writes build format 2. Bulk graph reads, batch dependency scans
+and mutation staging still require snapshot loading. Stock metadata selectors
+push their predicates to each plane and probe matching work IDs in the binding
+to suppress retained migration copies before the global limit.
+
+The exact legacy `gc bd mol wisp ... --root-only --json` and `gc bd mol burn
+<root> --force --json` commands have now been exercised against both native
+transports. This does not qualify every Gas Town patrol or merge-queue formula.

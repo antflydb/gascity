@@ -432,6 +432,15 @@ func qualifyAntflyIndexedQueriesAndArchive(t *testing.T, target antfly.Target) {
 			t.Fatalf("indexed query %+v differs: got=%+v want=%+v", q, got, want)
 		}
 	}
+	if e = source.DepAdd(all[1].ID, all[0].ID, "blocks"); e != nil {
+		t.Fatal(e)
+	}
+	for _, check := range []struct{ id, dir string }{{all[1].ID, "down"}, {all[0].ID, "up"}} {
+		deps, err := source.DepList(check.id, check.dir)
+		if err != nil || len(deps) != 1 || deps[0].IssueID != all[1].ID || deps[0].DependsOnID != all[0].ID {
+			t.Fatalf("native indexed dependencies: %+v %v", deps, err)
+		}
+	}
 	archive, e := source.BackupSnapshot(context.Background())
 	if e != nil {
 		t.Fatal(e)
@@ -781,5 +790,154 @@ func TestAntflyNoopPreservesNativeAndRemoteHead(t *testing.T) {
 				t.Fatalf("actual transition failed to publish: %d %v", next, err)
 			}
 		})
+	}
+}
+
+type sparseIndexSnapshotService struct {
+	antflySnapshotService
+	reads []struct {
+		field string
+		count int
+	}
+	loads        int
+	conflictOnce bool
+}
+
+func (s *sparseIndexSnapshotService) Load(ctx context.Context) ([]byte, uint64, error) {
+	s.loads++
+	return s.antflySnapshotService.Load(ctx)
+}
+
+func (s *sparseIndexSnapshotService) ReadSnapshotRecords(_ context.Context, field string, ids []string, expected *uint64) (antfly.SnapshotRecords, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads = append(s.reads, struct {
+		field string
+		count int
+	}{field, len(ids)})
+	if expected != nil && *expected != s.version {
+		return antfly.SnapshotRecords{}, antfly.ErrSnapshotConflict
+	}
+	fields := map[string]json.RawMessage{}
+	if len(s.data) > 0 {
+		if err := json.Unmarshal(s.data, &fields); err != nil {
+			return antfly.SnapshotRecords{}, err
+		}
+	}
+	selected := map[string]json.RawMessage{}
+	var section map[string]json.RawMessage
+	if raw := fields[field]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &section); err != nil {
+			return antfly.SnapshotRecords{}, err
+		}
+	}
+	for _, id := range ids {
+		if raw, ok := section[id]; ok {
+			selected[id] = raw
+		}
+	}
+	out := antfly.SnapshotRecords{Fields: fields, Records: selected, Version: s.version}
+	if field == "index_shards" && s.conflictOnce {
+		s.version++
+		s.conflictOnce = false
+	}
+	return out, nil
+}
+
+func TestAntflySparseIndexReadsOnlyOccupiedShards(t *testing.T) {
+	tr := &sparseIndexSnapshotService{}
+	s, err := beads.NewAntflyStore(tr, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.CloseStore() })
+	for n := 0; n < 4; n++ {
+		if _, err = s.Create(beads.Bead{Title: fmt.Sprint(n), Type: "task", Metadata: map[string]string{"owner": "one"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DepAdd(all[1].ID, all[0].ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	tr.loads = 0
+	tr.reads = nil
+	for _, check := range []struct{ id, dir string }{{all[1].ID, "down"}, {all[0].ID, "up"}} {
+		deps, e := s.DepList(check.id, check.dir)
+		if e != nil || len(deps) != 1 || deps[0].IssueID != all[1].ID || deps[0].DependsOnID != all[0].ID {
+			t.Fatalf("indexed dependencies: %+v %v", deps, e)
+		}
+	}
+	if tr.loads != 0 {
+		t.Fatal("dependency lookup loaded full snapshot")
+	}
+	for _, read := range tr.reads {
+		if read.count > 1 {
+			t.Fatalf("dependency lookup probed absent shards: %+v", read)
+		}
+	}
+	q := beads.ListQuery{Metadata: map[string]string{"owner": "one"}}
+	tr.reads = nil
+	tr.loads = 0
+	got, err := s.List(q)
+	if err != nil || len(got) != 4 {
+		t.Fatalf("sparse lookup: %v %v", got, err)
+	}
+	if tr.loads != 0 {
+		t.Fatal("indexed query loaded full snapshot")
+	}
+	for _, read := range tr.reads {
+		if read.count > 4 {
+			t.Fatalf("sparse lookup probed absent shards: %+v", read)
+		}
+	}
+	tr.reads = nil
+	empty, err := s.List(beads.ListQuery{Metadata: map[string]string{"owner": "absent"}})
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("missing key: %v %v", empty, err)
+	}
+	for _, read := range tr.reads {
+		if read.field != "index_shards" && read.count != 0 {
+			t.Fatalf("missing value fetched rows: %+v", read)
+		}
+	}
+	tr.conflictOnce = true
+	if got, err = s.List(q); err != nil || len(got) != 4 {
+		t.Fatalf("revision retry: %v %v", got, err)
+	}
+	// A pre-directory workspace remains readable before its next ordinary write.
+	var old map[string]json.RawMessage
+	if err = json.Unmarshal(tr.data, &old); err != nil {
+		t.Fatal(err)
+	}
+	delete(old, "index_shards")
+	old["index_version"] = json.RawMessage(`1`)
+	tr.data, err = json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.reads = nil
+	if got, err = s.List(q); err != nil || len(got) != 4 {
+		t.Fatalf("legacy index: %v %v", got, err)
+	}
+	found := false
+	for _, read := range tr.reads {
+		if read.field == "indexes" && read.count == 256 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("legacy index did not use its complete shard set")
+	}
+	oldData, oldVersion := string(tr.data), tr.version
+	swapped, err := s.CompareAndSetMetadataKey(all[0].ID, "owner", "wrong", "next")
+	if err != nil || swapped {
+		t.Fatalf("legacy no-op: %v %v", swapped, err)
+	}
+	if tr.version != oldVersion || string(tr.data) != oldData {
+		t.Fatal("rejected predicate migrated the legacy index")
 	}
 }
