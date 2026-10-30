@@ -302,3 +302,15 @@ and remote transports: refused metadata predicates and empty transaction
 callbacks preserve both exact committed bytes and the head token; a successful
 metadata transition changes that token. This supplements the transport-fixture
 publication-count regression.
+
+
+## Legacy stock check assets
+
+Actual stock implementation workers produced code, then their validation
+controls remained pending because the pinned formulas name `.gc/scripts/...`
+while their scripts live in the declared pack's `assets/scripts/...` tree.
+The check runner now falls back to the highest-priority declared formula-layer
+asset only after a missing-file result. An existing local check keeps priority;
+permissions, executable checks and canonical containment still apply. A symlink
+escaping the trusted roots is refused. Formula parsing and existing absolute
+asset behavior are unchanged. Focused dispatch and formula regression tests pass.

@@ -350,6 +350,35 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 			err = fallbackErr
 		}
 	}
+	// Older stock formulas name .gc/scripts even when their pinned pack
+	// ships the script under assets/scripts. Keep existing runtime files first;
+	// on a missing-file result only, use the highest-priority declared layer.
+	// The absolute candidate remains subject to the same canonical trust check
+	// as formulas already authored with ../assets paths.
+	legacyPrefix := filepath.FromSlash(".gc/scripts/")
+	if err != nil && errors.Is(err, fs.ErrNotExist) && !filepath.IsAbs(checkPath) && filepath.Clean(checkPath) == checkPath && strings.HasPrefix(checkPath, legacyPrefix) {
+		tail := strings.TrimPrefix(checkPath, legacyPrefix)
+		for n := len(opts.FormulaSearchPaths) - 1; n >= 0; n-- {
+			if strings.TrimSpace(opts.FormulaSearchPaths[n]) == "" {
+				continue
+			}
+			candidate, absErr := filepath.Abs(filepath.Join(filepath.Dir(opts.FormulaSearchPaths[n]), "assets", "scripts", tail))
+			if absErr != nil {
+				err = absErr
+				break
+			}
+			if !pathWithinAny(candidate, trustedAbsRoots) {
+				err = fmt.Errorf("legacy check asset %q escapes trusted roots", candidate)
+				break
+			}
+			fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, scriptBase, candidate)
+			if errors.Is(fallbackErr, fs.ErrNotExist) {
+				continue
+			}
+			scriptPath, err, checkPath = fallbackPath, fallbackErr, candidate
+			break
+		}
+	}
 	if err != nil {
 		if convergence.IsConditionUnlaunchable(err) {
 			// The check cannot be launched: the script is missing, not a regular

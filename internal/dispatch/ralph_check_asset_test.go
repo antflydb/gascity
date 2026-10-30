@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -554,5 +555,80 @@ path = "../assets/scripts/checks/review-approved.sh"
 	}
 	if result.Outcome != convergence.GatePass {
 		t.Fatalf("Outcome = %q (stderr=%q), want pass", result.Outcome, result.Stderr)
+	}
+}
+
+func TestRunRalphCheckLegacyRuntimePathUsesDeclaredPackFallback(t *testing.T) {
+	for _, mode := range []string{"pack fallback", "local override", "non executable local", "asset symlink escape"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			city := filepath.Join(root, "city")
+			rig := filepath.Join(root, "rig")
+			low := filepath.Join(root, "low", "formulas")
+			high := filepath.Join(root, "high", "formulas")
+			relative := filepath.FromSlash(".gc/scripts/checks/verify.sh")
+			asset := filepath.Join(root, "high", "assets", "scripts", "checks", "verify.sh")
+			for _, dir := range []string{city, rig, low, high, filepath.Dir(asset)} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(asset, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// A lower-priority asset must not shadow the declared higher layer.
+			lowAsset := filepath.Join(root, "low", "assets", "scripts", "checks", "verify.sh")
+			if err := os.MkdirAll(filepath.Dir(lowAsset), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(lowAsset, []byte("#!/bin/sh\nexit 9\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "local override" || mode == "non executable local" {
+				local := filepath.Join(rig, relative)
+				if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				permissions := os.FileMode(0o755)
+				if mode == "non executable local" {
+					permissions = 0o644
+				}
+				if err := os.WriteFile(local, []byte("#!/bin/sh\nexit 7\n"), permissions); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "asset symlink escape" {
+				outside := filepath.Join(root, "outside.sh")
+				if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(asset); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, asset); err != nil {
+					t.Fatal(err)
+				}
+			}
+			check := beads.Bead{ID: "check-legacy", Type: "task", Metadata: map[string]string{"gc.check_path": relative, "gc.check_timeout": "5s"}}
+			result, err := runRalphCheck(beads.NewMemStore(), check, beads.Bead{ID: "subject", Type: "task"}, 1, ProcessOptions{CityPath: city, StorePath: rig, FormulaSearchPaths: []string{low, high}})
+			switch mode {
+			case "pack fallback":
+				if err != nil || result.Outcome != convergence.GatePass {
+					t.Fatalf("fallback: %+v %v", result, err)
+				}
+			case "local override":
+				if err != nil || result.Outcome != convergence.GateFail || result.ExitCode == nil || *result.ExitCode != 7 {
+					t.Fatalf("local override: %+v %v", result, err)
+				}
+			case "non executable local":
+				if !errors.Is(err, convergence.ErrConditionNotExecutable) {
+					t.Fatalf("bad local file was bypassed: %v", err)
+				}
+			case "asset symlink escape":
+				if err == nil || !strings.Contains(err.Error(), "escapes trusted roots") {
+					t.Fatalf("symlink escape admitted: %+v %v", result, err)
+				}
+			}
+		})
 	}
 }
