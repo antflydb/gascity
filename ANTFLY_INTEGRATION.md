@@ -421,6 +421,35 @@ the Gas City provider/guard targets passed separately with this SDK.
 The first fresh embedded run with only opaque head fields still stalled in
 creating sessions. Its quiet-log interval is invalid as health evidence, and
 its monitor was stopped and marked unqualified. A state-aware acceptance monitor
-must also reject persistent creating sessions. The isolated factory is being
-moved through logical backup/restore into a fresh snapshot-profile table; its
-shared predecessor and the successful remote workflows remain separate evidence.
+must also reject persistent creating sessions. The isolated factory has been moved through a verified logical backup/restore
+into a fresh snapshot-profile table, preserving the complete archive payload
+and revision state before its binding switch. It still stalls during concurrent
+native calls. Its shared predecessor and the successful remote workflows remain
+separate evidence.
+
+
+The SDK pin now includes single native lookups for content-addressed immutable
+rows. Hash verification and mutable-head revision fences are unchanged. Its
+complete native/remote backend suite passes 182 cases without skips. Gas City
+production binaries build with the pin, while the wider provider gate exposed
+an intermittent native queue stall and remains unqualified.
+
+The engine support branch bounds allocator admission to one detached proof per
+request: a moving external tip causes a pre-transaction busy refusal instead of
+repeating full-file verification indefinitely. A deterministic regression covers
+that refusal and later successful admission. Broader native contracts pass, but
+this alone does not resolve the queue stall. A debugger capture of the isolated
+factory found eligible tickets sleeping after their serving value advanced;
+wakeup delivery is being qualified separately before deploying a new library.
+
+
+The lost-wakeup fix is on the engine support branch. It replaces consumable
+condition notifications with a wake epoch in C API admission and Lite writer
+and commit queues. A controlled spurious-wake regression fails on the previous
+implementation and passes with the replacement. The fixed library passes all
+182 native/remote Beads backend cases and the four Gas City provider/guard
+targets. The interrupted remote qualification server had exhausted its descriptor
+budget through repeated disposable-table creation; qualification was repeated
+against a fresh fixture, keeping factory storage separate. Factory restart,
+worker crash/redelivery, actual embedded merges and the healthy soak remain
+runtime requirements, independent of these passing component gates.
