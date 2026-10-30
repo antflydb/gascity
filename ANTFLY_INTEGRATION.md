@@ -191,7 +191,8 @@ logical restore; the same indexed-read/archive oracle also passes remotely.
 Thirty repeated embedded/remote cycles passed (a bounded stress run, not a long
 factory soak). A full stock factory acceptance run with multiple rigs,
 crash/restart/redelivery and real code merges remains outstanding, as do broad
-workflow qualification and catalog-fenced core immutable-history collection.
+workflow qualification and a long factory soak. Core immutable-history collection
+now has the separate SDK catalog barrier described below.
 
 Fresh stock-template startup selected the current reconciler and started a
 managed session on native storage. That run exposed a missing closed-since
@@ -200,3 +201,44 @@ a SQLite-only builtin operation-journal default. Antfly now explicitly opts
 into default journal recording while journal opening still probes conditional
 write capabilities. Native persistence/replay and existing default sweeper/doctor
 regressions pass. Full two-rig factory acceptance is still being exercised.
+
+## Factory runtime routing and read admission
+
+The vetted `gc-beads-antfly` work provider opens the native Beads SDK directly
+for in-process work-store operations, eliminating a subprocess per controller
+read. Its executable still owns provider lifecycle. The shared issue-role
+adapter's policy-free close is overridden with the guarded Antfly work close;
+blockers, assignments and revision checks remain engine-owned.
+
+Stock role prompts also invoke bare `bd`. Install the Beads pack's `bin/bd`
+router on agent PATH and pin the raw executable through `ANTFLY_BD_BIN`,
+`BD_BIN` and `workspace.env.BD_BIN`. It calls the existing `gc bd` front door
+without an explicit city scope override, preserving ID-prefix rig routing and
+class ownership. The raw provider and inventory calls use the pin directly.
+A recursion guard refuses a misconfigured pin. Explicit native operator
+commands use the raw CLI.
+
+Foreign work dependency references survive the core store. The split-store
+ready/claim gate resolves their owning store. Native work CLI close checks
+foreign blockers too, including explicit external references, and refuses
+unknown or missing owner reads. An explicit force close remains an operator
+override. These cross-store observations are not a distributed transaction;
+the native work engine still performs local checks atomically. Actual two-rig
+readiness and close-refusal acceptance passes in both embedded and remote modes.
+
+Infrastructure constructor and health checks now validate only indexed schema
+metadata. Committed reads may proceed during a pending publication; mutations
+remain serialized per handle and publish through the native OCC fence. A
+delayed-publication regression proves a reader sees the prior committed state
+and then the new state after commit. Close and maintenance hold exclusive
+lifetime admission. This addresses observed stock-factory open/read stalls.
+
+The SDK additionally exposes `bd antfly gc` / `CollectWorkspaceGarbage` for
+core history. It fences the main catalog and all completed forks, marks their
+current snapshots plus recursive merge bases, and guards deletes with main
+ownership. Pending fork creation is refused; interrupted fences can be resumed.
+Embedded and remote tests preserve snapshots and later three-way merges;
+ownership-loss and foreign-schema tests pass. Generic infrastructure collection
+continues to refuse core workspaces. This requires the pinned maintenance-aware
+clients and may make old in-flight readers retry. Live audit/outbox evidence
+is retained independently of physical unreachable-history collection.

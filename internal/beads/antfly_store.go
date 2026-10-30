@@ -21,7 +21,9 @@ import (
 // workspace head is the only publication point, including multi-record writes.
 type AntflyStore struct {
 	condWritesStamp
-	mu         sync.Mutex
+	mu         sync.RWMutex
+	writeMu    sync.Mutex
+	localMu    sync.Mutex
 	transport  antfly.SnapshotTransport
 	prefix     string
 	namespaces []string
@@ -72,7 +74,16 @@ func NewAntflyStore(tr antfly.SnapshotTransport, prefix string, namespaces ...st
 		return nil, fmt.Errorf("antfly: empty prefix")
 	}
 	s := &AntflyStore{transport: tr, prefix: prefix, namespaces: collectReservedIDPrefixes(nil, namespaces), local: map[string]map[string]string{}}
-	_, _, _, err := s.load(context.Background())
+	var err error
+	if indexed, ok := tr.(antfly.IndexedSnapshotTransport); ok {
+		var head antfly.SnapshotRecords
+		head, err = indexed.ReadSnapshotRecords(context.Background(), "records", nil, nil)
+		if err == nil {
+			err = s.validateIndexedFields(head.Fields)
+		}
+	} else {
+		_, _, _, err = s.load(context.Background())
+	}
 	// An interrupted collector owns a durable head fence. Keep an operator
 	// handle so checked collection can resume; ordinary reads and writes still
 	// fail closed until the fence is released. The collector validates the
@@ -162,8 +173,8 @@ func (s *AntflyStore) load(ctx context.Context) (*antflyState, *MemStore, uint64
 }
 
 func (s *AntflyStore) read(ctx context.Context) (*MemStore, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	_, m, _, err := s.load(ctx)
 	return m, err
 }
@@ -171,8 +182,10 @@ func (s *AntflyStore) read(ctx context.Context) (*MemStore, error) {
 // change retries only known rejected commits. A user callback is never replayed;
 // unknown commit outcomes propagate so callers reconcile by reading durable state.
 func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore, *antflyState) error) (*MemStore, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for attempt := 0; attempt < 32; attempt++ {
@@ -226,11 +239,13 @@ func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore,
 			return nil, err
 		}
 		m.restoreFrom(seq, rows, deps)
+		s.localMu.Lock()
 		for id := range before {
 			if _, exists := st.Records[id]; !exists {
 				delete(s.local, id)
 			}
 		}
+		s.localMu.Unlock()
 		for _, b := range rows {
 			old, exists := before[b.ID]
 			if !exists {
@@ -297,8 +312,8 @@ func (s *AntflyStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, err
 // Get reads a current committed Antfly snapshot.
 func (s *AntflyStore) Get(id string) (Bead, error) {
 	if tr, ok := s.transport.(antfly.IndexedSnapshotTransport); ok {
-		s.mu.Lock()
-		defer s.mu.Unlock()
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 		if s.closed {
 			return Bead{}, fmt.Errorf("antfly: store closed")
 		}
@@ -503,12 +518,29 @@ func (s *AntflyStore) ReadyContext(ctx context.Context, q ...ReadyQuery) ([]Bead
 }
 
 // Ping reads the current workspace head.
-func (s *AntflyStore) Ping() error { _, e := s.read(context.Background()); return e }
+func (s *AntflyStore) Ping() error {
+	if tr, ok := s.transport.(antfly.IndexedSnapshotTransport); ok {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if s.closed {
+			return fmt.Errorf("antfly: store closed")
+		}
+		head, err := tr.ReadSnapshotRecords(context.Background(), "records", nil, nil)
+		if err != nil {
+			return err
+		}
+		return s.validateIndexedFields(head.Fields)
+	}
+	_, err := s.read(context.Background())
+	return err
+}
 
 // SetLocalString stores clone-local scratch data for this handle.
 func (s *AntflyStore) SetLocalString(id, key, value string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
 	_, m, _, e := s.load(context.Background())
 	if e != nil {
 		return e
@@ -525,8 +557,10 @@ func (s *AntflyStore) SetLocalString(id, key, value string) error {
 
 // GetLocalString reads this handle's scratch data.
 func (s *AntflyStore) GetLocalString(id, key string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
 	_, m, _, e := s.load(context.Background())
 	if e != nil {
 		return "", e
@@ -601,8 +635,8 @@ func (s *AntflyStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (Guarded
 
 // DepMetadata reports the durable payload on a dependency edge.
 func (s *AntflyStore) DepMetadata(from, to string) (string, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	st, _, _, e := s.load(context.Background())
 	if e != nil {
 		return "", false, e
@@ -780,8 +814,8 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 	default:
 		return nil, false, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.closed {
 		return nil, true, fmt.Errorf("antfly: store closed")
 	}
@@ -844,8 +878,8 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 
 // BackupSnapshot returns a checksummed archive of this infrastructure workspace.
 func (s *AntflyStore) BackupSnapshot(ctx context.Context) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.closed {
 		return nil, fmt.Errorf("antfly: store closed")
 	}

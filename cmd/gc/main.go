@@ -2027,6 +2027,9 @@ func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath strin
 	if err != nil {
 		return nil, err
 	}
+	if providerUsesAntflyWorkStore(provider) {
+		return beads.OpenAntflyWorkStoreAt(context.Background(), target.ScopeRoot)
+	}
 	env := gcExecStoreEnv(runtimeCityPath, target, provider)
 	if execProviderNeedsScopedDoltStoreEnv(provider) {
 		if target.ScopeKind == "rig" {

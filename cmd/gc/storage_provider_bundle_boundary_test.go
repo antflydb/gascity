@@ -223,7 +223,7 @@ func TestModuleGraphCarriesOnlyReviewedForkPin(t *testing.T) {
 	}
 	for _, directive := range directives {
 		// The operator-requested Antfly fork needs this exact published SDK commit.
-		if directive.oldPath == "github.com/steveyegge/beads" && directive.oldVersion == "" && directive.newPath == "github.com/antflydb/beads" && directive.newVersion == "v1.3.1-0.20261030020629-77f71e7c7c35" {
+		if directive.oldPath == "github.com/steveyegge/beads" && directive.oldVersion == "" && directive.newPath == "github.com/antflydb/beads" && directive.newVersion == "v1.3.1-0.20261030034314-0829ae079473" {
 			continue
 		}
 		t.Errorf("go.mod line %d replaces %q with %q; this module graph carries no replace directive, so a build resolves the dependencies the manifest names and nothing else",

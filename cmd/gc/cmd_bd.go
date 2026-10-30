@@ -630,6 +630,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	bdArgs = classGuard.args
 
+	if err := guardAntflyForeignClose(cityPath, target.ScopeRoot, cfg, bdArgs); err != nil {
+		_, _ = fmt.Fprintf(stderr, "gc bd: %v\n", err)
+		return 1
+	}
+
 	// Disclose which store answers a read-only passthrough, so a zero-row
 	// result is distinguishable from a true empty (gastownhall/gascity#5170).
 	// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city

@@ -353,7 +353,7 @@ Before considering any task complete:
 
 The operator requested a native Antfly integration using the antflydb/beads
 fork. This branch permits exactly the public immutable SDK replacement
-`github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030020629-77f71e7c7c35`.
+`github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030034314-0829ae079473`.
 The composition boundary test and scripts/check-gomod-replace.sh pin this one
 exception. Local checkout replacements and unreviewed updates remain forbidden.
 Infrastructure must use conditional Antfly snapshots and must not introduce a
@@ -365,3 +365,16 @@ and the existing whole-batch file-to-beads migration shim. Never fall back to
 file delivery after selecting the native queue. Dispatch skip counters remain
 file diagnostics outside the delivery-state contract. Other engines retain
 their existing queue authority until explicitly migrated.
+
+Antfly work stores selected by the vetted gc-beads-antfly provider open the
+published SDK directly for in-process reads and writes. Provider lifecycle
+remains executable-owned; this does not opt the provider into Dolt management.
+Stock bare-bd role commands use the pack router with an explicit raw BD_BIN pin.
+Foreign close checks resolve the live owning store and fail closed on missing
+or unavailable blockers; they are observations across stores, not a distributed
+transaction. The work engine retains its own atomic local close checks.
+
+Native Antfly infrastructure reads share lifetime admission with mutations;
+only mutations take the per-handle write mutex. Local scratch has its own mutex.
+Close and maintenance remain exclusive. Constructor/health checks validate the
+indexed schema metadata rather than materializing every coordination record.

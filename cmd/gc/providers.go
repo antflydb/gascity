@@ -1395,5 +1395,9 @@ func providerSupportsBdCLI(provider string) bool {
 	if providerUsesBdStoreContract(provider) {
 		return true
 	}
+	return providerUsesAntflyWorkStore(provider)
+}
+
+func providerUsesAntflyWorkStore(provider string) bool {
 	return strings.HasPrefix(provider, "exec:") && filepath.Base(strings.TrimPrefix(provider, "exec:")) == "gc-beads-antfly"
 }

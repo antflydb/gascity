@@ -642,6 +642,10 @@ func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	openExecStore := func() (beads.Store, error) {
+		if providerUsesAntflyWorkStore(provider) {
+			return beads.OpenAntflyWorkStoreAt(context.Background(), scopeRoot)
+		}
+
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,

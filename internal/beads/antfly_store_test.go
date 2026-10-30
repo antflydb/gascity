@@ -550,3 +550,116 @@ func TestAntflyInterruptedCollectionReopensAndChecksDomainBeforeAdoption(t *test
 		t.Fatalf("resumed state=%+v, err=%v", got, err)
 	}
 }
+
+type blockedAntflyPublication struct {
+	antflySnapshotService
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockedAntflyPublication) CompareAndSwap(ctx context.Context, v uint64, data []byte) error {
+	if s.entered != nil {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.antflySnapshotService.CompareAndSwap(ctx, v, data)
+}
+
+func TestAntflyReadsRemainAvailableDuringPendingPublication(t *testing.T) {
+	tr := &blockedAntflyPublication{}
+	store, err := beads.NewAntflyStore(tr, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Create(beads.Bead{Title: "before", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.entered = make(chan struct{})
+	tr.release = make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(tr.release) }) }
+	defer unblock()
+	updated := make(chan error, 1)
+	title := "after"
+	go func() { updated <- store.Update(row.ID, beads.UpdateOpts{Title: &title}) }()
+	select {
+	case <-tr.entered:
+	case <-time.After(time.Second):
+		t.Fatal("publication did not begin")
+	}
+	read := make(chan error, 1)
+	go func() {
+		got, err := store.Get(row.ID)
+		if err == nil && got.Title != "before" {
+			err = fmt.Errorf("uncommitted title %q", got.Title)
+		}
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read blocked behind unrelated publication")
+	}
+	unblock()
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(row.ID)
+	if err != nil || got.Title != "after" {
+		t.Fatalf("published title: %+v %v", got, err)
+	}
+}
+
+type indexedAntflyMetadataOnly struct {
+	loads, heads int
+	fields       map[string]json.RawMessage
+	failure      error
+}
+
+func (s *indexedAntflyMetadataOnly) Load(context.Context) ([]byte, uint64, error) {
+	s.loads++
+	return nil, 0, fmt.Errorf("unexpected full snapshot read")
+}
+
+func (*indexedAntflyMetadataOnly) CompareAndSwap(context.Context, uint64, []byte) error {
+	return fmt.Errorf("not a write fixture")
+}
+func (*indexedAntflyMetadataOnly) Close() error { return nil }
+func (s *indexedAntflyMetadataOnly) ReadSnapshotRecords(context.Context, string, []string, *uint64) (antfly.SnapshotRecords, error) {
+	s.heads++
+	return antfly.SnapshotRecords{Fields: s.fields, Version: 1}, s.failure
+}
+
+func TestAntflyIndexedConstructorAndHealthReadOnlyMetadata(t *testing.T) {
+	tr := &indexedAntflyMetadataOnly{fields: map[string]json.RawMessage{"schema": json.RawMessage(`"gascity-antfly-v1"`), "prefix": json.RawMessage(`"af"`)}}
+	store, err := beads.NewAntflyStore(tr, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if tr.loads != 0 || tr.heads != 2 {
+		t.Fatalf("full reads=%d head reads=%d", tr.loads, tr.heads)
+	}
+	tr.fields["prefix"] = json.RawMessage(`"foreign"`)
+	if _, err = beads.NewAntflyStore(tr, "af"); err == nil {
+		t.Fatal("foreign prefix accepted")
+	}
+	tr.failure = antfly.ErrSnapshotMaintenance
+	resumed, err := beads.NewAntflyStore(tr, "af")
+	if err != nil {
+		t.Fatalf("operator handle refused: %v", err)
+	}
+	if err = resumed.Ping(); !errors.Is(err, antfly.ErrSnapshotMaintenance) {
+		t.Fatalf("normal health ignored fence: %v", err)
+	}
+}
