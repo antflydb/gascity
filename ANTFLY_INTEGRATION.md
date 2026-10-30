@@ -376,7 +376,7 @@ controlled full-city crash; API running status alone is not a healthy soak.
 The SDK pin now includes dependency annotation round-trips, idempotent JSON
 metadata updates with revision fences, and conditional-blocks readiness/close
 checks. The immutable dependency is
-`v1.3.1-0.20261030113015-065796f3e260`; the module guard, guard fixture and
+`v1.3.1-0.20261030121024-47c9028d5517`; the module guard, guard fixture and
 composition-boundary check admit that exact version. Local dynamic waits-for gates use the SDK's current-snapshot child evaluation. Cross-store dynamic gates remain explicitly unsupported.
 
 A fresh remote stock `implement` run completed with `gc.outcome=pass`, including
@@ -408,3 +408,19 @@ these gates are separate from runtime factory acceptance. Both fresh remote
 stock implement workflows completed with pass outcomes on both rigs, including
 publication and finalization after source closure. Embedded latency and a clean
 hour of runtime soak remain open acceptance requirements.
+
+
+New coordination tables now use the SDK's `beads_snapshot` profile: private exact
+records and sparse typed indexes, without default issue full-text or Beads
+graph indexes. Core issue search, graph and memory tables keep their domain
+indexes. The table schema tag is declared during creation and managed core
+initialization rejects that tag without publishing work data. Untagged legacy
+tables keep their indexes. The native/remote backend gate passed 181 cases;
+the Gas City provider/guard targets passed separately with this SDK.
+
+The first fresh embedded run with only opaque head fields still stalled in
+creating sessions. Its quiet-log interval is invalid as health evidence, and
+its monitor was stopped and marked unqualified. A state-aware acceptance monitor
+must also reject persistent creating sessions. The isolated factory is being
+moved through logical backup/restore into a fresh snapshot-profile table; its
+shared predecessor and the successful remote workflows remain separate evidence.
