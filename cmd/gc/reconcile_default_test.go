@@ -14,7 +14,7 @@ import (
 )
 
 // v2DefaultCity is a city whose unset session_reconciler resolves to v2: the
-// sessions and graph classes on a sqlite-beads binding and conditional writes
+// sessions and graph classes on a binding with fenced conditional writes and revisioned reads and conditional writes
 // at their default (auto). mutate turns it into the case under test.
 func v2DefaultCity(mutate func(*config.City)) *config.City {
 	cfg := infraSplitConfig(config.DefaultSQLiteStoragePath)
@@ -32,7 +32,7 @@ func envOf(m map[string]string) func(string) (string, bool) {
 // TestResolveReconcilerModeTable pins mc-dpo2b's resolution table: an unset
 // session_reconciler is v2 only when config alone shows no true-gap feature,
 // conditional writes resolved on (env override applied), and the sessions and
-// graph classes on a sqlite-beads binding; else legacy, naming every reason.
+// graph classes on a binding with fenced conditional writes and revisioned reads; else legacy, naming every reason.
 // An explicit v2 keeps the latch's hard refusals; explicit legacy and the
 // aliases are legacy whatever the config.
 func TestResolveReconcilerModeTable(t *testing.T) {
@@ -71,27 +71,27 @@ func TestResolveReconcilerModeTable(t *testing.T) {
 		{
 			name: "unset, no [storage]: the bd work binding", cfg: &config.City{},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`the sessions and graph class stores are on the "work" binding, and v2 needs them on a sqlite-beads binding: moving them there is a storage migration (configure [storage], then run gc storage migrate --from-work)`},
+			fallback: []string{`the sessions and graph class stores are on the "work" binding, and v2 needs them on a binding with fenced conditional writes and revisioned reads: moving them there is a storage migration (configure [storage], then run gc storage migrate --from-work)`},
 		},
 		{
 			name: "unset, file store", cfg: &config.City{Beads: config.BeadsConfig{Provider: "file"}},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`on the "work" binding, and v2 needs them on a sqlite-beads binding`},
+			fallback: []string{`on the "work" binding, and v2 needs them on a binding with fenced conditional writes and revisioned reads`},
 		},
 		{
 			name: "unset, exec store", cfg: &config.City{Beads: config.BeadsConfig{Provider: "exec:/opt/bin/beads"}},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`on the "work" binding, and v2 needs them on a sqlite-beads binding`},
+			fallback: []string{`on the "work" binding, and v2 needs them on a binding with fenced conditional writes and revisioned reads`},
 		},
 		{
 			name: "unset, bd with native transport off", cfg: &config.City{Beads: config.BeadsConfig{NativeTransport: "off"}},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`on the "work" binding, and v2 needs them on a sqlite-beads binding`},
+			fallback: []string{`on the "work" binding, and v2 needs them on a binding with fenced conditional writes and revisioned reads`},
 		},
 		{
 			name: "unset, graph left on the work binding", cfg: v2DefaultCity(sqliteSessionsOnly),
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`the graph class store is on the "work" binding, and v2 needs it on a sqlite-beads binding: moving it there is a storage migration`},
+			fallback: []string{`the graph class store is on the "work" binding, and v2 needs it on a binding with fenced conditional writes and revisioned reads: moving it there is a storage migration`},
 		},
 		{
 			name: "unset, binding kind config cannot classify",
@@ -99,7 +99,7 @@ func TestResolveReconcilerModeTable(t *testing.T) {
 				c.Storage.Bindings["infra"] = config.StorageBindingConfig{Provider: config.StorageProviderBeadsWorkspace, ConfigRef: "infra"}
 			}),
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`the sessions and graph class stores are on binding "infra" (provider "beads-workspace"), and v2 needs them on a sqlite-beads binding`},
+			fallback: []string{`the sessions and graph class stores are on binding "infra" (provider "beads-workspace"), and v2 needs them on a binding with fenced conditional writes and revisioned reads`},
 		},
 		{
 			name: "unset, undefined binding",

@@ -82,7 +82,7 @@ func v2DefaultStoreKindFallbacks(cfg *config.City) []string {
 		default:
 			where = fmt.Sprintf("binding %q (provider %q)", c.binding, binding.Provider)
 		}
-		out = append(out, fmt.Sprintf("the %s on %s, and v2 needs %s on a %s binding%s", c.classes, where, c.them, config.StorageProviderSQLiteBeads, fix))
+		out = append(out, fmt.Sprintf("the %s on %s, and v2 needs %s on a binding with fenced conditional writes and revisioned reads%s", c.classes, where, c.them, fix))
 	}
 	return out
 }

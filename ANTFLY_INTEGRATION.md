@@ -453,3 +453,16 @@ budget through repeated disposable-table creation; qualification was repeated
 against a fresh fixture, keeping factory storage separate. Factory restart,
 worker crash/redelivery, actual embedded merges and the healthy soak remain
 runtime requirements, independent of these passing component gates.
+
+
+Reconciler fallback diagnostics now describe the required fenced conditional
+writes and revisioned reads instead of requiring SQLite by name. The focused
+default-resolution, controller, doctor and Antfly eligibility cases pass (54
+cases, no skips). The isolated embedded factory still has stalled creating
+sessions and intermittent housekeeping failures after the queue repair. Native
+profiling attributes most sampled admission time to allocator verification. A
+new C API regression reproduces premature busy refusal after a moving-tip proof
+with a positive timeout; bounded retries now release admission locks and run
+only before the requested mutation body. Its focused regression passes. Broader
+contracts and an optimized runtime build remain gates before deployment; this
+does not constitute completed embedded factory or soak acceptance.
