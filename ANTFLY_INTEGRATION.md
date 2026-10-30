@@ -376,9 +376,8 @@ controlled full-city crash; API running status alone is not a healthy soak.
 The SDK pin now includes dependency annotation round-trips, idempotent JSON
 metadata updates with revision fences, and conditional-blocks readiness/close
 checks. The immutable dependency is
-`v1.3.1-0.20261030103633-f475ce32c5c9`; the module guard, guard fixture and
-composition-boundary check admit that exact version. Dynamic waits-for gates
-remain unsupported.
+`v1.3.1-0.20261030110247-b06e8c75d5fe`; the module guard, guard fixture and
+composition-boundary check admit that exact version. Local dynamic waits-for gates use the SDK's current-snapshot child evaluation. Cross-store dynamic gates remain explicitly unsupported.
 
 A fresh remote stock `implement` run completed with `gc.outcome=pass`, including
 summary publication and workflow finalization after the source task closed.
@@ -387,3 +386,14 @@ collection scanned 8,340 records, deleted 4,870 and retained 3,470; logical
 archives before and after were identical (1,214,759 bytes). The shared
 supervisor retained its PID through collection and city re-registration.
 These results do not establish a healthy soak: embedded deadlines persist.
+
+
+Legacy native work now supports local waits-for all-children and any-children
+gates, late-child reblocking, spawner-ID authority and collapsed also-blocks
+edges. Typed create, batch dependency additions, readiness and close fences
+share the same evaluation. Workspaces with dynamic gates use full current
+snapshot reads until indexed child closure is available; this avoids falsely
+ready results from incomplete query candidates. Ordinary workspaces retain
+indexed reads. This is SDK compatibility evidence, not qualification of every
+legacy workflow in the stock factory. Cross-store dynamic fanout needs the
+owning graph plane.
