@@ -283,3 +283,15 @@ after one row changed now reads only the head, changed page and changed row.
 Fresh heads, hash validation, revisions and maintenance fences remain required.
 These fixes do not substitute for the remaining full-factory merge, crash,
 redelivery and sustained soak acceptance.
+
+
+Infrastructure changes compare the complete canonical state before publishing.
+A refused metadata predicate, no-op release, empty callback or already-closed
+record leaves the head version unchanged. These operations previously published
+identical heads, invalidating indexed readers and causing unrelated writers to
+lose their fences. The regression reproduces a refused metadata CAS advancing
+version 1 to 2 before the fix, proves no publications for those no-ops afterward,
+and requires an actual metadata transition to publish once. Native and remote
+infrastructure conformance tests pass. The SDK pin also includes bounded retry
+of explicit remote read-admission refusals, without retrying writes or unknown
+commit outcomes.

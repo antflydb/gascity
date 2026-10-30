@@ -663,3 +663,65 @@ func TestAntflyIndexedConstructorAndHealthReadOnlyMetadata(t *testing.T) {
 		t.Fatalf("normal health ignored fence: %v", err)
 	}
 }
+
+func TestAntflyNoopTransitionsDoNotPublish(t *testing.T) {
+	service := &antflySnapshotService{}
+	store, err := beads.NewAntflyStore(service, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.CloseStore() }()
+	row, err := store.Create(beads.Bead{Title: "coordination", Metadata: map[string]string{"state": "initial"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoPublication := func(name string, run func() error) {
+		t.Helper()
+		service.mu.Lock()
+		before := service.version
+		service.mu.Unlock()
+		if err := run(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		service.mu.Lock()
+		after := service.version
+		service.mu.Unlock()
+		if after != before {
+			t.Fatalf("%s published an unchanged snapshot: %d -> %d", name, before, after)
+		}
+	}
+	assertNoPublication("refused metadata CAS", func() error {
+		ok, err := store.CompareAndSetMetadataKey(row.ID, "state", "wrong", "next")
+		if ok {
+			t.Fatal("wrong metadata predicate accepted")
+		}
+		return err
+	})
+	assertNoPublication("refused release", func() error {
+		ok, err := store.ReleaseIfCurrent(row.ID, "another-worker")
+		if ok {
+			t.Fatal("foreign release accepted")
+		}
+		return err
+	})
+	assertNoPublication("read-only callback", func() error {
+		return store.Tx("read", func(beads.Tx) error { return nil })
+	})
+	service.mu.Lock()
+	before := service.version
+	service.mu.Unlock()
+	applied, err := store.CompareAndSetMetadataKey(row.ID, "state", "initial", "next")
+	if err != nil || !applied {
+		t.Fatalf("actual transition: %v %v", applied, err)
+	}
+	service.mu.Lock()
+	after := service.version
+	service.mu.Unlock()
+	if after != before+1 {
+		t.Fatalf("actual transition publications: %d -> %d", before, after)
+	}
+	if err = store.Close(row.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPublication("already closed", func() error { return store.Close(row.ID) })
+}

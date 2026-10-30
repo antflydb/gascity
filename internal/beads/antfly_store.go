@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -196,6 +197,10 @@ func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore,
 		if err != nil {
 			return nil, err
 		}
+		original, err := json.Marshal(st)
+		if err != nil {
+			return nil, err
+		}
 		before := maps.Clone(st.Records)
 		if err = fn(m, st); err != nil {
 			return nil, err
@@ -230,6 +235,12 @@ func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore,
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
+		}
+		// Refused metadata predicates, no-op releases and already-closed rows
+		// are reads. Publishing an identical head needlessly invalidates every
+		// reader and forces unrelated writers to lose their revision fence.
+		if bytes.Equal(original, raw) {
+			return m, nil
 		}
 		err = s.transport.CompareAndSwap(ctx, v, raw)
 		if err != nil {
