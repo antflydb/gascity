@@ -282,6 +282,13 @@ func (ce ConditionEnv) Environ() []string {
 		env = append(env, "BEADS_CREDENTIALS_FILE="+credentials)
 	}
 	for _, key := range []string{
+		// The native bd router must use the same pinned executable and library
+		// as its controller; HOME remains confined to the city.
+		"BD_BIN",
+		"ANTFLY_BD_BIN",
+		"ANTFLY_LIBRARY_PATH",
+		"BD_DISABLE_METRICS",
+		"BD_DISABLE_EVENT_FLUSH",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",

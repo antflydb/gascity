@@ -314,3 +314,16 @@ asset only after a missing-file result. An existing local check keeps priority;
 permissions, executable checks and canonical containment still apply. A symlink
 escaping the trusted roots is refused. Formula parsing and existing absolute
 asset behavior are unchanged. Focused dispatch and formula regression tests pass.
+
+Stock role and artifact-check JSON list selectors over `gc.*` metadata now
+read the selected work scope and relocated coordination binding. The binding's
+current row supersedes retained migration copies before predicates and limits
+are applied. Explicit rig scope restricts graph rows by `gc.root_store_ref`.
+Unsupported flags fail explicitly; general SQL and query federation remain
+outside this adapter. This correctness path still scans snapshots and is not
+an indexed production read implementation.
+
+Gate child processes retain the explicit native Beads executable and Antfly
+library pins through the existing narrow environment projection. Merge-slot
+rows are excluded from the Gas City ready frontier. The pinned Beads SDK also
+implements atomic metadata CAS and main-workspace merge-slot coordination.

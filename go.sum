@@ -220,6 +220,10 @@ github.com/antflydb/beads v1.3.1-0.20261030045151-8a152a9ec0ec h1:DpZIhEM2pyU3Y3
 github.com/antflydb/beads v1.3.1-0.20261030045151-8a152a9ec0ec/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
 github.com/antflydb/beads v1.3.1-0.20261030051256-2f199a2e0899 h1:yzK5KRSxMjOGDvriJG95DTclxVQP4UT2BoJuNeivKEw=
 github.com/antflydb/beads v1.3.1-0.20261030051256-2f199a2e0899/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261030055721-66d8d8419e4b h1:VJheihpd12/EPQrmBXDUtNZIJzgHQAy489Yrz5C95ws=
+github.com/antflydb/beads v1.3.1-0.20261030055721-66d8d8419e4b/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261030060931-d94b089e3968 h1:fg7zIWeXQ7Jop4t8bTRVgai8Q6Lcei5pFgJDkyWN+Ps=
+github.com/antflydb/beads v1.3.1-0.20261030060931-d94b089e3968/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
 github.com/apache/arrow/go/arrow v0.0.0-20200730104253-651201b0f516/go.mod h1:QNYViu/X0HXDHw7m3KXzWSVXIbfUvJqBFe6Gj8/pYA0=
 github.com/apache/arrow/go/arrow v0.0.0-20211112161151-bc219186db40 h1:q4dksr6ICHXqG5hm0ZW5IHyeEJXoIJSOZeBLmWPNeIQ=

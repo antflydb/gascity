@@ -94,6 +94,7 @@ func TestHasReadyExcludedLabel(t *testing.T) {
 		labels []string
 		want   bool
 	}{
+		{"merge queue slot", []string{"gt:slot"}, true},
 		{"session continuity", []string{"gc:session"}, true},
 		{"order tracking", []string{"gc:order-tracking"}, true},
 		{"legacy order tracking", []string{"order-tracking"}, true},

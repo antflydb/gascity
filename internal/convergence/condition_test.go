@@ -1058,3 +1058,27 @@ func firstExecutableOnPATH(pathList, name string) (string, bool) {
 	}
 	return "", false
 }
+
+func TestConditionEnvPreservesNativeStorageRouting(t *testing.T) {
+	keys := map[string]string{"BD_BIN": "/operator/bin/bd", "ANTFLY_BD_BIN": "/operator/bin/bd", "ANTFLY_LIBRARY_PATH": "/operator/lib/libantfly.dylib", "BD_DISABLE_METRICS": "1", "BD_DISABLE_EVENT_FLUSH": "1"}
+	for key, value := range keys {
+		t.Setenv(key, value)
+	}
+	t.Setenv("UNRELATED_OPERATOR_SETTING", "must-not-be-inherited")
+	env := (ConditionEnv{CityPath: "/city", StorePath: "/rig"}).Environ()
+	found := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			found[key] = value
+		}
+	}
+	for key, value := range keys {
+		if found[key] != value {
+			t.Fatalf("%s=%q want %q", key, found[key], value)
+		}
+	}
+	if found["HOME"] != "/city" || found["UNRELATED_OPERATOR_SETTING"] != "" {
+		t.Fatalf("native routing widened the gate environment: HOME=%q unrelated=%q", found["HOME"], found["UNRELATED_OPERATOR_SETTING"])
+	}
+}

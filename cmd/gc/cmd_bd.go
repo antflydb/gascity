@@ -500,6 +500,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if served, code := maybeRouteBdRoleSelector(cityPath, cfg, target, bdArgs, stdout, stderr); served {
+		return code
+	}
+
 	// `gc bd sql`, `gc bd query` and the selector verbs (`list`, `search`) are
 	// passthroughs to bd, and bd answers about the bd ledger only. On a split
 	// city a read that names a relocated class's beads comes back empty and exit
