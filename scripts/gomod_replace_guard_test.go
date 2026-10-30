@@ -54,7 +54,7 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 	})
 
 	t.Run("passes_reviewed_antfly_fork_pin", func(t *testing.T) {
-		out, code := runScript(t, "module example.com/mod\n\nreplace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030130905-51167f3f745a\n")
+		out, code := runScript(t, "module example.com/mod\n\nreplace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030171048-e8d6fc11a1be\n")
 		if code != 0 {
 			t.Fatalf("reviewed fork pin rejected: %d %s", code, out)
 		}

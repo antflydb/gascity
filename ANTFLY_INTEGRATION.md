@@ -466,3 +466,34 @@ with a positive timeout; bounded retries now release admission locks and run
 only before the requested mutation body. Its focused regression passes. Broader
 contracts and an optimized runtime build remain gates before deployment; this
 does not constitute completed embedded factory or soak acceptance.
+
+
+The SDK pin is now `v1.3.1-0.20261030171048-e8d6fc11a1be`.
+Infrastructure indexed queries capture a committed head for their directory,
+posting and row reads. Concurrent publications no longer force those reads to
+restart. Dependency batches use the dependency indexes, share one captured
+head, omit missing/edgeless IDs and deduplicate requests. Older indexed
+transports use version checks and retry the complete batch; legacy layouts
+retain their full-snapshot fallback. Conditional mutations continue to read and
+fence current state.
+
+A regression reproduces the previous full-workspace dependency-batch load.
+The fixed path and a query with a competing publication before every read
+stage pass; a stale conditional update is still refused. The full SDK backend
+gate passes 187 embedded/remote cases without skips with the production library
+from native PR [#1407](https://github.com/antflydb/antfly/pull/1407),
+commit `c0ac56e639`. The Gas City provider/command/module guard targets pass
+with this same SDK and library.
+
+The isolated embedded factory is stopped for its library upgrade. Quiescent
+public compaction preserved all 55,874 portable key/value pairs and namespace
+identities; its logical archive remained exactly 471,538 bytes. Fenced history
+collection scanned 6,809 records, deleted 5,116 and retained 1,693, again
+preserving that logical archive exactly. Those operations used the previous
+queue-fixed library; they are maintenance evidence, not a healthy factory soak.
+
+A controlled remote implementation-worker pane termination has been injected.
+The stock reconciler restarted the same session at generation 3 with a new
+instance token and redelivered its prior claim from generation 2. Workflow
+completion, actual merge verification and the post-recovery healthy hour remain
+open. Both factory acceptance monitors retain failed and warmup samples.

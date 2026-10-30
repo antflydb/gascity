@@ -441,6 +441,11 @@ func qualifyAntflyIndexedQueriesAndArchive(t *testing.T, target antfly.Target) {
 			t.Fatalf("native indexed dependencies: %+v %v", deps, err)
 		}
 	}
+	batch, e := source.DepListBatch([]string{all[1].ID, all[3].ID, "af-absent", all[1].ID})
+	wantBatch := map[string][]beads.Dep{all[1].ID: {{IssueID: all[1].ID, DependsOnID: all[0].ID, Type: "blocks"}}}
+	if e != nil || !reflect.DeepEqual(batch, wantBatch) {
+		t.Fatalf("native indexed dependency batch: %+v %v", batch, e)
+	}
 	archive, e := source.BackupSnapshot(context.Background())
 	if e != nil {
 		t.Fatal(e)
@@ -801,6 +806,133 @@ type sparseIndexSnapshotService struct {
 	}
 	loads        int
 	conflictOnce bool
+}
+
+func TestAntflyDependencyBatchUsesIndexesWithoutLoadingWorkspace(t *testing.T) {
+	tr := &sparseIndexSnapshotService{}
+	s, err := beads.NewAntflyStore(tr, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.CloseStore() })
+	var rows []beads.Bead
+	for n := 0; n < 4; n++ {
+		b, e := s.Create(beads.Bead{Title: fmt.Sprint(n), Type: "task"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		rows = append(rows, b)
+	}
+	want := map[string][]beads.Dep{}
+	for _, pair := range [][2]int{{0, 1}, {0, 2}, {2, 1}, {3, 1}} {
+		dep := beads.Dep{IssueID: rows[pair[0]].ID, DependsOnID: rows[pair[1]].ID, Type: "blocks"}
+		if err = s.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+			t.Fatal(err)
+		}
+		if pair[0] != 3 {
+			want[dep.IssueID] = append(want[dep.IssueID], dep)
+		}
+	}
+	tr.loads = 0
+	tr.reads = nil
+	got, err := s.DepListBatch([]string{rows[0].ID, rows[2].ID, "af-absent", rows[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.loads != 0 {
+		t.Fatalf("dependency batch loaded the entire workspace %d time(s)", tr.loads)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("indexed dependency batch = %+v, want %+v", got, want)
+	}
+	tr.conflictOnce = true
+	got, err = s.DepListBatch([]string{rows[0].ID, rows[2].ID})
+	if err != nil || tr.loads != 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("version-fenced batch retry = %+v, loads=%d, err=%v", got, tr.loads, err)
+	}
+}
+
+type advancingSnapshotService struct {
+	*sparseIndexSnapshotService
+	beforeRead func()
+	captures   int
+}
+
+func (s *advancingSnapshotService) ReadSnapshotRecords(ctx context.Context, field string, ids []string, expected *uint64) (antfly.SnapshotRecords, error) {
+	if s.beforeRead != nil {
+		s.beforeRead()
+	}
+	return s.sparseIndexSnapshotService.ReadSnapshotRecords(ctx, field, ids, expected)
+}
+
+func (s *advancingSnapshotService) CaptureSnapshotRecords(ctx context.Context) (antfly.SnapshotRecordReader, error) {
+	raw, version, err := s.antflySnapshotService.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.captures++
+	return &advancingSnapshotReader{owner: s, captured: &sparseIndexSnapshotService{antflySnapshotService: antflySnapshotService{data: raw, version: version}}}, nil
+}
+
+type advancingSnapshotReader struct {
+	owner    *advancingSnapshotService
+	captured *sparseIndexSnapshotService
+}
+
+func (r *advancingSnapshotReader) ReadSnapshotRecords(ctx context.Context, field string, ids []string, expected *uint64) (antfly.SnapshotRecords, error) {
+	if r.owner.beforeRead != nil {
+		r.owner.beforeRead()
+	}
+	return r.captured.ReadSnapshotRecords(ctx, field, ids, expected)
+}
+
+func TestAntflyIndexedReadProgressDuringPublicationKeepsWriteFences(t *testing.T) {
+	tr := &advancingSnapshotService{sparseIndexSnapshotService: &sparseIndexSnapshotService{}}
+	s, err := beads.NewAntflyStore(tr, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.CloseStore() })
+	row, err := s.Create(beads.Bead{Title: "selected", Metadata: map[string]string{"owner": "one"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A separate writer shares durable state but does not use the reader probe.
+	writer, err := beads.NewAntflyStore(&tr.antflySnapshotService, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.CloseStore() })
+	publications := 0
+	tr.beforeRead = func() {
+		publications++
+		if err := writer.SetMetadata(row.ID, "tick", fmt.Sprint(publications)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr.loads = 0
+	got, err := s.List(beads.ListQuery{Metadata: map[string]string{"owner": "one"}})
+	tr.beforeRead = nil
+	if err != nil || len(got) != 1 || got[0].Revision != row.Revision || got[0].Metadata["tick"] != "" {
+		t.Fatalf("compound read did not retain its captured publication: %+v %v", got, err)
+	}
+	if tr.captures != 1 || publications < 3 || tr.loads != 0 {
+		t.Fatalf("capture=%d publications=%d full-loads=%d", tr.captures, publications, tr.loads)
+	}
+	current, err := s.Get(row.ID)
+	if err != nil || current.Revision <= got[0].Revision {
+		t.Fatalf("fresh read missed the competing writer: %+v %v", current, err)
+	}
+	title := "must not publish"
+	err = s.UpdateIfMatch(row.ID, got[0].Revision, beads.UpdateOpts{Title: &title})
+	var stale *beads.PreconditionFailedError
+	if !errors.As(err, &stale) {
+		t.Fatalf("captured read bypassed the current mutation fence: %v", err)
+	}
+	current, err = s.Get(row.ID)
+	if err != nil || current.Title != "selected" {
+		t.Fatalf("stale mutation changed the record: %+v %v", current, err)
+	}
 }
 
 func (s *sparseIndexSnapshotService) Load(ctx context.Context) ([]byte, uint64, error) {

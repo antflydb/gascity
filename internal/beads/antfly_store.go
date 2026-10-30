@@ -422,6 +422,12 @@ func (s *AntflyStore) DepList(id, direction string) ([]Dep, error) {
 
 // DepListBatch reads a current committed Antfly snapshot.
 func (s *AntflyStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	if tr, ok := s.transport.(antfly.IndexedSnapshotTransport); ok {
+		rows, used, err := s.indexedDependencyBatch(tr, ids)
+		if used {
+			return rows, err
+		}
+	}
 	m, err := s.read(context.Background())
 	if err != nil {
 		return nil, err
@@ -859,7 +865,11 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 	if s.closed {
 		return nil, true, fmt.Errorf("antfly: store closed")
 	}
-	records, used, err := s.indexedPostingRecords(tr, "records", field, value, q.IDs)
+	reader, _, err := captureAntflyRecordReader(tr)
+	if err != nil {
+		return nil, true, err
+	}
+	records, used, err := s.indexedPostingRecords(reader, "records", field, value, q.IDs)
 	if err != nil || !used {
 		return nil, used, err
 	}
@@ -877,7 +887,7 @@ func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
 
 // The caller holds the store lifecycle read lock. Each step is fenced to the
 // captured head, so publication between directory, postings and rows retries.
-func (s *AntflyStore) indexedPostingRecords(tr antfly.IndexedSnapshotTransport, section, field, value string, directIDs []string) (map[string]json.RawMessage, bool, error) {
+func (s *AntflyStore) indexedPostingRecords(tr antfly.SnapshotRecordReader, section, field, value string, directIDs []string) (map[string]json.RawMessage, bool, error) {
 	for attempt := 0; attempt < 8; attempt++ {
 		ids := append([]string(nil), directIDs...)
 		var expected *uint64
@@ -1038,6 +1048,16 @@ func (s *AntflyStore) indexedDependencies(tr antfly.IndexedSnapshotTransport, id
 	if s.closed {
 		return nil, true, fmt.Errorf("antfly: store closed")
 	}
+	reader, _, err := captureAntflyRecordReader(tr)
+	if err != nil {
+		return nil, true, err
+	}
+	return s.readIndexedDependencies(reader, id, direction)
+}
+
+// The caller holds the lifecycle read lock and chooses the head used by all
+// directory, posting and dependency reads in the operation.
+func (s *AntflyStore) readIndexedDependencies(tr antfly.SnapshotRecordReader, id, direction string) ([]Dep, bool, error) {
 	field := "dependency-down"
 	if direction == "up" {
 		field = "dependency-up"
@@ -1063,4 +1083,71 @@ func (s *AntflyStore) indexedDependencies(tr antfly.IndexedSnapshotTransport, id
 		out = append(out, dep)
 	}
 	return out, true, nil
+}
+
+func captureAntflyRecordReader(tr antfly.IndexedSnapshotTransport) (antfly.SnapshotRecordReader, bool, error) {
+	if capture, ok := tr.(antfly.SnapshotRecordCapturer); ok {
+		reader, err := capture.CaptureSnapshotRecords(context.Background())
+		return reader, true, err
+	}
+	return tr, false, nil
+}
+
+// Older transports can still serve a coherent batch by validating every read
+// against one version and retrying the complete batch on a publication race.
+type fencedAntflyRecordReader struct {
+	reader  antfly.SnapshotRecordReader
+	version uint64
+}
+
+func (r fencedAntflyRecordReader) ReadSnapshotRecords(ctx context.Context, field string, ids []string, expected *uint64) (antfly.SnapshotRecords, error) {
+	if expected != nil && *expected != r.version {
+		return antfly.SnapshotRecords{}, antfly.ErrSnapshotConflict
+	}
+	return r.reader.ReadSnapshotRecords(ctx, field, ids, &r.version)
+}
+
+func (s *AntflyStore) indexedDependencyBatch(tr antfly.IndexedSnapshotTransport, ids []string) (map[string][]Dep, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, true, fmt.Errorf("antfly: store closed")
+	}
+	if len(ids) == 0 {
+		return map[string][]Dep{}, true, nil
+	}
+retry:
+	for attempt := 0; attempt < 8; attempt++ {
+		reader, captured, err := captureAntflyRecordReader(tr)
+		if err != nil {
+			return nil, true, err
+		}
+		if !captured {
+			head, e := tr.ReadSnapshotRecords(context.Background(), "records", nil, nil)
+			if e != nil {
+				return nil, true, e
+			}
+			reader = fencedAntflyRecordReader{reader: tr, version: head.Version}
+		}
+		result := make(map[string][]Dep)
+		seen := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			deps, used, err := s.readIndexedDependencies(reader, id, "down")
+			if errors.Is(err, antfly.ErrSnapshotConflict) {
+				continue retry
+			}
+			if err != nil || !used {
+				return nil, used, err
+			}
+			if len(deps) > 0 {
+				result[id] = deps
+			}
+		}
+		return result, true, nil
+	}
+	return nil, true, fmt.Errorf("antfly: dependency batch contention: %w", antfly.ErrSnapshotConflict)
 }
