@@ -14,6 +14,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/backend/antfly"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -2666,7 +2667,7 @@ const (
 )
 
 // retryOnNativeDoltSerializationConflict runs attempt until it succeeds, fails
-// with something other than a Dolt serialization conflict, or exhausts
+// with something other than a known rejected write conflict, or exhausts
 // nativeWriteAttempts.
 //
 // Re-running the whole attempt is safe: it re-reads inside a fresh transaction
@@ -2711,10 +2712,13 @@ func retryNativeDoltWrite(attempt func() error, retryable func(error) bool) erro
 	return err
 }
 
-// isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
-// serialization conflicts, which are known not to have committed and are safe
-// to retry. Ambiguous connection failures intentionally remain fail-fast.
+// isNativeDoltSerializationConflict also serves the native Antfly role adapter.
+// Its typed snapshot conflict proves a rejected publication. Error text that
+// merely resembles that sentinel and ambiguous outcomes must remain fail-fast.
 func isNativeDoltSerializationConflict(err error) bool {
+	if errors.Is(err, antfly.ErrSnapshotConflict) {
+		return true
+	}
 	if err == nil {
 		return false
 	}

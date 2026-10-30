@@ -257,3 +257,29 @@ Live stock factories still exhibit storage deadlines under concurrent
 housekeeping and session activity. Command admission and focused maintenance
 tests are not a full factory qualification; multi-rig code merges, crash and
 redelivery acceptance and sustained soak results remain outstanding.
+
+
+## Legacy graph batches and live gate qualification
+
+The pinned native SDK implements atomic `BatchApplier` for work graphs and
+advertises the compiler's `step` work type. Its staged operations retain
+lifecycle guards and publish through one conditional head. The shared work
+adapter recognizes the typed Antfly snapshot-conflict sentinel as a proved
+abort and retries within its existing bound. Lookalike error text and unknown
+commit outcomes remain fail-fast. Embedded and remote adapter tests cover the
+actual legacy root/step shape, forward metadata references, parents, assignment,
+blocker refusal, release and closure.
+
+Live `gc formula cook` followed by a refused dependent close, blocker close,
+dependent close and root close passes in both owned stock cities. Legacy step
+scaffolding remains intentionally excluded from the normal federated ready
+frontier. This does not establish legacy per-step worker dispatch compatibility.
+Live `gc bd gate create` timer gates also pass block/sweep/release/close against
+both engines, using stock `gc ready` for the complete city frontier.
+
+The immutable snapshot cache now charges payloads, keys and entry overhead to
+its 8 MiB budget. A 3,000-row regression that formerly reread 2,086 documents
+after one row changed now reads only the head, changed page and changed row.
+Fresh heads, hash validation, revisions and maintenance fences remain required.
+These fixes do not substitute for the remaining full-factory merge, crash,
+redelivery and sustained soak acceptance.

@@ -50,7 +50,7 @@ check_replace_rhs() {
 	# This downstream fork was explicitly requested to use antflydb/beads.
 	# Admit only its reviewed immutable SDK pin; local paths, other forks and
 	# any newer commit still follow the ordinary release policy below.
-	if [[ "$stripped" == "replace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030034314-0829ae079473" && "$path_part" == "github.com/antflydb/beads" && "$version" == "v1.3.1-0.20261030034314-0829ae079473" ]]; then
+	if [[ "$stripped" == "replace github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030045151-8a152a9ec0ec" && "$path_part" == "github.com/antflydb/beads" && "$version" == "v1.3.1-0.20261030045151-8a152a9ec0ec" ]]; then
 		return 0
 	fi
 
