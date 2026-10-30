@@ -376,7 +376,7 @@ controlled full-city crash; API running status alone is not a healthy soak.
 The SDK pin now includes dependency annotation round-trips, idempotent JSON
 metadata updates with revision fences, and conditional-blocks readiness/close
 checks. The immutable dependency is
-`v1.3.1-0.20261030110247-b06e8c75d5fe`; the module guard, guard fixture and
+`v1.3.1-0.20261030113015-065796f3e260`; the module guard, guard fixture and
 composition-boundary check admit that exact version. Local dynamic waits-for gates use the SDK's current-snapshot child evaluation. Cross-store dynamic gates remain explicitly unsupported.
 
 A fresh remote stock `implement` run completed with `gc.outcome=pass`, including
@@ -397,3 +397,14 @@ ready results from incomplete query candidates. Ordinary workspaces retain
 indexed reads. This is SDK compatibility evidence, not qualification of every
 legacy workflow in the stock factory. Cross-store dynamic fanout needs the
 owning graph plane.
+
+
+New infrastructure and work tables store private snapshot payloads, head fields
+and page directories with full-text indexing disabled for those properties.
+Public issue projection text remains searchable. Existing tables keep their
+schemas when opened and require an explicit migration and completed backfill.
+The combined SDK and Lite candidate passed all 178 backend cases, without skips;
+these gates are separate from runtime factory acceptance. Both fresh remote
+stock implement workflows completed with pass outcomes on both rigs, including
+publication and finalization after source closure. Embedded latency and a clean
+hour of runtime soak remain open acceptance requirements.
