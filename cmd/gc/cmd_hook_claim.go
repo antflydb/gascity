@@ -2292,6 +2292,14 @@ func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, iden
 			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
 	}
+	// An expanded graph owns its remaining lifecycle. Closing its source
+	// anchors is an expected implementation milestone, not permission to skip
+	// summary, checks, publication and the workflow-finalize latch. The legacy
+	// retirement heuristic is only for workflows that lack that graph contract.
+	if strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) == "graph.v2" &&
+		strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.WorkflowExpandedMetadataKey]), "true") {
+		return root.ID, false, nil
+	}
 	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	if convoyID == "" {
 		return root.ID, false, nil

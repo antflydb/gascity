@@ -339,3 +339,10 @@ to suppress retained migration copies before the global limit.
 The exact legacy `gc bd mol wisp ... --root-only --json` and `gc bd mol burn
 <root> --force --json` commands have now been exercised against both native
 transports. This does not qualify every Gas Town patrol or merge-queue formula.
+
+Expanded `graph.v2` workflows retain their graph-owned completion lifecycle
+after their source convoy becomes terminal. The legacy hook retirement
+heuristic must not skip their remaining checks, summary, publish and finalize
+steps. Root-only and legacy workflows keep the existing retirement rule.
+The live acceptance run exposed this stock hook interaction after both remote
+implementation anchors passed; historical skipped runs are retained as evidence.

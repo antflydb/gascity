@@ -442,3 +442,34 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 		t.Fatalf("claimed = %q, want root-1", claimedID)
 	}
 }
+
+func TestWorkflowInputDonePreservesExpandedGraphPostprocessing(t *testing.T) {
+	for _, memberState := range []string{"closed", "handed_off"} {
+		t.Run(memberState, func(t *testing.T) {
+			work, root, step := seedDoneWorkflow(t, memberState)
+			graph := beads.NewMemStoreFrom(100, []beads.Bead{root, step}, nil)
+			if err := graph.SetMetadataBatch(root.ID, map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2", beadmeta.WorkflowExpandedMetadataKey: "true"}); err != nil {
+				t.Fatal(err)
+			}
+			current, err := graph.Get(root.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, candidate := range []beads.Bead{current, step} {
+				id, done, err := workflowInputDoneAcross(graph, work, candidate, nil)
+				if err != nil || done || id != root.ID {
+					t.Fatalf("graph postprocessing retired: root=%s done=%v err=%v", id, done, err)
+				}
+			}
+			// Merely declaring graph.v2 on a root-only workflow does not disable
+			// legacy retirement; it still has no graph-owned completion latch.
+			if err := graph.SetMetadataBatch(root.ID, map[string]string{beadmeta.WorkflowExpandedMetadataKey: "false"}); err != nil {
+				t.Fatal(err)
+			}
+			_, done, err := workflowInputDoneAcross(graph, work, step, nil)
+			if err != nil || !done {
+				t.Fatalf("root-only retirement: done=%v err=%v", done, err)
+			}
+		})
+	}
+}
