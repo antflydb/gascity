@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/steveyegge/beads/backend"
 	antfly "github.com/steveyegge/beads/backend/antfly"
 )
 
@@ -724,4 +725,61 @@ func TestAntflyNoopTransitionsDoNotPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoPublication("already closed", func() error { return store.Close(row.ID) })
+}
+
+func TestAntflyNoopPreservesNativeAndRemoteHead(t *testing.T) {
+	for _, mode := range []string{"embedded", "remote"} {
+		t.Run(mode, func(t *testing.T) {
+			target := antfly.Target{Table: fmt.Sprintf("noop_%d", time.Now().UnixNano()), Workspace: "infra"}
+			if mode == "embedded" {
+				target.Library = os.Getenv("ANTFLY_TEST_LIBRARY")
+				if target.Library == "" {
+					t.Skip("ANTFLY_TEST_LIBRARY required")
+				}
+				target.Path = filepath.Join(t.TempDir(), "infra.aflite")
+			} else {
+				target.URL = os.Getenv("ANTFLY_TEST_URL")
+				if target.URL == "" {
+					t.Skip("ANTFLY_TEST_URL required")
+				}
+			}
+			tr, err := antfly.OpenSnapshot(context.Background(), target, backend.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := beads.NewAntflyStore(tr, "af")
+			if err != nil {
+				_ = tr.Close()
+				t.Fatal(err)
+			}
+			defer func() { _ = store.CloseStore() }()
+			row, err := store.Create(beads.Bead{Title: "coordination", Metadata: map[string]string{"state": "initial"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, v, err := tr.Load(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ok, err := store.CompareAndSetMetadataKey(row.ID, "state", "wrong", "next")
+			if err != nil || ok {
+				t.Fatalf("predicate refusal: %v %v", ok, err)
+			}
+			if err = store.Tx("no changes", func(beads.Tx) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			after, next, err := tr.Load(context.Background())
+			if err != nil || v != next || string(before) != string(after) {
+				t.Fatalf("no-op changed durable head: %d -> %d: %v", v, next, err)
+			}
+			ok, err = store.CompareAndSetMetadataKey(row.ID, "state", "initial", "next")
+			if err != nil || !ok {
+				t.Fatalf("actual transition: %v %v", ok, err)
+			}
+			_, next, err = tr.Load(context.Background())
+			if err != nil || next == v {
+				t.Fatalf("actual transition failed to publish: %d %v", next, err)
+			}
+		})
+	}
 }

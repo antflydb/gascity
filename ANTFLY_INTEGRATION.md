@@ -295,3 +295,10 @@ and requires an actual metadata transition to publish once. Native and remote
 infrastructure conformance tests pass. The SDK pin also includes bounded retry
 of explicit remote read-admission refusals, without retrying writes or unknown
 commit outcomes.
+
+
+A separate persistence test verifies the no-op invariant against real embedded
+and remote transports: refused metadata predicates and empty transaction
+callbacks preserve both exact committed bytes and the head token; a successful
+metadata transition changes that token. This supplements the transport-fixture
+publication-count regression.
