@@ -1332,6 +1332,7 @@ go_test(
         "cmd_stop_server_lifecycle_test.go",
         "cmd_stop_test.go",
         "cmd_storage_repair_sequence_test.go",
+        "cmd_storage_snapshot_test.go",
         "cmd_supervisor_city_test.go",
         "cmd_supervisor_fork_env_test.go",
         "cmd_supervisor_install_guard_test.go",

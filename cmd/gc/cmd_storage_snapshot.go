@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,20 @@ import (
 	"github.com/spf13/cobra"
 	antfly "github.com/steveyegge/beads/backend/antfly"
 )
+
+// The root silences Cobra errors, so operator actions must render failures.
+func storageMaintenanceCommand(cmd *cobra.Command, stderr io.Writer) *cobra.Command {
+	action := cmd.RunE
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		err := action(cmd, args)
+		if err != nil && !errors.Is(err, errExit) {
+			fmt.Fprintf(stderr, "gc storage %s: %v\n", cmd.Name(), err) //nolint:errcheck // best-effort stderr
+			return errExit
+		}
+		return err
+	}
+	return cmd
+}
 
 type storageSnapshotEngine interface {
 	BackupSnapshot(context.Context) ([]byte, error)

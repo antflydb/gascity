@@ -346,3 +346,20 @@ heuristic must not skip their remaining checks, summary, publish and finalize
 steps. Root-only and legacy workflows keep the existing retirement rule.
 The live acceptance run exposed this stock hook interaction after both remote
 implementation anchors passed; historical skipped runs are retained as evidence.
+
+Maintenance commands report configuration, binding and archive failures on
+stderr before returning a failing status. The embedded full-database API was
+exercised on the live qualification database: collection removed 6,468
+unreachable records, native compaction reduced a roughly 1.5 GB file to about
+48 MB, and logical archives before/after and from a fresh full-database restore
+were identical. These are operator maintenance checks, not proof of healthy
+automatic online collection or a production soak. In this native build, the
+Lite CLI portable backup selects the default namespace; use
+`backend/antfly.DatabaseBackupWriter` for a complete database archive including
+named tables and memory, and `RestoreDatabaseBackupFile` for a fresh target.
+
+A supervisor restart preserves long-lived control sessions. During an upgrade,
+restart those actors too: merely replacing the executable leaves their old
+code and open native handles running. The qualification run records a
+controlled loss of the stalled embedded worker and both control actors, followed
+by restart under the current reconciler; recovery completion remains under test.
