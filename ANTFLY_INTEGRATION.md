@@ -363,3 +363,11 @@ restart those actors too: merely replacing the executable leaves their old
 code and open native handles running. The qualification run records a
 controlled loss of the stalled embedded worker and both control actors, followed
 by restart under the current reconciler; recovery completion remains under test.
+
+
+Core work list/ready now uses the SDK's sparse issue postings and joins one
+revision, including full incident counts and ancestor deferral. The exact fork
+pin is 459f64481141. Embedded and remote backend gates passed, as did Gas City
+provider, command-boundary, and module guard gates. Factory qualification still
+shows native refresh/allocator stalls and housekeeping deadlines after the
+controlled full-city crash; API running status alone is not a healthy soak.
