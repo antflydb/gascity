@@ -371,3 +371,19 @@ pin is 459f64481141. Embedded and remote backend gates passed, as did Gas City
 provider, command-boundary, and module guard gates. Factory qualification still
 shows native refresh/allocator stalls and housekeeping deadlines after the
 controlled full-city crash; API running status alone is not a healthy soak.
+
+
+The SDK pin now includes dependency annotation round-trips, idempotent JSON
+metadata updates with revision fences, and conditional-blocks readiness/close
+checks. The immutable dependency is
+`v1.3.1-0.20261030103633-f475ce32c5c9`; the module guard, guard fixture and
+composition-boundary check admit that exact version. Dynamic waits-for gates
+remain unsupported.
+
+A fresh remote stock `implement` run completed with `gc.outcome=pass`, including
+summary publication and workflow finalization after the source task closed.
+The second rig is still under qualification. Embedded snapshot garbage
+collection scanned 8,340 records, deleted 4,870 and retained 3,470; logical
+archives before and after were identical (1,214,759 bytes). The shared
+supervisor retained its PID through collection and city re-registration.
+These results do not establish a healthy soak: embedded deadlines persist.

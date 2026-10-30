@@ -353,7 +353,7 @@ Before considering any task complete:
 
 The operator requested a native Antfly integration using the antflydb/beads
 fork. This branch permits exactly the public immutable SDK replacement
-`github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030034314-0829ae079473`.
+`github.com/steveyegge/beads => github.com/antflydb/beads v1.3.1-0.20261030103633-f475ce32c5c9`.
 The composition boundary test and scripts/check-gomod-replace.sh pin this one
 exception. Local checkout replacements and unreviewed updates remain forbidden.
 Infrastructure must use conditional Antfly snapshots and must not introduce a
