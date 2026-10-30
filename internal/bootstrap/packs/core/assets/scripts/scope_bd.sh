@@ -27,6 +27,7 @@ SCOPE_LAST_ERROR=""
 # (a file- or exec-backed store): there is nothing for these orders to do
 # there, which is not a failure.
 SCOPE_NOT_BD=0
+SCOPE_NATIVE=0
 
 # core_rig_names prints one configured rig name per line. Suspended rigs are
 # left out: gc does not touch a suspended scope, because any bd read restarts
@@ -97,8 +98,8 @@ $query
     scope_bd sql "--$format" "$query"
 }
 
-# scope_resolve_db asks bd which database backs the current scope and stores
-# it in SCOPE_DB. The name labels archive directories and anomalies and feeds
+# scope_resolve_db asks bd for a typed archive scope when supported, or the
+# SQL database identity on older providers, and stores it in SCOPE_DB. The name labels archive directories and anomalies and feeds
 # the workflow-root store-ref comparison; nothing dials it.
 scope_resolve_db() {
     local out
@@ -106,6 +107,19 @@ scope_resolve_db() {
     SCOPE_DB=""
     SCOPE_LAST_ERROR=""
     SCOPE_NOT_BD=0
+    SCOPE_NATIVE=0
+    # Native backends expose a stable project/branch archive label through
+    # info. Do not require a SQL engine merely to discover an archive scope.
+    if out=$(scope_bd info --json 2>/dev/null); then
+        db=$(printf '%s\n' "$out" | jq -r '.archive_scope // empty' 2>/dev/null) || db=""
+        case "$db" in
+            antfly_[a-f0-9]*)
+                case "$db" in *[!A-Za-z0-9_-]*) ;;
+                    *) SCOPE_DB="$db"; SCOPE_NATIVE=1; return 0 ;;
+                esac
+                ;;
+        esac
+    fi
     local err_file
     err_file=$(mktemp)
     if ! out=$(scope_sql_read csv "SELECT DATABASE()" 2>"$err_file"); then

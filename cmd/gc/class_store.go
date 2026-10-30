@@ -129,7 +129,7 @@ func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
 // otherwise. An unsplit city keeps its sessions on the work store, where they
 // belong to the reaper order, so the purge must see nothing there.
 func (cr *CityRuntime) infraSessionLedger() beads.SessionStore {
-	return beads.SessionStore{Store: relocatedSQLiteSessionLedger(cr.storageRoutes, cr.sessionsBeadStore().Store, cr.cityBeadStore())}
+	return beads.SessionStore{Store: relocatedSessionRetentionLedger(cr.storageRoutes, cr.sessionsBeadStore().Store, cr.cityBeadStore())}
 }
 
 // mailBeadStore returns the runtime's mail (message) bead store: the configured

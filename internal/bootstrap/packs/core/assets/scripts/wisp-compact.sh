@@ -21,7 +21,38 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "wisp-compact"
 
-CITY="${GC_CITY:-.}"
+CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
+CITY_ABS="$(cd "$CITY" && pwd -P)"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/scope_bd.sh"
+
+# Native work and coordination use typed, conditionally published retention.
+# Visit every active rig, then each infrastructure binding once. The shared
+# scope helper discovers this capability without requiring SQL.
+scope_select city
+if native_info=$(scope_bd info --json 2>/dev/null) && printf '%s\n' "$native_info" | jq -e '.archive_scope | strings | startswith("antfly_")' >/dev/null 2>&1; then
+    visited_native_scopes=""
+    compact_native_scope() {
+        scope_select "$@"
+        scope_resolve_db || return 1
+        [ "${SCOPE_NATIVE:-0}" -eq 1 ] || { echo "wisp-compact: $SCOPE_LABEL does not expose native retention" >&2; return 1; }
+        case " $visited_native_scopes " in *" $SCOPE_DB "*) return 0 ;; esac
+        local result
+        local native_args=(--policy compact)
+        [ "$SCOPE_KIND" != "rig" ] || native_args+=(--work-rig "$SCOPE_RIG")
+        result=$(cd "$CITY_ABS" && gc storage retain-work "${native_args[@]}") || return 1
+        echo "wisp-compact: $SCOPE_LABEL $result"
+        visited_native_scopes="$visited_native_scopes $SCOPE_DB"
+    }
+    compact_native_scope city
+    rig_names=$(core_rig_names)
+    while IFS= read -r rig_name; do
+        [ -n "$rig_name" ] || continue
+        compact_native_scope rig "$rig_name"
+    done <<< "$rig_names"
+    (cd "$CITY_ABS" && gc storage retain --all --policy compact)
+    exit 0
+fi
 
 # Get all ephemeral beads.
 ALL=$(gc bd list --json --all -n 0 2>/dev/null) || exit 0

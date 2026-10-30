@@ -1966,3 +1966,8 @@ func isNilInterface(value any) bool {
 		return false
 	}
 }
+
+// FencedReconcilerFactory advertises config-only eligibility for the current
+// reconciler. The opened stores must still pass its live revision, conditional
+// writer and atomic closer checks before any effects run.
+type FencedReconcilerFactory interface{ SupportsFencedReconciler() bool }

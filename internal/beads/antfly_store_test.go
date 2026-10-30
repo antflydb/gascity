@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -379,5 +382,171 @@ func TestAntflyClaimHasOneWinnerAndPreservesFence(t *testing.T) {
 	next, ok, e := s.Claim(b.ID, "next")
 	if e != nil || !ok || next.ClaimFence == winner.ClaimFence {
 		t.Fatalf("fence reused: %+v %v", next, e)
+	}
+}
+
+func TestNativeAntflyIndexedQueriesAndArchive(t *testing.T) {
+	lib := os.Getenv("ANTFLY_TEST_LIBRARY")
+	if lib == "" {
+		t.Skip("ANTFLY_TEST_LIBRARY required")
+	}
+	target := antfly.Target{Path: filepath.Join(t.TempDir(), "indexed.aflite"), Library: lib, Table: "infra", Workspace: "source"}
+	qualifyAntflyIndexedQueriesAndArchive(t, target)
+}
+
+func TestRemoteAntflyIndexedQueriesAndArchive(t *testing.T) {
+	endpoint := os.Getenv("ANTFLY_TEST_URL")
+	if endpoint == "" {
+		t.Skip("ANTFLY_TEST_URL required for a disposable remote server")
+	}
+	qualifyAntflyIndexedQueriesAndArchive(t, antfly.Target{URL: endpoint, Table: fmt.Sprintf("infra_qualification_%d", time.Now().UnixNano()), Workspace: "source", Database: "default", Namespace: "public"})
+}
+
+func qualifyAntflyIndexedQueriesAndArchive(t *testing.T, target antfly.Target) {
+	t.Helper()
+	source, e := beads.OpenAntflyStore(target, "af")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = source.CloseStore() }()
+	for n := 0; n < 8; n++ {
+		kind := "session"
+		if n%2 == 0 {
+			kind = "message"
+		}
+		if _, e = source.Create(beads.Bead{Title: fmt.Sprintf("row %d", n), Type: kind, Metadata: map[string]string{"owner": fmt.Sprint(n % 3)}, Labels: []string{"indexed"}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	all, e := source.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, q := range []beads.ListQuery{{Type: "session"}, {Metadata: map[string]string{"owner": "1"}}, {Label: "indexed", Limit: 3}, {Status: "open", Sort: beads.SortCreatedDesc, Limit: 2}, {IDs: []string{all[1].ID, all[3].ID}}} {
+		got, e := source.List(q)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if want := beads.ApplyListQuery(all, q); !reflect.DeepEqual(got, want) {
+			t.Fatalf("indexed query %+v differs: got=%+v want=%+v", q, got, want)
+		}
+	}
+	archive, e := source.BackupSnapshot(context.Background())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = source.RestoreSnapshot(context.Background(), archive); e == nil {
+		t.Fatal("rollback of a live ledger accepted")
+	}
+	target.Workspace = "restored"
+	restored, e := beads.OpenAntflyStore(target, "af")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = restored.CloseStore() }()
+	if e = restored.RestoreSnapshot(context.Background(), archive); e != nil {
+		t.Fatal(e)
+	}
+	for _, before := range all {
+		after, e := restored.Get(before.ID)
+		if e != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("restored row %s: %+v %v", before.ID, after, e)
+		}
+	}
+}
+
+func TestAntflySnapshotSelectionRollbackAndReadOnlyView(t *testing.T) {
+	store := freshAntflyStore(t)
+	b, e := store.Create(beads.Bead{Title: "retention fixture", Ephemeral: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	refusal := errors.New("selector failed")
+	e = store.RunSnapshot(context.Background(), func(view beads.Store) error {
+		if e := view.Close(b.ID); e != nil {
+			return e
+		}
+		return refusal
+	})
+	if !errors.Is(e, refusal) {
+		t.Fatal(e)
+	}
+	after, e := store.Get(b.ID)
+	if e != nil || after.Status != "open" || after.Revision != b.Revision {
+		t.Fatalf("failed selection published: %+v %v", after, e)
+	}
+	if e = store.ViewSnapshot(context.Background(), func(view beads.Store) error { return view.Close(b.ID) }); e != nil {
+		t.Fatal(e)
+	}
+	after, e = store.Get(b.ID)
+	if e != nil || after.Status != "open" || after.Revision != b.Revision {
+		t.Fatalf("preview published: %+v %v", after, e)
+	}
+}
+
+type interruptedAntflySnapshot struct {
+	antflySnapshotService
+	maintained bool
+	adoptions  int
+}
+
+func (s *interruptedAntflySnapshot) Load(ctx context.Context) ([]byte, uint64, error) {
+	if s.maintained {
+		return nil, 0, antfly.ErrSnapshotMaintenance
+	}
+	return s.antflySnapshotService.Load(ctx)
+}
+
+func (s *interruptedAntflySnapshot) CollectGarbage(_ context.Context) (antfly.SnapshotGCResult, error) {
+	return antfly.SnapshotGCResult{}, errors.New("unchecked collection must never be used")
+}
+
+func (s *interruptedAntflySnapshot) CollectGarbageChecked(_ context.Context, validate func(map[string]json.RawMessage) error) (antfly.SnapshotGCResult, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(s.data, &fields); err != nil {
+		return antfly.SnapshotGCResult{}, err
+	}
+	if err := validate(fields); err != nil {
+		return antfly.SnapshotGCResult{}, err
+	}
+	s.adoptions++
+	s.maintained = false
+	return antfly.SnapshotGCResult{Retained: 1}, nil
+}
+
+func TestAntflyInterruptedCollectionReopensAndChecksDomainBeforeAdoption(t *testing.T) {
+	ctx := context.Background()
+	transport := &interruptedAntflySnapshot{}
+	store, err := beads.NewAntflyStore(transport, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(beads.Bead{Title: "survives maintenance", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.maintained = true
+	reopened, err := beads.NewAntflyStore(transport, "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reopened.Get(record.ID); !errors.Is(err, antfly.ErrSnapshotMaintenance) {
+		t.Fatalf("read must remain fenced: %v", err)
+	}
+	foreign, err := beads.NewAntflyStore(transport, "foreign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = foreign.CollectGarbage(ctx); err == nil || transport.adoptions != 0 || !transport.maintained {
+		t.Fatalf("foreign workspace must not adopt fence: %v, adoptions=%d", err, transport.adoptions)
+	}
+	if _, err = reopened.CollectGarbage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if transport.adoptions != 1 {
+		t.Fatalf("adoptions=%d", transport.adoptions)
+	}
+	if got, err := reopened.Get(record.ID); err != nil || got.Title != record.Title {
+		t.Fatalf("resumed state=%+v, err=%v", got, err)
 	}
 }

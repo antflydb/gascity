@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,8 @@ type antflyState struct {
 	EdgeMetadata map[string]string       `json:"edge_metadata"`
 	Revisions    map[string]int64        `json:"revisions"`
 	Fences       map[string]int64        `json:"fences"`
+	IndexVersion int                     `json:"index_version,omitempty"`
+	Indexes      map[string][]string     `json:"indexes,omitempty"`
 }
 
 const antflySchema = "gascity-antfly-v1"
@@ -70,6 +73,13 @@ func NewAntflyStore(tr antfly.SnapshotTransport, prefix string, namespaces ...st
 	}
 	s := &AntflyStore{transport: tr, prefix: prefix, namespaces: collectReservedIDPrefixes(nil, namespaces), local: map[string]map[string]string{}}
 	_, _, _, err := s.load(context.Background())
+	// An interrupted collector owns a durable head fence. Keep an operator
+	// handle so checked collection can resume; ordinary reads and writes still
+	// fail closed until the fence is released. The collector validates the
+	// schema before adopting the fence, including for a newly opened handle.
+	if errors.Is(err, antfly.ErrSnapshotMaintenance) {
+		return s, nil
+	}
 	return s, err
 }
 
@@ -203,6 +213,7 @@ func (s *AntflyStore) change(ctx context.Context, retry bool, fn func(*MemStore,
 				delete(st.EdgeMetadata, k)
 			}
 		}
+		st.buildIndexes()
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
@@ -285,6 +296,25 @@ func (s *AntflyStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, err
 
 // Get reads a current committed Antfly snapshot.
 func (s *AntflyStore) Get(id string) (Bead, error) {
+	if tr, ok := s.transport.(antfly.IndexedSnapshotTransport); ok {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.closed {
+			return Bead{}, fmt.Errorf("antfly: store closed")
+		}
+		got, e := tr.ReadSnapshotRecords(context.Background(), "records", []string{id}, nil)
+		if e != nil {
+			return Bead{}, e
+		}
+		if e = s.validateIndexedFields(got.Fields); e != nil {
+			return Bead{}, e
+		}
+		raw, ok := got.Records[id]
+		if !ok {
+			return Bead{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		return decodeIndexedAntflyRecord(id, raw)
+	}
 	m, err := s.read(context.Background())
 	if err != nil {
 		return Bead{}, err
@@ -294,6 +324,9 @@ func (s *AntflyStore) Get(id string) (Bead, error) {
 
 // List reads a current committed Antfly snapshot.
 func (s *AntflyStore) List(query ListQuery) ([]Bead, error) {
+	if rows, used, e := s.indexedList(query); used {
+		return rows, e
+	}
 	m, err := s.read(context.Background())
 	if err != nil {
 		return nil, err
@@ -321,38 +354,22 @@ func (s *AntflyStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 // Children reads a current committed Antfly snapshot.
 func (s *AntflyStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
-	m, err := s.read(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	return m.Children(parentID, opts...)
+	return s.List(ListQuery{ParentID: parentID, IncludeClosed: HasOpt(opts, IncludeClosed), Sort: SortCreatedAsc, TierMode: TierModeFromOpts(opts)})
 }
 
 // ListByLabel reads a current committed Antfly snapshot.
 func (s *AntflyStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	m, err := s.read(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	return m.ListByLabel(label, limit, opts...)
+	return s.List(ListQuery{Label: label, Limit: limit, IncludeClosed: HasOpt(opts, IncludeClosed), Sort: SortCreatedDesc, TierMode: TierModeFromOpts(opts)})
 }
 
 // ListByAssignee reads a current committed Antfly snapshot.
 func (s *AntflyStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	m, err := s.read(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	return m.ListByAssignee(assignee, status, limit)
+	return s.List(ListQuery{Assignee: assignee, Status: status, Limit: limit, Sort: SortCreatedDesc})
 }
 
 // ListByMetadata reads a current committed Antfly snapshot.
 func (s *AntflyStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	m, err := s.read(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	return m.ListByMetadata(filters, limit, opts...)
+	return s.List(ListQuery{Metadata: filters, Limit: limit, IncludeClosed: HasOpt(opts, IncludeClosed), Sort: SortCreatedDesc, TierMode: TierModeFromOpts(opts)})
 }
 
 // DepList reads a current committed Antfly snapshot.
@@ -659,3 +676,244 @@ func (s *AntflyStore) Claim(id, assignee string) (Bead, bool, error) {
 
 // BeadsNudgeQueueMode opts this born-split engine into the canonical bead queue.
 func (*AntflyStore) BeadsNudgeQueueMode() bool { return true }
+
+// OwnsClosedSessionRetention declares that this dedicated infrastructure ledger
+// participates in the controller's bounded closed-session cleanup.
+func (s *AntflyStore) OwnsClosedSessionRetention() bool { return true }
+
+func antflyIndexKey(field, value, shard string) string {
+	raw, _ := json.Marshal([]string{field, value, shard})
+	return string(raw)
+}
+
+func (st *antflyState) buildIndexes() {
+	st.IndexVersion = 1
+	st.Indexes = map[string][]string{}
+	for id, r := range st.Records {
+		sum := sha256.Sum256([]byte(id))
+		shard := fmt.Sprintf("%02x", sum[0])
+		add := func(field, value string) {
+			key := antflyIndexKey(field, value, shard)
+			st.Indexes[key] = append(st.Indexes[key], id)
+		}
+		b := r.Bead
+		add("type", b.Type)
+		add("status", b.Status)
+		add("assignee", b.Assignee)
+		add("parent", b.ParentID)
+		for _, label := range b.Labels {
+			add("label", label)
+		}
+		for key, value := range b.Metadata {
+			add("metadata:"+key, value)
+		}
+	}
+	for _, ids := range st.Indexes {
+		sort.Strings(ids)
+	}
+}
+
+func (s *AntflyStore) validateIndexedFields(fields map[string]json.RawMessage) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	var schema, prefix string
+	if err := json.Unmarshal(fields["schema"], &schema); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(fields["prefix"], &prefix); err != nil {
+		return err
+	}
+	if schema != antflySchema || prefix != s.prefix {
+		return fmt.Errorf("antfly: workspace schema/prefix mismatch")
+	}
+	return nil
+}
+
+func decodeIndexedAntflyRecord(id string, raw json.RawMessage) (Bead, error) {
+	var r antflyRecord
+	if e := json.Unmarshal(raw, &r); e != nil {
+		return Bead{}, e
+	}
+	if r.Bead.ID != id {
+		return Bead{}, fmt.Errorf("antfly: corrupt indexed record key")
+	}
+	r.Bead.Revision = r.Revision
+	r.Bead.ClaimFence = r.Fence
+	return r.Bead, nil
+}
+
+func (s *AntflyStore) indexedList(q ListQuery) ([]Bead, bool, error) {
+	tr, ok := s.transport.(antfly.IndexedSnapshotTransport)
+	if !ok {
+		return nil, false, nil
+	}
+	if !q.HasFilter() && !q.AllowScan {
+		return nil, true, ErrQueryRequiresScan
+	}
+	field, value := "", ""
+	switch {
+	case len(q.IDs) > 0:
+	case len(q.Metadata) > 0:
+		keys := make([]string, 0, len(q.Metadata))
+		for k := range q.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		field = "metadata:" + keys[0]
+		value = q.Metadata[keys[0]]
+	case q.ParentID != "":
+		field = "parent"
+		value = q.ParentID
+	case q.Assignee != "":
+		field = "assignee"
+		value = q.Assignee
+	case q.Label != "":
+		field = "label"
+		value = q.Label
+	case q.Type != "":
+		field = "type"
+		value = q.Type
+	case q.Status != "":
+		field = "status"
+		value = q.Status
+	default:
+		return nil, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, true, fmt.Errorf("antfly: store closed")
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		ids := append([]string(nil), q.IDs...)
+		var expected *uint64
+		if len(ids) == 0 {
+			keys := make([]string, 256)
+			for n := range keys {
+				keys[n] = antflyIndexKey(field, value, fmt.Sprintf("%02x", n))
+			}
+			index, e := tr.ReadSnapshotRecords(context.Background(), "indexes", keys, nil)
+			if e != nil {
+				return nil, true, e
+			}
+			if e = s.validateIndexedFields(index.Fields); e != nil {
+				return nil, true, e
+			}
+			var format int
+			if raw := index.Fields["index_version"]; len(raw) > 0 {
+				if e = json.Unmarshal(raw, &format); e != nil {
+					return nil, true, e
+				}
+			}
+			if format != 1 {
+				return nil, false, nil
+			}
+			for _, raw := range index.Records {
+				var members []string
+				if e = json.Unmarshal(raw, &members); e != nil {
+					return nil, true, e
+				}
+				ids = append(ids, members...)
+			}
+			expected = &index.Version
+		}
+		rows, e := tr.ReadSnapshotRecords(context.Background(), "records", ids, expected)
+		if errors.Is(e, antfly.ErrSnapshotConflict) {
+			continue
+		}
+		if e != nil {
+			return nil, true, e
+		}
+		if e = s.validateIndexedFields(rows.Fields); e != nil {
+			return nil, true, e
+		}
+		beads := make([]Bead, 0, len(rows.Records))
+		for id, raw := range rows.Records {
+			b, e := decodeIndexedAntflyRecord(id, raw)
+			if e != nil {
+				return nil, true, e
+			}
+			beads = append(beads, b)
+		}
+		SortBeads(beads, SortCreatedAsc)
+		return ApplyListQuery(beads, q), true, nil
+	}
+	return nil, true, fmt.Errorf("antfly: indexed read contention: %w", antfly.ErrSnapshotConflict)
+}
+
+// BackupSnapshot returns a checksummed archive of this infrastructure workspace.
+func (s *AntflyStore) BackupSnapshot(ctx context.Context) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, fmt.Errorf("antfly: store closed")
+	}
+	return antfly.BackupSnapshot(ctx, s.transport)
+}
+
+// RestoreSnapshot restores an infrastructure archive only into a fresh workspace.
+// Existing ledgers are refused so old revision/ownership fences cannot reappear.
+func (s *AntflyStore) RestoreSnapshot(ctx context.Context, archive []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("antfly: store closed")
+	}
+	data, e := antfly.DecodeSnapshotBackup(archive)
+	if e != nil {
+		return e
+	}
+	var st antflyState
+	if e = json.Unmarshal(data, &st); e != nil {
+		return e
+	}
+	if st.Schema != antflySchema || st.Prefix != s.prefix {
+		return fmt.Errorf("antfly: archive schema/prefix mismatch")
+	}
+	_, _, v, e := s.load(ctx)
+	if e != nil {
+		return e
+	}
+	if v != 0 {
+		return fmt.Errorf("antfly: restore requires a fresh workspace")
+	}
+	return antfly.RestoreSnapshotBackup(ctx, s.transport, archive, v)
+}
+
+// RunSnapshot executes selection and mutation against one isolated domain
+// snapshot, then publishes once. Callback code is never replayed on conflict.
+func (s *AntflyStore) RunSnapshot(ctx context.Context, fn func(Store) error) error {
+	if fn == nil {
+		return fmt.Errorf("antfly: nil snapshot callback")
+	}
+	_, err := s.change(ctx, false, func(m *MemStore, _ *antflyState) error { return fn(m) })
+	return err
+}
+
+// ViewSnapshot gives a caller an isolated domain view whose edits are discarded.
+func (s *AntflyStore) ViewSnapshot(ctx context.Context, fn func(Store) error) error {
+	if fn == nil {
+		return fmt.Errorf("antfly: nil snapshot view callback")
+	}
+	m, err := s.read(ctx)
+	if err != nil {
+		return err
+	}
+	return fn(m)
+}
+
+// CollectGarbage reclaims immutable history in this dedicated infrastructure
+// workspace. Validate schema metadata before adopting any interrupted fence.
+func (s *AntflyStore) CollectGarbage(ctx context.Context) (antfly.SnapshotGCResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return antfly.SnapshotGCResult{}, fmt.Errorf("antfly: store closed")
+	}
+	collector, ok := s.transport.(antfly.SnapshotMaintenance)
+	if !ok {
+		return antfly.SnapshotGCResult{}, fmt.Errorf("antfly: transport does not support immutable history collection")
+	}
+	return collector.CollectGarbageChecked(ctx, s.validateIndexedFields)
+}

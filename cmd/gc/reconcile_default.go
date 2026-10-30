@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // v2DefaultFallbacks lists why an unset [daemon] session_reconciler resolves
@@ -53,8 +54,8 @@ func v2DefaultConditionalWritesFallback(cfg *config.City, lookupEnv func(string)
 
 // v2DefaultStoreKindFallbacks is the store-kind half of C0.7 read from config:
 // a fallback for each binding of the sessions and graph classes that is not a
-// sqlite-beads binding, the one kind config shows to fence and to list with
-// revisions. The work binding's store is decided when it opens (bd opens
+// provider that declares fenced reconciler eligibility. Live capability
+// checks remain authoritative. The work binding's store is decided when it opens (bd opens
 // native Dolt only when preflight admits it), and a file, exec or bd store is
 // one C0.7 refuses, so a class there falls back, naming the storage migration
 // that moves it; so does a binding whose provider config cannot classify.
@@ -76,7 +77,7 @@ func v2DefaultStoreKindFallbacks(cfg *config.City) []string {
 			fix = fmt.Sprintf(": moving %s there is a storage migration (configure [storage], then run %s)", c.them, storageMigrationCommand)
 		case !ok:
 			where = fmt.Sprintf("binding %q, which [storage.bindings] does not define", c.binding)
-		case binding.Provider == config.StorageProviderSQLiteBeads:
+		case fencedReconcilerProvider(binding.Provider):
 			continue
 		default:
 			where = fmt.Sprintf("binding %q (provider %q)", c.binding, binding.Provider)
@@ -84,4 +85,20 @@ func v2DefaultStoreKindFallbacks(cfg *config.City) []string {
 		out = append(out, fmt.Sprintf("the %s on %s, and v2 needs %s on a %s binding%s", c.classes, where, c.them, config.StorageProviderSQLiteBeads, fix))
 	}
 	return out
+}
+
+func fencedReconcilerProvider(provider string) bool {
+	if provider == config.StorageProviderSQLiteBeads {
+		return true
+	}
+	registry, err := newStorageProviderRegistry()
+	if err != nil {
+		return false
+	}
+	factory, err := registry.Lookup(storebinding.ProviderID(provider))
+	if err != nil {
+		return false
+	}
+	capability, ok := factory.(storebinding.FencedReconcilerFactory)
+	return ok && capability.SupportsFencedReconciler()
 }

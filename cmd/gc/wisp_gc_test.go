@@ -344,12 +344,12 @@ func TestWispGC_UnsplitCitySessionPurgeLeavesWorkStore(t *testing.T) {
 func TestRelocatedSQLiteSessionLedgerRequiresSQLite(t *testing.T) {
 	other := beads.NewMemStore()
 	routes := wholeSplitRoutes(other)
-	if got := relocatedSQLiteSessionLedger(routes, other, beads.NewMemStore()); got != nil {
-		t.Fatalf("relocatedSQLiteSessionLedger over a non-SQLite binding = %T, want nil", got)
+	if got := relocatedSessionRetentionLedger(routes, other, beads.NewMemStore()); got != nil {
+		t.Fatalf("relocatedSessionRetentionLedger over a non-SQLite binding = %T, want nil", got)
 	}
 	ledger := openSessionPurgeSQLiteStore(t)
-	if got := relocatedSQLiteSessionLedger(wholeSplitRoutes(ledger), ledger, beads.NewMemStore()); got != ledger {
-		t.Fatalf("relocatedSQLiteSessionLedger over the SQLite binding = %v, want the ledger", got)
+	if got := relocatedSessionRetentionLedger(wholeSplitRoutes(ledger), ledger, beads.NewMemStore()); got != ledger {
+		t.Fatalf("relocatedSessionRetentionLedger over the SQLite binding = %v, want the ledger", got)
 	}
 }
 
@@ -364,8 +364,8 @@ func TestRelocatedSQLiteSessionLedgerSeesThroughTheBindingCache(t *testing.T) {
 	if _, cached := sessions.(*beads.CachingStore); !cached {
 		t.Fatalf("sessions class is %T, want the controller's cache", sessions)
 	}
-	if got := relocatedSQLiteSessionLedger(routes, sessions, beads.NewMemStore()); got != sessions {
-		t.Fatalf("relocatedSQLiteSessionLedger over the cached ledger = %v, want the cache %v", got, sessions)
+	if got := relocatedSessionRetentionLedger(routes, sessions, beads.NewMemStore()); got != sessions {
+		t.Fatalf("relocatedSessionRetentionLedger over the cached ledger = %v, want the cache %v", got, sessions)
 	}
 }
 

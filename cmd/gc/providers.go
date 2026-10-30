@@ -1387,3 +1387,13 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 		return pattern != "" && strings.Contains(name, pattern)
 	}), nil
 }
+
+// providerSupportsBdCLI is independent of Dolt's native-store and process
+// lifecycle contract. The Antfly adapter runs the same bd command surface but
+// owns no Dolt server. Unknown executable providers remain refused.
+func providerSupportsBdCLI(provider string) bool {
+	if providerUsesBdStoreContract(provider) {
+		return true
+	}
+	return strings.HasPrefix(provider, "exec:") && filepath.Base(strings.TrimPrefix(provider, "exec:")) == "gc-beads-antfly"
+}

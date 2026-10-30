@@ -196,6 +196,16 @@ github.com/andreyvit/diff v0.0.0-20170406064948-c7f18ee00883 h1:bvNMNQO63//z+xNg
 github.com/andreyvit/diff v0.0.0-20170406064948-c7f18ee00883/go.mod h1:rCTlJbsFo29Kk6CurOXKm700vrz8f0KW0JNfpkRJY/8=
 github.com/antflydb/beads v1.3.1-0.20261029200716-58c1014e9b47 h1:L7LTglTi6mOsGjW5sura0lM7p/T9SW2oxdD1/4dTbfU=
 github.com/antflydb/beads v1.3.1-0.20261029200716-58c1014e9b47/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261029234643-7875495d9ceb h1:vbVq49+Ol4AsjazTvKiDWmztNnEZPSt6Z0VNnWIUio0=
+github.com/antflydb/beads v1.3.1-0.20261029234643-7875495d9ceb/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261030005223-ebf6a07e85b9 h1:mYREx1MQkcdQnx/TxuNAcRJ40m9iDF78W2wlszv3KyQ=
+github.com/antflydb/beads v1.3.1-0.20261030005223-ebf6a07e85b9/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261030005631-b0241f620906 h1:S3oKJ/OXEpOC0aIOWkzKm0opTv9hZUE9Yc27l7uaQ6I=
+github.com/antflydb/beads v1.3.1-0.20261030005631-b0241f620906/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261030010205-27af4fcb01b2 h1:cjIMi2+BbwTZusw8BmyyORLk7lWLpRh7EqFXD7pI9RA=
+github.com/antflydb/beads v1.3.1-0.20261030010205-27af4fcb01b2/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
+github.com/antflydb/beads v1.3.1-0.20261030013210-22ef533be1ed h1:Rv5S4ff+4IMPcqdwE1OpTp2544C5nSWEsWuJ5By5Lis=
+github.com/antflydb/beads v1.3.1-0.20261030013210-22ef533be1ed/go.mod h1:s65ThZk0KRh5VJ+dxrDqvhGyOlgIiTOtcsECrK1OIiM=
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
 github.com/apache/arrow/go/arrow v0.0.0-20200730104253-651201b0f516/go.mod h1:QNYViu/X0HXDHw7m3KXzWSVXIbfUvJqBFe6Gj8/pYA0=
 github.com/apache/arrow/go/arrow v0.0.0-20211112161151-bc219186db40 h1:q4dksr6ICHXqG5hm0ZW5IHyeEJXoIJSOZeBLmWPNeIQ=

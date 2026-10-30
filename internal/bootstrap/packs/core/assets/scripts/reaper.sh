@@ -218,6 +218,8 @@ TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
 ANOMALIES=""
 CITY_DB=""
+CITY_NATIVE=0
+NATIVE_SCOPES=0
 
 # run_budget_exhausted reports whether the run budget is spent, declaring the
 # partial outcome the first time.
@@ -928,6 +930,29 @@ subtree_ancestors() {
 # reap_scope runs Steps 1-6b against the current scope.
 reap_scope() {
     local DB="$SCOPE_DB"
+    if [ "${SCOPE_NATIVE:-0}" -eq 1 ]; then
+        local native_args=(--policy reap --stale-age "$MAX_AGE" --closed-age "$PURGE_AGE" --stale-issue-age "$STALE_ISSUE_AGE")
+        if [ "$SCOPE_KIND" = "rig" ]; then
+            native_args+=(--work-rig "$SCOPE_RIG")
+        fi
+        [ -z "$DRY_RUN" ] || native_args+=(--dry-run)
+        local native_result
+        if ! native_result=$(cd "$CITY_ABS" && gc storage retain-work "${native_args[@]}"); then
+            scope_anomaly "typed native retention failed for $SCOPE_DB"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "typed retention failed"
+            return 0
+        fi
+        echo "reaper: $SCOPE_LABEL native retention $native_result"
+        NATIVE_SCOPES=$((NATIVE_SCOPES + 1))
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + $(printf '%s' "$native_result" | jq '.closed | length')))
+            TOTAL_WOULD_PURGE=$((TOTAL_WOULD_PURGE + $(printf '%s' "$native_result" | jq '.deleted | length')))
+        else
+            TOTAL_CLOSED_WISPS=$((TOTAL_CLOSED_WISPS + $(printf '%s' "$native_result" | jq '.closed | length')))
+            TOTAL_PURGED=$((TOTAL_PURGED + $(printf '%s' "$native_result" | jq '.deleted | length')))
+        fi
+        return 0
+    fi
     local stale_wisp_count
     local rows
     local ids
@@ -1274,7 +1299,7 @@ resolve_scope_row() {
         order_outcome_scope_skipped "$SCOPE_LABEL" "bead store unreachable"
         return 0
     fi
-    SCOPE_TABLE="${SCOPE_TABLE}${SCOPE_DB}|${SCOPE_KIND}|${SCOPE_RIG}
+    SCOPE_TABLE="${SCOPE_TABLE}${SCOPE_DB}|${SCOPE_KIND}|${SCOPE_RIG}|${SCOPE_NATIVE:-0}
 "
 }
 
@@ -1299,10 +1324,12 @@ while IFS= read -r scope_db; do
     if printf '%s\n' "$rows" | awk -F'|' '$2 == "city" { found=1 } END { exit found ? 0 : 1 }'; then
         scope_select city
         CITY_DB="$scope_db"
+        CITY_NATIVE=$(printf '%s\n' "$rows" | awk -F'|' '$2 == "city" { print $4; exit }')
     else
         scope_select rig "$(printf '%s\n' "$rows" | awk -F'|' 'NR == 1 { print $3 }')"
     fi
     SCOPE_DB="$scope_db"
+    SCOPE_NATIVE=$(printf '%s\n' "$rows" | awk -F'|' 'NR == 1 { print $4 }')
     if run_budget_exhausted; then
         order_outcome_scope_skipped "$SCOPE_LABEL" "run budget exhausted before this scope"
         continue
@@ -1324,7 +1351,23 @@ done < <(printf '%s' "$SCOPE_TABLE" | awk -F'|' '!seen[$1]++ { print $1 }')
 # own clock stays GC_REAPER_SESSION_PURGE_AGE (default 720h). On an unsplit
 # city the wisp GC leaves sessions alone and this step is the only session
 # prune.
-if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
+# Native infrastructure is visited through typed snapshots, once per binding.
+# Closed sessions use the existing revision-checked lifecycle collector; no
+# session rows are admitted to the native core work ledger.
+if [ "$NATIVE_SCOPES" -gt 0 ]; then
+    native_retention_args=(--all --policy reap --stale-age "$MAX_AGE" --closed-age "$PURGE_AGE")
+    [ -z "$DRY_RUN" ] || native_retention_args+=(--dry-run)
+    if ! (cd "$CITY_ABS" && gc storage retain "${native_retention_args[@]}"); then
+        record_anomaly infrastructure "typed retention failed"
+    fi
+    native_session_args=(--all --policy sessions --closed-age "$SESSION_PURGE_AGE")
+    [ -z "$DRY_RUN" ] || native_session_args+=(--dry-run)
+    if ! (cd "$CITY_ABS" && gc storage retain "${native_session_args[@]}"); then
+        record_anomaly sessions "typed closed-session retention failed"
+    fi
+fi
+
+if [ "$CITY_NATIVE" -eq 0 ] && [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
     scope_select city
     SCOPE_DB="$CITY_DB"
     if [ -n "$SESSION_BEAD_PATTERN" ]; then

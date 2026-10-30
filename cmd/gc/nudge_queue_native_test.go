@@ -11,7 +11,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/maintenance"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -153,6 +155,114 @@ func TestAntflyNativeNudgeProbeKeepsPinnedBatchesWhole(t *testing.T) {
 	for _, item := range inflight {
 		if item.DeliveryBatch != key {
 			t.Fatal("partial repin publication")
+		}
+	}
+}
+
+func TestAntflyCurrentReconcilerLiveCapabilities(t *testing.T) {
+	s := nativeQueueStore(t)
+	if err := beads.StampOpenedStore(s, "AntflyStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, e := s.Create(beads.Bead{Title: "session", Type: "session"}); e != nil {
+		t.Fatal(e)
+	}
+	if e := v2CapabilityVerdict(v2ClassStoreCapabilities(s, s, false)); e != nil {
+		t.Fatalf("current reconciler rejected native capabilities: %v", e)
+	}
+}
+
+func TestAntflySessionRetentionUsesOnlyOwnedLedger(t *testing.T) {
+	s := nativeQueueStore(t)
+	if got := relocatedSessionRetentionLedger(wholeSplitRoutes(s), s, beads.NewMemStore()); got != s {
+		t.Fatalf("native retention ledger: %T", got)
+	}
+	if got := relocatedSessionRetentionLedger(wholeSplitRoutes(s), s, s); got != nil {
+		t.Fatal("retention must not sweep the work ledger")
+	}
+	other := nativeQueueStore(t)
+	if got := relocatedSessionRetentionLedger(wholeSplitRoutes(other), s, beads.NewMemStore()); got != nil {
+		t.Fatal("mismatched routed ledger accepted")
+	}
+}
+
+func TestAntflyStorageSnapshotFileDoesNotOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backup.json")
+	if e := writeStorageSnapshot(path, []byte("first")); e != nil {
+		t.Fatal(e)
+	}
+	if e := writeStorageSnapshot(path, []byte("second")); e == nil {
+		t.Fatal("overwrote existing archive")
+	}
+	raw, e := os.ReadFile(path)
+	if e != nil || string(raw) != "first" {
+		t.Fatalf("archive changed: %q %v", raw, e)
+	}
+}
+
+func TestAntflyTypedRetentionPreviewAndCommit(t *testing.T) {
+	store := nativeQueueStore(t)
+	record, err := store.Create(beads.Bead{Title: "keep coordination evidence", Type: "task", Ephemeral: true, Labels: []string{"keep"}, Assignee: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := maintenance.Policy{Now: time.Now().UTC(), Limit: 10}
+	preview, err := retainStorageSnapshot(context.Background(), store, "compact", options, true)
+	if err != nil || len(preview.Promoted) != 1 || preview.Promoted[0] != record.ID {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	unchanged, err := store.Get(record.ID)
+	if err != nil || !unchanged.Ephemeral || unchanged.Revision != record.Revision {
+		t.Fatalf("preview wrote state: %+v %v", unchanged, err)
+	}
+	committed, err := retainStorageSnapshot(context.Background(), store, "compact", options, false)
+	if err != nil || len(committed.Promoted) != 1 {
+		t.Fatalf("commit=%+v err=%v", committed, err)
+	}
+	got, err := store.Get(record.ID)
+	if err != nil || got.Ephemeral || got.NoHistory || got.Assignee != "worker" || got.Revision <= record.Revision {
+		t.Fatalf("retained state=%+v err=%v", got, err)
+	}
+}
+
+func TestAntflyTypedSessionRetentionPreservesChildrenAndOtherClasses(t *testing.T) {
+	store := nativeQueueStore(t)
+	create := func(kind string) beads.Bead {
+		t.Helper()
+		row, err := store.Create(beads.Bead{Title: kind, Type: kind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = store.Close(row.ID); err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	eligible := create("session")
+	held := create("session")
+	other := create("task")
+	child, err := store.Create(beads.Bead{Title: "live child", Type: "task", ParentID: held.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := maintenance.Policy{Now: time.Now().UTC().Add(45 * 24 * time.Hour), ClosedBefore: time.Now().UTC().Add(15 * 24 * time.Hour), Limit: 10}
+	preview, err := retainStorageSnapshot(context.Background(), store, "sessions", options, true)
+	if err != nil || len(preview.Deleted) != 1 || preview.Deleted[0] != eligible.ID {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	if _, err = store.Get(eligible.ID); err != nil {
+		t.Fatal("preview deleted session", err)
+	}
+	committed, err := retainStorageSnapshot(context.Background(), store, "sessions", options, false)
+	if err != nil || len(committed.Deleted) != 1 {
+		t.Fatalf("commit=%+v err=%v", committed, err)
+	}
+	if _, err = store.Get(eligible.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("eligible session remains: %v", err)
+	}
+	for _, id := range []string{held.ID, other.ID, child.ID} {
+		if _, err = store.Get(id); err != nil {
+			t.Fatalf("lost protected %s: %v", id, err)
 		}
 	}
 }

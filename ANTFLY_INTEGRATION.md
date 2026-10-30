@@ -87,16 +87,19 @@ The exact fork CLI inventory is embedded alongside the upstream inventories;
 adding it does not grant new commands or bypass the split-city command policy.
 
 The real city has successfully cooked a formula-v2 graph with four graph nodes,
-created a convoy in the work ledger, and persisted session mail and nudges. A
-legacy v1 standalone cook routes to work and remains unsupported there. Gas
-City's session reconciler v2 currently requires its SQLite-specific binding;
-this provider uses the legacy reconciler. `gc bd` forwarding to an exec work
-provider remains restricted; use `bd` directly for work and a supported explicit
-work_query, for example:
+created a convoy in the work ledger, and persisted session mail and nudges.
+The exact Antfly executable provider now admits normal `gc bd` forwarding under
+the existing command inventory, class routing and lifecycle guards. Other exec
+providers remain restricted. Beads supplies the shared boolean query role and
+its conformance suite; default factory queries still need end-to-end acceptance.
+Persistent legacy molecule records are admitted, while complete legacy formula
+cooking and migration remain under qualification.
 
-```toml
-work_query = "bd ready --metadata-field gc.routed_to=report/implementer --unassigned --json --limit 1"
-```
+The current session reconciler is selected through an explicit provider
+capability, then still verifies live revision, conditional-write and terminal
+close capabilities before effects. Antfly declares these capabilities and owns
+closed-session retention. The older coding trial used the legacy reconciler;
+it does not prove current-reconciler factory acceptance.
 
 This downstream module pins the reviewed immutable antflydb/beads SDK commit in
 go.mod. The module-boundary test and replacement guard admit only that exact
@@ -141,3 +144,51 @@ This final focused gate passed all four targets. The full bdflags, telemetry
 and provider targets also passed during implementation. This does not assert
 that the complete upstream test suite passed on this host. Native tests skip
 without `ANTFLY_TEST_LIBRARY`; keep it set when qualifying an embedded build.
+
+## Stock housekeeping and production maintenance
+
+Native infrastructure point and filtered reads use indexes published atomically
+with their records. Type, status, assignment, parent, label and exact metadata
+selectors retain the shared ListQuery ordering and tier semantics. Old snapshots
+remain readable and acquire indexes on their next write. Broad scans and writes
+still reconstruct the domain snapshot. Core work point reads have separate
+native indexes in the Beads backend; broad work queries remain a scaling task.
+
+`gc storage backup <binding> --file <new-file>` writes a checksummed logical
+archive without overwriting another file. `gc storage restore <binding> --file
+<archive>` validates schema/prefix and requires a fresh workspace, preserving
+revision and claim-fence tombstones without rolling a live ledger backward.
+Full native engine archives, including memory evidence outside these snapshots,
+are exposed by the Beads SDK and the engine administrative backup API.
+
+`gc storage gc <binding>` collects unreachable immutable documents under a
+resumable head fence. Opening an interrupted workspace gives maintenance an
+operator handle while ordinary reads/writes stay fenced. Before adoption,
+collection validates the exact schema/prefix. Every delete and release checks
+fence ownership. On the retained factory, collection removed 949 unreachable
+documents and kept 320; pre/post logical archives matched byte-for-byte.
+Branching core work requires a catalog-wide collection barrier and is refused
+by this dedicated-workspace collector.
+
+`gc storage retain <binding> --policy reap|compact|sessions --dry-run` previews
+selection in an isolated view; without `--dry-run` it publishes once through
+OCC. `--all` visits each dedicated infrastructure binding once. Queue deliveries,
+operation journals and external messaging retain their domain lifecycle owners.
+Session retention uses the existing conditional session collector, preserving
+open sessions and sessions with children. A failed publication reports no
+committed retention result.
+
+`gc storage retain-work --work-rig <rig> --policy reap|compact` provides the typed
+work-plane maintenance door; omit `--work-rig` for explicit city work. The
+opaque `gc bd antfly provider` command remains refused on split cities. Native
+pack paths use these typed commands instead of SQL selection. Foreign workflow
+ownership remains held until cross-store traversal can prove it drained.
+The JSONL order uses typed project/branch archive identities from `bd info` and
+successfully exported both retained city/rig scopes in local-only mode.
+
+Qualification includes native constructor/reopen/concurrency, indexed reads and
+logical restore; the same indexed-read/archive oracle also passes remotely.
+Thirty repeated embedded/remote cycles passed (a bounded stress run, not a long
+factory soak). A full stock factory acceptance run with multiple rigs,
+crash/restart/redelivery and real code merges remains outstanding, as do broad
+workflow qualification and catalog-fenced core immutable-history collection.

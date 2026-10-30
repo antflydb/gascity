@@ -945,3 +945,26 @@ func (m *MemStore) updatedAtLocked(i int) time.Time {
 	}
 	return now
 }
+
+// SetStorage changes a record's physical retention tier without changing its
+// identity, class metadata, assignment or dependencies.
+func (m *MemStore) SetStorage(id string, storage StorageClass) error {
+	ephemeral, noHistory, err := graphStorageFlags(storage)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	index := m.indexOfLocked(id)
+	if index < 0 {
+		return fmt.Errorf("setting storage on %q: %w", id, ErrNotFound)
+	}
+	if m.beads[index].Ephemeral == ephemeral && m.beads[index].NoHistory == noHistory {
+		return nil
+	}
+	m.beads[index].Ephemeral = ephemeral
+	m.beads[index].NoHistory = noHistory
+	m.beads[index].Revision++
+	m.beads[index].UpdatedAt = m.updatedAtLocked(index)
+	return nil
+}

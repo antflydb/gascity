@@ -825,3 +825,15 @@ func TestOpenStoreAtForCityExecUsesUniversalStoreTargetEnv(t *testing.T) {
 		t.Fatalf("GC_DOLT_HOST leaked as %q", got)
 	}
 }
+
+func TestAntflyCLIContractDoesNotEnableManagedDolt(t *testing.T) {
+	if !providerSupportsBdCLI("exec:/opt/antfly/gc-beads-antfly") {
+		t.Fatal("native adapter should expose the bd CLI")
+	}
+	if providerUsesBdStoreContract("exec:/opt/antfly/gc-beads-antfly") {
+		t.Fatal("native adapter must not select Dolt lifecycle")
+	}
+	if providerSupportsBdCLI("exec:/opt/antfly/unknown") {
+		t.Fatal("unrecognized exec must stay refused")
+	}
+}

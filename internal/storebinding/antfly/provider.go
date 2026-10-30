@@ -182,3 +182,7 @@ var (
 	_ storebinding.EngineOpener    = (*provider)(nil)
 	_ storebinding.BindingLocator  = (*provider)(nil)
 )
+
+// SupportsFencedReconciler admits native infrastructure to the live capability
+// gate; it does not bypass revision fidelity or boot-census validation.
+func (ProviderFactory) SupportsFencedReconciler() bool { return true }

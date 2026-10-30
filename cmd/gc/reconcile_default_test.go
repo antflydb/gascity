@@ -477,3 +477,14 @@ func TestSupervisorReconcilerBootLogNamesTheCityOnce(t *testing.T) {
 		t.Fatal("a new boot of the city logged nothing")
 	}
 }
+
+func TestAntflyDefaultReconcilerUsesFencedInfrastructure(t *testing.T) {
+	cfg := v2DefaultCity(func(c *config.City) {
+		binding := c.Storage.Bindings["infra"]
+		binding.Provider = "antfly-beads"
+		c.Storage.Bindings["infra"] = binding
+	})
+	if got := v2DefaultStoreKindFallbacks(cfg); len(got) != 0 {
+		t.Fatalf("native fenced infrastructure falls back: %v", got)
+	}
+}
